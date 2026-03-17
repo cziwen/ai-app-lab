@@ -87,6 +87,7 @@ class VoiceBotService(BaseModel):
     asr_buffer: str = ""  # Reservoir asr recognition result
     asr_no_input_duration: int = 0  # Cumulated no live_voice_call recognition duration
     asr_last_duration: int = 0  # Last asr recognition duration
+    asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
 
     class Config:
         """Configuration for this pydantic object."""
@@ -107,7 +108,9 @@ class VoiceBotService(BaseModel):
         self.asr_client = AsyncASRClient(
             app_key=self.asr_app_key, access_key=self.asr_access_key
         )
-        await self.tts_client.init()
+        # await self.tts_client.init() # 这里也不需要，因为 lazy init 会按需建立连接。
+        # await self.asr_client.init() # 这里有问题，需要comment 掉才可以正常使用。因为是 AI 先说话，这时初始化 client 会导致 server 挂起。
+
 
         if self.interview_mode:
             self.interview_judge = InterviewJudge(
@@ -176,6 +179,12 @@ class VoiceBotService(BaseModel):
                     continue
                 elif not self.asr_client.inited:
                     INFO("need recreate asr conn")
+                    inited_before = self.asr_client.inited
+                    self.asr_init_count += 1
+                    INFO(
+                        f"[ASR_INIT_COUNT] count={self.asr_init_count} source=runtime_reinit "
+                        f"service_id={id(self)} inited_before={inited_before}"
+                    )
                     await self.asr_client.init()
 
                 INFO(

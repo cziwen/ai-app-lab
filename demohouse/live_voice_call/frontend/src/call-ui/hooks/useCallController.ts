@@ -58,7 +58,7 @@ const transcriptFromScript = (script: MockCallScript): TranscriptItem[] => {
 export const useCallController = (): CallController => {
   const navigate = useNavigate();
   const location = useLocation();
-  const [mode, setMode] = useState<CallMode>('mock');
+  const [mode, setMode] = useState<CallMode>('real');
   const [debugOpen, setDebugOpen] = useState(false);
   const [messagePanelOpen, setMessagePanelOpen] = useState(false);
   const [camOn, setCamOn] = useState(false);
@@ -78,6 +78,7 @@ export const useCallController = (): CallController => {
   const mockPlaybackTimerRef = useRef<number | null>(null);
   const endingRef = useRef(false);
   const prevWsConnectedRef = useRef(false);
+  const connectingRef = useRef(false);
 
   const {
     wsConnected,
@@ -130,6 +131,7 @@ export const useCallController = (): CallController => {
       return;
     }
     endingRef.current = true;
+    connectingRef.current = false;
     cleanupCaptureResources();
     disconnectSession();
     if (botAudioPlaying || botSpeaking) {
@@ -148,6 +150,7 @@ export const useCallController = (): CallController => {
 
   const finishImmediately = useCallback(() => {
     endingRef.current = true;
+    connectingRef.current = false;
     setEndPhase('idle');
     setEndCountdownSec(null);
     cleanupCaptureResources();
@@ -156,14 +159,31 @@ export const useCallController = (): CallController => {
   }, [cleanupCaptureResources, location.search, navigate, shutdownSession]);
 
   useEffect(() => {
-    if (!(mode === 'mock' ? mockInCall : userSpeaking || botSpeaking)) {
+    if (mode !== 'real' || endingRef.current) {
       return;
     }
     const timer = window.setInterval(() => {
       setElapsedSec(prev => prev + 1);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [mode, mockInCall, userSpeaking, botSpeaking]);
+  }, [mode]);
+
+  useEffect(() => {
+    if (
+      mode !== 'real' ||
+      wsConnected ||
+      endingRef.current ||
+      connectingRef.current
+    ) {
+      return;
+    }
+    connectingRef.current = true;
+    handleConnect();
+    const guardTimer = window.setTimeout(() => {
+      connectingRef.current = false;
+    }, 1200);
+    return () => window.clearTimeout(guardTimer);
+  }, [handleConnect, mode, wsConnected]);
 
   useEffect(() => {
     if (mode !== 'mock' || !mockInCall) {
@@ -355,6 +375,7 @@ export const useCallController = (): CallController => {
         setEndPhase('idle');
         setEndCountdownSec(null);
         endingRef.current = false;
+        connectingRef.current = false;
         return;
       default:
     }
