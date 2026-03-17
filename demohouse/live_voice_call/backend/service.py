@@ -112,13 +112,13 @@ class VoiceBotService(BaseModel):
         if self.interview_mode:
             self.interview_judge = InterviewJudge(
                 llm_endpoint_id=self.llm_ep_id,
-                max_followups_per_question=2,
+                max_followups_per_question=1,
                 coverage_threshold=0.7,
             )
             self.interview_flow = InterviewFlow(
                 questions=INTERVIEW_QUESTIONS,
                 judge=self.interview_judge,
-                max_followups_per_question=2,
+                max_followups_per_question=1,
                 global_turn_limit=20,
             )
 
@@ -397,15 +397,22 @@ class VoiceBotService(BaseModel):
             )
             decision = answer_response.decision
 
-            INFO(
-                f"[Interview] Judge result: "
-                f"{answer_response.state_before}->{answer_response.state_after} "
-                f"q={answer_response.question_id} "
-                f"move_forward={decision.move_forward if decision else None} "
-                f"need_follow_up={decision.need_follow_up if decision else None} "
-                f"coverage={decision.coverage_score:.2f if decision else 0} "
-                f"reason={decision.reason if decision else 'none'}"
-            )
+            if decision:
+                INFO(
+                    f"[Interview] Judge result: "
+                    f"{answer_response.state_before}->{answer_response.state_after} "
+                    f"q={answer_response.question_id} "
+                    f"move_forward={decision.move_forward} "
+                    f"need_follow_up={decision.need_follow_up} "
+                    f"coverage={decision.coverage_score:.2f} "
+                    f"reason={decision.reason}"
+                )
+            else:
+                INFO(
+                    f"[Interview] Judge result: "
+                    f"{answer_response.state_before}->{answer_response.state_after} "
+                    f"q={answer_response.question_id} decision=None"
+                )
             for t in answer_response.transition_trace:
                 INFO(f"[Interview]   transition: {t}")
 

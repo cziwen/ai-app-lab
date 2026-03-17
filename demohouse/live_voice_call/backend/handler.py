@@ -85,6 +85,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         tts_access_key=TTS_ACCESS_TOKEN,
         asr_app_key=ASR_APP_ID,
         asr_access_key=ASR_ACCESS_TOKEN,
+        interview_mode=True,
     )
     await service.init()
     # Send a bot ready message
