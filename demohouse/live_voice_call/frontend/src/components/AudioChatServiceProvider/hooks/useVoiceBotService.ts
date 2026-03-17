@@ -71,7 +71,6 @@ export const useVoiceBotService = () => {
         .then(() => {
           setWsConnected(true);
           log('connect success');
-          recStart();
         })
         .catch(e => {
           log('connect failed');
@@ -102,6 +101,7 @@ export const useVoiceBotService = () => {
         switch (event) {
           case EventType.BotReady:
             wsReadyRef.current = true;
+            setChatMessages(prev => [...prev, { role: 'bot', content: '' }]);
             break;
           case EventType.SentenceRecognized:
             recStop();

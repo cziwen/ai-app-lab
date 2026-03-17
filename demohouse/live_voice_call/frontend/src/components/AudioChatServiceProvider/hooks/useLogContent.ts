@@ -11,15 +11,15 @@
 
 import { useContext } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
+import { logSender } from '@/utils/log_sender';
 
 export const useLogContent = () => {
   const { logContent, setLogContent } = useContext(AudioChatServiceContext);
 
   const log = (v: string) => {
-    setLogContent(prevState => [
-      ...prevState,
-      `[${new Date().toLocaleTimeString()}]\t${v}`,
-    ]);
+    const entry = `[${new Date().toLocaleTimeString()}]\t${v}`;
+    setLogContent(prevState => [...prevState, entry]);
+    logSender.enqueue(entry);
   };
   return {
     logContent,

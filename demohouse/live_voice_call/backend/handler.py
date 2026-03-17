@@ -10,8 +10,11 @@
 # limitations under the License.
 
 import asyncio
+import json
 import logging
+import os
 import uuid
+from logging.handlers import RotatingFileHandler
 from typing import AsyncIterable
 
 import websockets
@@ -21,7 +24,6 @@ from arkitect.utils.event_loop import get_event_loop
 from service import VoiceBotService
 from utils import *
 
-# replace with your asr API access
 ASR_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
 ASR_APP_ID = "2057385740"
 # replace with your tts API access
@@ -34,6 +36,38 @@ LLM_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+# Set up file logging
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Backend file logger — attached to "root" named logger to capture arkitect INFO() calls
+backend_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "backend.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+backend_file_handler.setLevel(logging.INFO)
+backend_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+)
+logging.getLogger("root").addHandler(backend_file_handler)
+
+# Frontend file logger — separate logger for frontend logs received via HTTP
+frontend_logger = logging.getLogger("frontend")
+frontend_logger.setLevel(logging.INFO)
+frontend_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "frontend.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+frontend_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(message)s")
+)
+frontend_logger.addHandler(frontend_file_handler)
+frontend_logger.propagate = False
 
 
 async def handler(websocket: websockets.WebSocketCommonProtocol, path):
@@ -106,14 +140,84 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         INFO(f"Connection closed: {e}")
 
 
+async def handle_frontend_log_request(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+):
+    """Minimal HTTP handler for frontend log ingestion."""
+    request_line = await reader.readline()
+    headers = {}
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        key, _, value = line.decode().partition(":")
+        headers[key.strip().lower()] = value.strip()
+
+    method, path, _ = request_line.decode().split(" ", 2)
+
+    if method == "POST" and path == "/api/frontend-logs":
+        content_length = int(headers.get("content-length", 0))
+        body = await reader.readexactly(content_length)
+        try:
+            log_entries = json.loads(body)
+            if isinstance(log_entries, list):
+                for entry in log_entries:
+                    frontend_logger.info(str(entry))
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: 2\r\n"
+                b"Access-Control-Allow-Origin: *\r\n"
+                b"\r\nOK"
+            )
+        except (json.JSONDecodeError, Exception):
+            response = (
+                b"HTTP/1.1 400 Bad Request\r\n"
+                b"Content-Length: 11\r\n"
+                b"Access-Control-Allow-Origin: *\r\n"
+                b"\r\nBad Request"
+            )
+    elif method == "OPTIONS":
+        response = (
+            b"HTTP/1.1 204 No Content\r\n"
+            b"Access-Control-Allow-Origin: *\r\n"
+            b"Access-Control-Allow-Methods: POST, OPTIONS\r\n"
+            b"Access-Control-Allow-Headers: Content-Type\r\n"
+            b"Access-Control-Max-Age: 86400\r\n"
+            b"\r\n"
+        )
+    else:
+        response = (
+            b"HTTP/1.1 404 Not Found\r\n"
+            b"Content-Length: 9\r\n"
+            b"\r\nNot Found"
+        )
+
+    writer.write(response)
+    await writer.drain()
+    writer.close()
+
+
 async def main():
     """
-    Main function to start the WebSocket server.
+    Main function to start the WebSocket server and HTTP log server.
     """
+    # Clear log files on each startup so logs are fresh per dev session
+    for log_file in ("backend.log", "frontend.log"):
+        log_path = os.path.join(LOG_DIR, log_file)
+        if os.path.exists(log_path):
+            open(log_path, "w").close()
+
     # Start the WebSocket server listening on 127.0.0.1:8888
-    server = await websockets.serve(handler, host="127.0.0.1", port=8888)
+    ws_server = await websockets.serve(handler, host="127.0.0.1", port=8888)
     INFO("WebSocket server is running on ws://127.0.0.1:8888")
-    await server.wait_closed()
+
+    # Start the HTTP log server on port 8889
+    http_server = await asyncio.start_server(
+        handle_frontend_log_request, host="127.0.0.1", port=8889
+    )
+    INFO("HTTP log server is running on http://127.0.0.1:8889")
+
+    await asyncio.gather(ws_server.wait_closed(), http_server.serve_forever())
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ StateIdle = "Idle"
 ASRInterval = 2000
 # Default tts live_voice_call
 DEFAULT_SPEAKER = "zh_female_sajiaonvyou_moon_bigtts"
+# Greeting message spoken by the bot before the user starts
+GREETING_TEXT = "你好，欢迎参加今天的面试。请先做一个简短的自我介绍吧。"
 
 
 class VoiceBotService(BaseModel):
@@ -75,12 +77,33 @@ class VoiceBotService(BaseModel):
         await self.asr_client.init()
         await self.tts_client.init()
 
+    async def _greeting_text_stream(self, text: str) -> AsyncIterable[str]:
+        """Yield a single greeting text for TTS processing (no LLM call)."""
+        yield text
+
+    async def send_greeting(self) -> AsyncIterable[WebEvent]:
+        """Send an initial greeting through TTS before the conversation starts."""
+        greeting_stream = self._greeting_text_stream(GREETING_TEXT)
+        async for payload in self.handle_tts_response(greeting_stream):
+            yield WebEvent.from_payload(payload)
+        self.history_messages.append(
+            ArkMessage(**{"role": "assistant", "content": GREETING_TEXT})
+        )
+
     async def handler_loop(
         self, inputs: AsyncIterable[WebEvent]
     ) -> AsyncIterable[WebEvent]:
         """
         Main loop for handling input events and generating responses.
         """
+        # Send greeting before starting the conversation loop
+        async for event in self.send_greeting():
+            yield event
+
+        # Reinit ASR client — the connection went stale during the greeting
+        await self.asr_client.close()
+        await self.asr_client.init()
+
         asr_responses = await self.handle_input_event(inputs)
         async for asr_recognized in self.handle_asr_response(asr_responses):
             # set state into InProgress
