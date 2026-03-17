@@ -1,0 +1,78 @@
+Simulation Timestamp: 2026-03-16T17:37:33.610526
+LLM Endpoint: ep-m-20260315140910-pfztd
+================================================================================
+[Interviewer][INTRO->ASK_QUESTION] q=-: 你好，欢迎参加面试。全程3道题，我会根据你的回答决定是否追问。
+  transition: INTRO -> ASK_QUESTION
+[Interviewer][ASK_QUESTION->WAIT_ANSWER] q=q1: 请用1分钟做自我介绍，重点说与你申请岗位相关的经历。
+  transition: ASK_QUESTION -> WAIT_ANSWER
+[Candidate]: 我叫小陈，做过两个AI应用项目。
+[Decision] move_forward=False need_follow_up=True coverage=0.10 reason=候选人的回答仅提及姓名和做过两个AI应用项目，未详细阐述项目细节、该经历与申请岗位的关联性以及自身的岗位相关优势，未覆盖必须涵盖的经历、岗位、优势三个要点，回答完整度较低。
+[FollowUpQuestion] 请你详细说明你所做的两个AI应用项目的具体内容，这些经历和你申请的岗位有什么关联，以及你在这些项目中体现出了哪些与岗位匹配的优势？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q1: 请你详细说明你所做的两个AI应用项目的具体内容，这些经历和你申请的岗位有什么关联，以及你在这些项目中体现出了哪些与岗位匹配的优势？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 我负责了从需求拆解到上线推进，跟产品和前端一起把版本做出来。
+[Decision] move_forward=False need_follow_up=True coverage=0.10 reason=候选人的回答过于笼统，未明确关联申请岗位，未说明具体的相关经历细节，也未提及自身适配岗位的优势，未覆盖必须涵盖的经历、岗位、优势三个要点。
+[FollowUpQuestion] 请你具体说明一下你所申请的岗位是什么？你负责的这个从需求拆解到上线推进的项目具体是什么？你在其中承担了哪些具体职责？以及这个经历体现了你哪些适配该申请岗位的优势？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q1: 请你具体说明一下你所申请的岗位是什么？你负责的这个从需求拆解到上线推进的项目具体是什么？你在其中承担了哪些具体职责？以及这个经历体现了你哪些适配该申请岗位的优势？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 项目目标是把用户留存提高10%，我负责方案设计和落地，最后提升了12%。
+[Decision] move_forward=True need_follow_up=False coverage=1.00 reason=follow_up_limit_reached
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_QUESTION
+[Interviewer][ASK_QUESTION->WAIT_ANSWER] q=q2: 请介绍一个你主导的项目，说明目标、你的动作和结果。
+  transition: ASK_QUESTION -> WAIT_ANSWER
+[Candidate]: 遇到复杂问题我会先拆成技术、业务、时间三个维度，再排优先级推进。
+[Decision] move_forward=False need_follow_up=True coverage=0.00 reason=候选人的回答未覆盖必须涵盖的项目目标、个人动作、项目结果三个要点，无法完整评估其项目主导相关能力
+[FollowUpQuestion] 可以具体介绍一个你主导的项目，详细说明该项目的目标、你为推进该项目所采取的具体动作以及最终达成的结果吗？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q2: 可以具体介绍一个你主导的项目，详细说明该项目的目标、你为推进该项目所采取的具体动作以及最终达成的结果吗？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 过程中会拉齐干系人，做里程碑检查，最后做复盘沉淀。
+[Decision] move_forward=False need_follow_up=True coverage=0.00 reason=候选人的回答仅笼统提及了项目相关的部分动作方向，未覆盖必须涵盖的项目目标、自身动作细节以及项目结果三个核心要点，信息不足，无法完整评估项目情况
+[FollowUpQuestion] 请你详细说明一下你主导的这个项目的具体目标是什么，你在项目中具体执行了哪些动作，以及最终取得了怎样的项目结果？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q2: 请你详细说明一下你主导的这个项目的具体目标是什么，你在项目中具体执行了哪些动作，以及最终取得了怎样的项目结果？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 补充一点，我会用指标来验证方案是否有效。
+[Decision] move_forward=True need_follow_up=False coverage=1.00 reason=follow_up_limit_reached
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_QUESTION
+[Interviewer][ASK_QUESTION->WAIT_ANSWER] q=q3: 当你遇到复杂问题时，通常如何拆解并推动解决？
+  transition: ASK_QUESTION -> WAIT_ANSWER
+[Candidate]: 我补充完了，我的核心思路是目标导向并按数据闭环。
+[Decision] move_forward=False need_follow_up=True coverage=0.00 reason=候选人的回答仅笼统提及目标导向和数据闭环的核心思路，未覆盖面试要求必须涵盖的拆解、推动、复盘三个要点，未展示具体的问题处理流程与做法，回答不够完整。
+[FollowUpQuestion] 请你详细说明当你遇到复杂问题时，具体是如何进行拆解、推动解决以及事后复盘的？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q3: 请你详细说明当你遇到复杂问题时，具体是如何进行拆解、推动解决以及事后复盘的？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 我补充完了，我的核心思路是目标导向并按数据闭环。
+[Decision] move_forward=False need_follow_up=True coverage=0.00 reason=候选人的回答仅提及笼统的核心思路方向，未覆盖面试要求必须涵盖的拆解、推动、复盘三个关键要点，回答内容不完整，无法充分评估其相关能力。
+[FollowUpQuestion] 请你详细说明当你遇到复杂问题时，具体是如何进行问题拆解、推动解决以及复盘的？
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> ASK_FOLLOWUP
+[Interviewer][ASK_FOLLOWUP->WAIT_ANSWER] q=q3: 请你详细说明当你遇到复杂问题时，具体是如何进行问题拆解、推动解决以及复盘的？
+  transition: ASK_FOLLOWUP -> WAIT_ANSWER
+[Candidate]: 我补充完了，我的核心思路是目标导向并按数据闭环。
+[Decision] move_forward=True need_follow_up=False coverage=1.00 reason=follow_up_limit_reached
+  transition: WAIT_ANSWER -> EVAL_ANSWER
+  transition: EVAL_ANSWER -> DECIDE
+  transition: DECIDE -> WRAP_UP
+[Interviewer][WRAP_UP->DONE] q=-: 好的，面试到这里结束。感谢你的时间，我们会尽快给出反馈。
+  transition: WRAP_UP -> DONE
+================================================================================
+Final state: DONE
