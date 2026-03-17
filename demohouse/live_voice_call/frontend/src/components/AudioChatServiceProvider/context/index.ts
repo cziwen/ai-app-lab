@@ -26,7 +26,6 @@ type AudioChatServiceContextType = {
   //
   serviceRef: MutableRefObject<VoiceBotService | null>;
   recorderRef: MutableRefObject<any>;
-  waveRef: MutableRefObject<any>;
   wsReadyRef: MutableRefObject<boolean>;
   //
   sendPcmBufferRef: MutableRefObject<Int16Array>;

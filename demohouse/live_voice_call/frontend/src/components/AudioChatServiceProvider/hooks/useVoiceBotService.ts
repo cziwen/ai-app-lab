@@ -35,8 +35,13 @@ export const useVoiceBotService = () => {
   const currentSpeakerRef = useSyncRef(currentSpeaker);
 
   const { setChatMessages } = useMessageList();
-  const { setWsConnected, setBotSpeaking, setBotAudioPlaying, setUserSpeaking } =
-    useAudioChatState();
+  const {
+    setWsConnected,
+    setBotSpeaking,
+    setBotAudioPlaying,
+    setBotAudioLevel,
+    setUserSpeaking,
+  } = useAudioChatState();
 
   const { wsUrl } = useWsUrl();
 
@@ -101,6 +106,7 @@ export const useVoiceBotService = () => {
   const resetMediaState = () => {
     setBotSpeaking(false);
     setBotAudioPlaying(false);
+    setBotAudioLevel(0);
     setUserSpeaking(false);
     setCurrentUserSentence('');
     setCurrentBotSentence('');
@@ -125,8 +131,12 @@ export const useVoiceBotService = () => {
       onStartPlayAudio: data => {
         setBotAudioPlaying(true);
       },
+      onAudioLevelChange: level => {
+        setBotAudioLevel(level);
+      },
       onStopPlayAudio: () => {
         setBotAudioPlaying(false);
+        setBotAudioLevel(0);
         if (!wsReadyRef.current) {
           return;
         }

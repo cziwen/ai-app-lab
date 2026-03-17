@@ -17,7 +17,9 @@ export const AudioChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [wsConnected, setWsConnected] = useState(false);
   const [botSpeaking, setBotSpeaking] = useState(false);
   const [botAudioPlaying, setBotAudioPlaying] = useState(false);
+  const [botAudioLevel, setBotAudioLevel] = useState(0);
   const [userSpeaking, setUserSpeaking] = useState(false);
+  const [userAudioLevel, setUserAudioLevel] = useState(0);
   const [chatMessages, setChatMessages] = useState<IMessage[]>([]);
   return (
     <AudioChatContext.Provider
@@ -28,8 +30,12 @@ export const AudioChatProvider: FC<PropsWithChildren> = ({ children }) => {
         setBotSpeaking,
         botAudioPlaying,
         setBotAudioPlaying,
+        botAudioLevel,
+        setBotAudioLevel,
         userSpeaking,
         setUserSpeaking,
+        userAudioLevel,
+        setUserAudioLevel,
         chatMessages,
         setChatMessages,
       }}

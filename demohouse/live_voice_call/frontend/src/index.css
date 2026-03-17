@@ -99,6 +99,7 @@ body {
 }
 
 .call-card {
+  --voice-level: 0;
   position: relative;
   min-height: min(52vh, 460px);
   border-radius: 16px;
@@ -115,14 +116,11 @@ body {
 .call-card.is-speaking {
   border-color: #2ecc71;
   box-shadow:
-    0 0 0 2px rgba(46, 204, 113, 0.65),
-    0 0 0 8px rgba(46, 204, 113, 0.2),
+    0 0 0 calc(1px + (var(--voice-level) * 2px))
+      rgba(46, 204, 113, calc(0.25 + (var(--voice-level) * 0.55))),
+    0 0 0 calc(4px + (var(--voice-level) * 10px))
+      rgba(46, 204, 113, calc(0.06 + (var(--voice-level) * 0.34))),
     0 18px 45px rgba(0, 0, 0, 0.28);
-}
-
-.wave {
-  width: 165px;
-  height: 45px;
 }
 
 .avatar-shell {

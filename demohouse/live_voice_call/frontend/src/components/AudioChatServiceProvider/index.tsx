@@ -19,7 +19,6 @@ export const AudioChatServiceProvider: FC<PropsWithChildren> = ({
   children,
 }) => {
   const [wsUrl, setWsUrl] = useState(WS_URL);
-  const waveRef = useRef<any>(null);
   const recorderRef = useRef<any>(null);
   const sendPcmBufferRef = useRef(new Int16Array(0));
   const sendChunkRef = useRef(null); //SampleData需要的上次转换结果，用于连续转换采样率
@@ -43,7 +42,6 @@ export const AudioChatServiceProvider: FC<PropsWithChildren> = ({
       value={{
         wsUrl,
         setWsUrl,
-        waveRef,
         recorderRef,
         sendPcmBufferRef,
         sendChunkRef,

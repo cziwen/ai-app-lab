@@ -84,7 +84,11 @@ export const useCallController = (): CallController => {
     botSpeaking,
     userSpeaking,
     botAudioPlaying,
+    botAudioLevel,
+    userAudioLevel,
     setUserSpeaking,
+    setBotAudioLevel,
+    setUserAudioLevel,
   } = useAudioChatState();
   const { chatMessages } = useMessageList();
   const { currentBotSentence, currentUserSentence } = useCurrentSentence();
@@ -114,10 +118,12 @@ export const useCallController = (): CallController => {
   const cleanupCaptureResources = useCallback(() => {
     recStop();
     releaseSessionMedia();
+    setBotAudioLevel(0);
+    setUserAudioLevel(0);
     setCamOn(false);
     setShareOn(false);
     setElapsedSec(0);
-  }, [recStop, releaseSessionMedia]);
+  }, [recStop, releaseSessionMedia, setBotAudioLevel, setUserAudioLevel]);
 
   const startAutoFinishFlow = useCallback(() => {
     if (endingRef.current) {
@@ -344,6 +350,8 @@ export const useCallController = (): CallController => {
       case 'switchMode':
         setMode(prev => (prev === 'mock' ? 'real' : 'mock'));
         setElapsedSec(0);
+        setBotAudioLevel(0);
+        setUserAudioLevel(0);
         setEndPhase('idle');
         setEndCountdownSec(null);
         endingRef.current = false;
@@ -365,6 +373,8 @@ export const useCallController = (): CallController => {
       elapsedSec,
       subtitle,
       endNotice,
+      interviewerAudioLevel: botAudioLevel,
+      userAudioLevel,
       interviewer: {
         id: 'interviewer',
         name: '面试官',

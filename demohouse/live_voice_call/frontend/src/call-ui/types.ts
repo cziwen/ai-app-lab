@@ -37,6 +37,8 @@ export interface CallUiState {
   elapsedSec: number;
   subtitle: string;
   endNotice?: string;
+  interviewerAudioLevel?: number;
+  userAudioLevel?: number;
   interviewer: CallParticipant;
   user: CallParticipant;
 }
@@ -103,8 +105,7 @@ export interface LiveSubtitleBarProps {
 export interface CallParticipantCardProps {
   participant: CallParticipant;
   speaking?: boolean;
-  showWave?: boolean;
-  waveClassName?: string;
+  audioLevel?: number;
 }
 
 export interface CallControlBarProps {

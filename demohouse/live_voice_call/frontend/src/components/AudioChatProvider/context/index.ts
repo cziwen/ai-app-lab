@@ -19,8 +19,12 @@ type AudioChatContextType = {
   setBotSpeaking: Dispatch<SetStateAction<boolean>>;
   botAudioPlaying: boolean;
   setBotAudioPlaying: Dispatch<SetStateAction<boolean>>;
+  botAudioLevel: number;
+  setBotAudioLevel: Dispatch<SetStateAction<number>>;
   userSpeaking: boolean;
   setUserSpeaking: Dispatch<SetStateAction<boolean>>;
+  userAudioLevel: number;
+  setUserAudioLevel: Dispatch<SetStateAction<number>>;
   //
   chatMessages: IMessage[];
   setChatMessages: Dispatch<SetStateAction<IMessage[]>>;

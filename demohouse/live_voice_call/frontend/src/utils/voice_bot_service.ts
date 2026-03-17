@@ -18,6 +18,7 @@ interface IVoiceBotService {
   handleJSONMessage: (json: JSONResponse) => void;
   onStartPlayAudio: (data: ArrayBuffer) => void;
   onStopPlayAudio: () => void;
+  onAudioLevelChange?: (level: number) => void;
   onClose?: (event: CloseEvent) => void;
   onError?: (event: Event) => void;
 }
@@ -27,10 +28,14 @@ export default class VoiceBotService {
   // private sonic:any;
   private audioCtx: AudioContext;
   private source: AudioBufferSourceNode | undefined;
+  private analyser: AnalyserNode | undefined;
+  private analyserData: Uint8Array | undefined;
+  private analyserFrameId: number | null = null;
   private audioChunks: ArrayBuffer[] = [];
   private handleJSONMessage: (json: JSONResponse) => void;
   private onStartPlayAudio: (data: ArrayBuffer) => void;
   private onStopPlayAudio: () => void;
+  private onAudioLevelChange?: (level: number) => void;
   private onClose?: (event: CloseEvent) => void;
   private onErrorCallback?: (event: Event) => void;
   protected playing = false;
@@ -41,6 +46,7 @@ export default class VoiceBotService {
     this.handleJSONMessage = props.handleJSONMessage;
     this.onStartPlayAudio = props.onStartPlayAudio;
     this.onStopPlayAudio = props.onStopPlayAudio;
+    this.onAudioLevelChange = props.onAudioLevelChange;
     this.onClose = props.onClose;
     this.onErrorCallback = props.onError;
   }
@@ -114,10 +120,16 @@ export default class VoiceBotService {
       new Uint8Array(data).buffer,
     );
     const source = this.audioCtx.createBufferSource();
+    const analyser = this.audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    this.analyser = analyser;
+    this.analyserData = new Uint8Array(analyser.fftSize);
     source.buffer = audioBuffer;
-    source.connect(this.audioCtx.destination);
+    source.connect(analyser);
+    analyser.connect(this.audioCtx.destination);
     source.addEventListener('ended', () => this.playNextAudioChunk());
     this.source = source;
+    this.startAnalyserLoop();
     source.start(0);
   }
   private safeSend(data: Blob | ArrayBuffer | string) {
@@ -130,6 +142,8 @@ export default class VoiceBotService {
   public stopAllMedia() {
     this.audioChunks = [];
     this.playing = false;
+    this.stopAnalyserLoop();
+    this.onAudioLevelChange?.(0);
     this.onStopPlayAudio();
     if (this.source) {
       try {
@@ -138,6 +152,11 @@ export default class VoiceBotService {
       this.source.disconnect();
       this.source = undefined;
     }
+    if (this.analyser) {
+      this.analyser.disconnect();
+      this.analyser = undefined;
+    }
+    this.analyserData = undefined;
     if (this.audioCtx.state !== 'closed') {
       this.audioCtx.close();
     }
@@ -159,5 +178,35 @@ export default class VoiceBotService {
     this.disposed = true;
     this.disconnectWsOnly();
     this.stopAllMedia();
+  }
+
+  private startAnalyserLoop() {
+    if (this.analyserFrameId !== null || !this.analyser || !this.analyserData) {
+      return;
+    }
+    const tick = () => {
+      if (!this.analyser || !this.analyserData) {
+        this.analyserFrameId = null;
+        return;
+      }
+      this.analyser.getByteTimeDomainData(this.analyserData);
+      let sum = 0;
+      for (let i = 0; i < this.analyserData.length; i += 1) {
+        const v = (this.analyserData[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / this.analyserData.length);
+      const normalizedLevel = Math.max(0, Math.min(1, (rms - 0.01) / 0.12));
+      this.onAudioLevelChange?.(normalizedLevel);
+      this.analyserFrameId = window.requestAnimationFrame(tick);
+    };
+    this.analyserFrameId = window.requestAnimationFrame(tick);
+  }
+
+  private stopAnalyserLoop() {
+    if (this.analyserFrameId !== null) {
+      window.cancelAnimationFrame(this.analyserFrameId);
+      this.analyserFrameId = null;
+    }
   }
 }

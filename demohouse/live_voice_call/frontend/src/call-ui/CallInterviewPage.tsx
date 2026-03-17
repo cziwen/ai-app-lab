@@ -35,11 +35,12 @@ export const CallInterviewPage = () => {
         <CallParticipantCard
           participant={uiState.interviewer}
           speaking={uiState.interviewerSpeaking}
-          showWave={uiState.mode === 'real'}
+          audioLevel={uiState.interviewerAudioLevel}
         />
         <CallParticipantCard
           participant={uiState.user}
           speaking={uiState.candidateSpeaking}
+          audioLevel={uiState.userAudioLevel}
         />
       </section>
 

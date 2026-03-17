@@ -12,7 +12,6 @@
 import { useContext } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
 import Recorder from 'recorder-core';
-import 'recorder-core/src/extensions/waveview';
 import { BIT_RATE, FRAME_SIZE, SAMPLE_RATE } from '@/constant';
 import { encodeAudioOnlyRequest } from '@/utils';
 import { EventType } from '@/types';
@@ -22,14 +21,13 @@ import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudio
 export const useAudioRecorder = () => {
   const {
     serviceRef,
-    waveRef,
     recorderRef,
     sendLastFrameRef,
     sendChunkRef,
     sendPcmBufferRef,
   } = useContext(AudioChatServiceContext);
   const { log } = useLogContent();
-  const { setUserSpeaking } = useAudioChatState();
+  const { setUserSpeaking, setUserAudioLevel } = useAudioChatState();
   const handleReset = () => {
     sendPcmBufferRef.current = new Int16Array(0);
     sendChunkRef.current = null;
@@ -122,8 +120,15 @@ export const useAudioRecorder = () => {
         // asyncEnd
       ) => {
         const buffer = buffers[buffers.length - 1];
-        waveRef.current &&
-          waveRef.current.input(buffer, powerLevel, bufferSampleRate);
+        const numericPower =
+          typeof powerLevel === 'number' && Number.isFinite(powerLevel)
+            ? powerLevel
+            : 0;
+        const normalizedLevel = Math.max(
+          0,
+          Math.min(1, (numericPower - 0.02) / 0.28),
+        );
+        setUserAudioLevel(normalizedLevel);
         for (let i = clearBufferIdx; i < newBufferIdx; i++) {
           buffers[i] = null;
         }
@@ -135,31 +140,11 @@ export const useAudioRecorder = () => {
 
     recorder.open(
       () => {
-        try {
-          const waveElem = document.querySelector('.wave');
-          if (
-            waveElem instanceof HTMLElement &&
-            waveElem.clientWidth > 0 &&
-            waveElem.clientHeight > 0
-          ) {
-            waveRef.current = Recorder.WaveView({
-              elem: waveElem,
-              width: waveElem.clientWidth,
-              height: waveElem.clientHeight,
-            });
-          } else {
-            waveRef.current = null;
-            log('warn | wave element missing or size is 0, skip wave view');
-          }
-        } catch (error) {
-          waveRef.current = null;
-          log('warn | wave view init failed, skip wave view');
-          console.warn(error);
-        }
         recorder.start();
         setUserSpeaking(true);
       },
       (msg: string, isUserNotAllow: boolean) => {
+        setUserAudioLevel(0);
         console.error(
           (isUserNotAllow ? 'UserNotAllow，' : '') + '无法录音:' + msg,
         );
@@ -172,9 +157,11 @@ export const useAudioRecorder = () => {
 
   const recStop = () => {
     if (!recorderRef.current) {
+      setUserAudioLevel(0);
       return;
     }
     setUserSpeaking(false);
+    setUserAudioLevel(0);
     recorderRef.current.close();
     handleProcess([], 0, true);
   };
@@ -182,6 +169,5 @@ export const useAudioRecorder = () => {
   return {
     recStart,
     recStop,
-    waveRef,
   };
 };
