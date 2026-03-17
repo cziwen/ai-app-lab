@@ -16,7 +16,7 @@ import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudio
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useAudioRecorder } from '@/components/AudioChatServiceProvider/hooks/useAudioRecorder';
 import VoiceBotService from '@/utils/voice_bot_service';
-import { EventType } from '@/types';
+import { EventType, type BotErrorPayload } from '@/types';
 import { useSpeakerConfig } from '@/components/AudioChatServiceProvider/hooks/useSpeakerConfig';
 import { useMessageList } from '@/components/AudioChatProvider/hooks/useMessageList';
 import { useSyncRef } from '@/hooks/useSyncRef';
@@ -35,12 +35,24 @@ export const useVoiceBotService = () => {
   const currentSpeakerRef = useSyncRef(currentSpeaker);
 
   const { setChatMessages } = useMessageList();
-  const { setWsConnected, setBotSpeaking, setBotAudioPlaying } =
+  const { setWsConnected, setBotSpeaking, setBotAudioPlaying, setUserSpeaking } =
     useAudioChatState();
 
   const { wsUrl } = useWsUrl();
 
   const { log } = useLogContent();
+  const parseBotError = (payload?: Record<string, any> | BotErrorPayload) => {
+    const error = (payload as BotErrorPayload | undefined)?.error;
+    const message =
+      typeof error?.message === 'string' && error.message.trim()
+        ? error.message
+        : '服务暂时不可用，请稍后重试';
+    return {
+      code: error?.code,
+      message,
+    };
+  };
+
   const handleBotUpdateConfig = () => {
     if (!serviceRef.current) {
       return;
@@ -105,7 +117,8 @@ export const useVoiceBotService = () => {
             break;
           case EventType.SentenceRecognized:
             recStop();
-            const content = payload?.sentence || '';
+            const content =
+              (payload as { sentence?: string } | undefined)?.sentence || '';
             setCurrentUserSentence(content);
             setChatMessages(prev => [
               ...prev,
@@ -114,30 +127,40 @@ export const useVoiceBotService = () => {
             ]);
             break;
           case EventType.TTSSentenceStart:
-            setCurrentBotSentence(prevSentence => {
-              const content = prevSentence + payload?.sentence || '';
-              setChatMessages(prev => {
-                const lastBotIndex = prev.findLastIndex(
-                  msg => msg.role === 'bot',
-                );
-                const lastBotMsg = prev[lastBotIndex];
-
-                const updatedBotMsg = {
-                  ...lastBotMsg,
-                  content: content,
+            const sentence =
+              (payload as { sentence?: string } | undefined)?.sentence || '';
+            setCurrentBotSentence(prevSentence => prevSentence + sentence);
+            setChatMessages(prev => {
+              const lastBotIndex = prev.findLastIndex(msg => msg.role === 'bot');
+              if (lastBotIndex < 0) {
+                return prev;
+              }
+              return prev.map((msg, idx) => {
+                if (idx !== lastBotIndex) {
+                  return msg;
+                }
+                return {
+                  ...msg,
+                  content: (msg.content || '') + sentence,
                 };
-                return prev.map((msg, idx) => {
-                  if (idx === lastBotIndex) {
-                    return updatedBotMsg;
-                  } else {
-                    return msg;
-                  }
-                });
               });
-              return content;
             });
             setBotSpeaking(true);
             break;
+          case EventType.BotError: {
+            const { code, message } = parseBotError(payload);
+            log('receive | bot error payload:' + JSON.stringify(payload));
+            if (code !== undefined) {
+              log('receive | bot error code:' + String(code));
+            }
+            Message.error(message);
+            setWsConnected(false);
+            setBotSpeaking(false);
+            setBotAudioPlaying(false);
+            setUserSpeaking(false);
+            wsReadyRef.current = false;
+            break;
+          }
           case EventType.TTSDone:
             setBotSpeaking(false);
             if (configNeedUpdateRef.current) {

@@ -53,6 +53,9 @@
 ### 2.4 Runtime Config Interfaces
 - `CallMode` for `mock | real` switching.
 - `DebugPanelState.wsUrl` for runtime WebSocket URL.
+- Public runtime endpoints are configurable via env vars:
+  - `MODERN_PUBLIC_WS_URL` (default: `ws://127.0.0.1:8888`)
+  - `MODERN_PUBLIC_LOG_URL` (default: `http://127.0.0.1:8889/api/frontend-logs`)
 
 ## 3. Exported API Surface
 
@@ -142,10 +145,21 @@ type WsContractEventMap = {
   SentenceRecognized: WsEventEnvelope<WsSentencePayload>;
   TTSSentenceStart: WsEventEnvelope<WsSentencePayload>;
   TTSDone: WsEventEnvelope<Record<string, never>>;
-  BotError: WsEventEnvelope<{ code?: number; message?: string }>;
+  BotError: WsEventEnvelope<{
+    error?: { code?: string | number; message?: string };
+  }>;
   BotUpdateConfig: WsEventEnvelope<{ speaker?: string }>;
   UserAudio: WsEventEnvelope<Record<string, never>>;
 };
+```
+
+### 4.5 Runtime Endpoint Config
+```ts
+const WS_URL =
+  process.env.MODERN_PUBLIC_WS_URL ?? 'ws://127.0.0.1:8888';
+const LOG_URL =
+  process.env.MODERN_PUBLIC_LOG_URL ??
+  'http://127.0.0.1:8889/api/frontend-logs';
 ```
 
 ## 5. Event Flow (Connect -> Call -> Recognize -> Reply -> Hangup)
@@ -197,6 +211,9 @@ Example script entry:
 2. `pnpm install`
 3. `pnpm run dev`
 4. open `http://localhost:8080/check-in?token=t1&session=s1`
+   - optional: set endpoint env vars before start:
+     - `MODERN_PUBLIC_WS_URL`
+     - `MODERN_PUBLIC_LOG_URL`
 5. complete sequential check-in:
    - speaker dialog -> play + waveform + confirm
    - microphone dialog -> waveform reacts to voice

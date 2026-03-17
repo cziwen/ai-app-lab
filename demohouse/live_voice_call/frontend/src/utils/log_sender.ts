@@ -9,7 +9,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const LOG_ENDPOINT = 'http://localhost:8889/api/frontend-logs';
+import { LOG_URL } from '@/config/endpoints';
+
+const LOG_ENDPOINT = LOG_URL;
 const FLUSH_INTERVAL_MS = 5000;
 const MAX_BATCH_SIZE = 50;
 const MAX_RETRIES = 3;

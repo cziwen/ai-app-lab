@@ -83,7 +83,9 @@ export type WsContractEventMap = {
   SentenceRecognized: WsEventEnvelope<WsSentencePayload>;
   TTSSentenceStart: WsEventEnvelope<WsSentencePayload>;
   TTSDone: WsEventEnvelope<Record<string, never>>;
-  BotError: WsEventEnvelope<{ code?: number; message?: string }>;
+  BotError: WsEventEnvelope<{
+    error?: { code?: string | number; message?: string };
+  }>;
   BotUpdateConfig: WsEventEnvelope<{ speaker?: string }>;
   UserAudio: WsEventEnvelope<Record<string, never>>;
 };

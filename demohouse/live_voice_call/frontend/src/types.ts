@@ -42,7 +42,15 @@ export interface IWebSocketResponse {
   messageType: number;
   payload: JSONResponse | ArrayBuffer;
 }
+
+export type BotErrorPayload = {
+  error?: {
+    code?: string | number;
+    message?: string;
+  };
+};
+
 export type JSONResponse = {
   event: EventType;
-  payload?: Record<string, any>;
+  payload?: Record<string, any> | BotErrorPayload;
 };

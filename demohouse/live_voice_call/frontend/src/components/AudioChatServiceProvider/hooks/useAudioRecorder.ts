@@ -135,11 +135,27 @@ export const useAudioRecorder = () => {
 
     recorder.open(
       () => {
-        waveRef.current = Recorder.WaveView({
-          elem: '.wave',
-          width: 165,
-          height: 45,
-        });
+        try {
+          const waveElem = document.querySelector('.wave');
+          if (
+            waveElem instanceof HTMLElement &&
+            waveElem.clientWidth > 0 &&
+            waveElem.clientHeight > 0
+          ) {
+            waveRef.current = Recorder.WaveView({
+              elem: waveElem,
+              width: waveElem.clientWidth,
+              height: waveElem.clientHeight,
+            });
+          } else {
+            waveRef.current = null;
+            log('warn | wave element missing or size is 0, skip wave view');
+          }
+        } catch (error) {
+          waveRef.current = null;
+          log('warn | wave view init failed, skip wave view');
+          console.warn(error);
+        }
         recorder.start();
         setUserSpeaking(true);
       },

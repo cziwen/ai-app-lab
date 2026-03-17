@@ -120,6 +120,11 @@ body {
     0 18px 45px rgba(0, 0, 0, 0.28);
 }
 
+.wave {
+  width: 165px;
+  height: 45px;
+}
+
 .avatar-shell {
   width: 200px;
   height: 200px;
