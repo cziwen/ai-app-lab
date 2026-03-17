@@ -1,5 +1,5 @@
 import { Message } from '@arco-design/web-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from '@modern-js/runtime/router';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
 import { useMessageList } from '@/components/AudioChatProvider/hooks/useMessageList';
@@ -8,6 +8,7 @@ import { useAudioRecorder } from '@/components/AudioChatServiceProvider/hooks/us
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useVoiceBotService } from '@/components/AudioChatServiceProvider/hooks/useVoiceBotService';
 import { useWsUrl } from '@/components/AudioChatServiceProvider/hooks/useWsUrl';
+import { useSessionAuth } from '@/auth/context';
 import type {
   CallController,
   CallControlAction,
@@ -27,6 +28,8 @@ const DEFAULT_SCRIPT: MockCallScript[] = [
     botSentence: '很好。你如何在实时语音场景里平衡延迟、可读性和可维护性？',
   },
 ];
+const AUTO_REDIRECT_SECONDS = 15;
+type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
 const formatDuration = (seconds: number) => {
   const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
@@ -68,9 +71,13 @@ export const useCallController = (): CallController => {
   const [mockLogs, setMockLogs] = useState<string[]>([]);
   const [mockMessages, setMockMessages] = useState<TranscriptItem[]>([]);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [endPhase, setEndPhase] = useState<EndPhase>('idle');
+  const [endCountdownSec, setEndCountdownSec] = useState<number | null>(null);
 
   const mockScriptIndexRef = useRef(0);
   const mockPlaybackTimerRef = useRef<number | null>(null);
+  const endingRef = useRef(false);
+  const prevWsConnectedRef = useRef(false);
 
   const {
     wsConnected,
@@ -83,8 +90,64 @@ export const useCallController = (): CallController => {
   const { currentBotSentence, currentUserSentence } = useCurrentSentence();
   const { wsUrl, setWsUrl } = useWsUrl();
   const { recStart, recStop } = useAudioRecorder();
-  const { handleConnect } = useVoiceBotService();
+  const { handleConnect, disconnectSession, shutdownSession } =
+    useVoiceBotService();
   const { logContent } = useLogContent();
+  const { mediaStreamsRef } = useSessionAuth();
+
+  const stopStream = useCallback((stream: MediaStream | null) => {
+    if (!stream) {
+      return;
+    }
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+  }, []);
+
+  const releaseSessionMedia = useCallback(() => {
+    stopStream(mediaStreamsRef.current.userMedia);
+    stopStream(mediaStreamsRef.current.displayMedia);
+    mediaStreamsRef.current.userMedia = null;
+    mediaStreamsRef.current.displayMedia = null;
+  }, [mediaStreamsRef, stopStream]);
+
+  const cleanupCaptureResources = useCallback(() => {
+    recStop();
+    releaseSessionMedia();
+    setCamOn(false);
+    setShareOn(false);
+    setElapsedSec(0);
+  }, [recStop, releaseSessionMedia]);
+
+  const startAutoFinishFlow = useCallback(() => {
+    if (endingRef.current) {
+      return;
+    }
+    endingRef.current = true;
+    cleanupCaptureResources();
+    disconnectSession();
+    if (botAudioPlaying || botSpeaking) {
+      setEndPhase('waiting_last_audio');
+      setEndCountdownSec(null);
+      return;
+    }
+    setEndPhase('countdown');
+    setEndCountdownSec(AUTO_REDIRECT_SECONDS);
+  }, [
+    botAudioPlaying,
+    botSpeaking,
+    cleanupCaptureResources,
+    disconnectSession,
+  ]);
+
+  const finishImmediately = useCallback(() => {
+    endingRef.current = true;
+    setEndPhase('idle');
+    setEndCountdownSec(null);
+    cleanupCaptureResources();
+    shutdownSession();
+    navigate(`/hangup-result${location.search}`);
+  }, [cleanupCaptureResources, location.search, navigate, shutdownSession]);
 
   useEffect(() => {
     if (!(mode === 'mock' ? mockInCall : userSpeaking || botSpeaking)) {
@@ -130,6 +193,43 @@ export const useCallController = (): CallController => {
     }, 900);
   }, [mode, mockInCall, setUserSpeaking]);
 
+  useEffect(() => {
+    if (mode !== 'real') {
+      prevWsConnectedRef.current = wsConnected;
+      return;
+    }
+    const wasConnected = prevWsConnectedRef.current;
+    if (wasConnected && !wsConnected && !endingRef.current) {
+      startAutoFinishFlow();
+    }
+    prevWsConnectedRef.current = wsConnected;
+  }, [mode, startAutoFinishFlow, wsConnected]);
+
+  useEffect(() => {
+    if (mode !== 'real' || endPhase !== 'waiting_last_audio') {
+      return;
+    }
+    if (botAudioPlaying || botSpeaking) {
+      return;
+    }
+    setEndPhase('countdown');
+    setEndCountdownSec(AUTO_REDIRECT_SECONDS);
+  }, [botAudioPlaying, botSpeaking, endPhase, mode]);
+
+  useEffect(() => {
+    if (endPhase !== 'countdown' || endCountdownSec === null) {
+      return;
+    }
+    if (endCountdownSec <= 0) {
+      navigate(`/hangup-result${location.search}`);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setEndCountdownSec(prev => (prev === null ? null : prev - 1));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [endCountdownSec, endPhase, location.search, navigate]);
+
   const subtitle = useMemo(() => {
     if (mode === 'mock') {
       return mockBotSentence || mockUserSentence;
@@ -142,6 +242,19 @@ export const useCallController = (): CallController => {
     currentBotSentence,
     currentUserSentence,
   ]);
+
+  const endNotice = useMemo(() => {
+    if (mode !== 'real') {
+      return undefined;
+    }
+    if (endPhase === 'waiting_last_audio') {
+      return '面试已结束，正在播放最后一句...';
+    }
+    if (endPhase === 'countdown' && endCountdownSec !== null) {
+      return `面试已结束，${endCountdownSec} 秒后自动跳转结果页`;
+    }
+    return undefined;
+  }, [endCountdownSec, endPhase, mode]);
 
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
@@ -213,9 +326,7 @@ export const useCallController = (): CallController => {
           navigate(`/hangup-result${location.search}`);
           return;
         }
-        recStop();
-        setElapsedSec(0);
-        navigate(`/hangup-result${location.search}`);
+        finishImmediately();
         return;
       case 'connect':
         if (mode === 'mock') {
@@ -233,6 +344,9 @@ export const useCallController = (): CallController => {
       case 'switchMode':
         setMode(prev => (prev === 'mock' ? 'real' : 'mock'));
         setElapsedSec(0);
+        setEndPhase('idle');
+        setEndCountdownSec(null);
+        endingRef.current = false;
         return;
       default:
     }
@@ -250,6 +364,7 @@ export const useCallController = (): CallController => {
       shareOn,
       elapsedSec,
       subtitle,
+      endNotice,
       interviewer: {
         id: 'interviewer',
         name: '面试官',

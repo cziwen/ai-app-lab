@@ -1,9 +1,16 @@
 import type { LiveSubtitleBarProps } from '@/call-ui/types';
 
 export const LiveSubtitleBar = ({ text }: LiveSubtitleBarProps) => {
+  const hasText = Boolean(text?.trim());
+
   return (
-    <div className="subtitle-bar" role="status" aria-live="polite">
-      {text || '字幕将在通话开始后显示...'}
+    <div
+      className={`subtitle-bar ${hasText ? '' : 'is-empty'}`.trim()}
+      role={hasText ? 'status' : undefined}
+      aria-live={hasText ? 'polite' : undefined}
+      aria-hidden={!hasText}
+    >
+      {hasText ? text : ' '}
     </div>
   );
 };

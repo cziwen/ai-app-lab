@@ -18,6 +18,8 @@ interface IVoiceBotService {
   handleJSONMessage: (json: JSONResponse) => void;
   onStartPlayAudio: (data: ArrayBuffer) => void;
   onStopPlayAudio: () => void;
+  onClose?: (event: CloseEvent) => void;
+  onError?: (event: Event) => void;
 }
 export default class VoiceBotService {
   private ws_url: string;
@@ -29,33 +31,46 @@ export default class VoiceBotService {
   private handleJSONMessage: (json: JSONResponse) => void;
   private onStartPlayAudio: (data: ArrayBuffer) => void;
   private onStopPlayAudio: () => void;
+  private onClose?: (event: CloseEvent) => void;
+  private onErrorCallback?: (event: Event) => void;
   protected playing = false;
+  private disposed = false;
   constructor(props: IVoiceBotService) {
     this.ws_url = props.ws_url;
     this.audioCtx = new AudioContext();
     this.handleJSONMessage = props.handleJSONMessage;
     this.onStartPlayAudio = props.onStartPlayAudio;
     this.onStopPlayAudio = props.onStopPlayAudio;
+    this.onClose = props.onClose;
+    this.onErrorCallback = props.onError;
   }
   public async connect(): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.ws_url);
       ws.onopen = () => {
+        if (this.audioCtx.state === 'closed') {
+          this.audioCtx = new AudioContext();
+        }
+        this.disposed = false;
         this.ws = ws;
         resolve(ws);
       };
       ws.onerror = e => {
         reject(e);
-        this.onError(e);
+        this.onErrorCallback?.(e);
       };
       ws.onmessage = e => this.onMessage(e);
+      ws.onclose = e => {
+        this.ws = undefined;
+        this.onClose?.(e);
+      };
     });
   }
 
   // 发送消息
   public sendMessage(message: WebRequest) {
     const data = pack(message);
-    this.ws?.send(data);
+    this.safeSend(data);
   }
 
   // 接收消息
@@ -72,7 +87,8 @@ export default class VoiceBotService {
         // handleMessage?.(json);
       });
     } catch (e) {
-      this.onError(e);
+      console.error(e);
+      this.onErrorCallback?.(e as Event);
     }
   }
   private async handleAudioOnlyResponse(data: ArrayBuffer) {
@@ -84,6 +100,10 @@ export default class VoiceBotService {
     }
   }
   private async playNextAudioChunk() {
+    if (this.disposed) {
+      this.playing = false;
+      return;
+    }
     const data = this.audioChunks.shift();
     if (!data) {
       this.onStopPlayAudio();
@@ -100,17 +120,44 @@ export default class VoiceBotService {
     this.source = source;
     source.start(0);
   }
-  private onError(e: any) {
-    console.error(e);
-    this.dispose();
+  private safeSend(data: Blob | ArrayBuffer | string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('[VoiceBotService] skip send: websocket is not OPEN');
+      return;
+    }
+    this.ws.send(data);
   }
-  private dispose() {
-    this.ws?.close();
-    this.reset();
-  }
-  private reset() {
+  public stopAllMedia() {
     this.audioChunks = [];
-    this.source?.stop();
-    this.source = undefined;
+    this.playing = false;
+    this.onStopPlayAudio();
+    if (this.source) {
+      try {
+        this.source.stop();
+      } catch (_e) {}
+      this.source.disconnect();
+      this.source = undefined;
+    }
+    if (this.audioCtx.state !== 'closed') {
+      this.audioCtx.close();
+    }
+  }
+  public disconnectWsOnly() {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      this.ws.close();
+    }
+    this.ws = undefined;
+  }
+  public shutdown() {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.disconnectWsOnly();
+    this.stopAllMedia();
   }
 }

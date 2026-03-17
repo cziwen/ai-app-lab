@@ -36,6 +36,7 @@ export interface CallUiState {
   shareOn: boolean;
   elapsedSec: number;
   subtitle: string;
+  endNotice?: string;
   interviewer: CallParticipant;
   user: CallParticipant;
 }

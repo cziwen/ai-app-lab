@@ -92,20 +92,55 @@ export const useVoiceBotService = () => {
     }, 0);
   };
 
+  const resetWsState = () => {
+    wsReadyRef.current = false;
+    setWsConnected(false);
+    setUserSpeaking(false);
+  };
+
+  const resetMediaState = () => {
+    setBotSpeaking(false);
+    setBotAudioPlaying(false);
+    setUserSpeaking(false);
+    setCurrentUserSentence('');
+    setCurrentBotSentence('');
+  };
+
+  const disconnectSession = () => {
+    wsReadyRef.current = false;
+    serviceRef.current?.disconnectWsOnly();
+    resetWsState();
+  };
+
+  const shutdownSession = () => {
+    wsReadyRef.current = false;
+    serviceRef.current?.shutdown();
+    resetWsState();
+    resetMediaState();
+  };
+
   useEffect(() => {
-    serviceRef.current = new VoiceBotService({
+    const service = new VoiceBotService({
       ws_url: wsUrl,
       onStartPlayAudio: data => {
         setBotAudioPlaying(true);
       },
       onStopPlayAudio: () => {
         setBotAudioPlaying(false);
-        setCurrentUserSentence('');
-        setCurrentBotSentence('');
         if (!wsReadyRef.current) {
           return;
         }
+        setCurrentUserSentence('');
+        setCurrentBotSentence('');
         recStart();
+      },
+      onClose: () => {
+        log('ws closed');
+        resetWsState();
+      },
+      onError: event => {
+        log('ws error');
+        console.error(event);
       },
       handleJSONMessage: msg => {
         const { event, payload } = msg;
@@ -154,11 +189,8 @@ export const useVoiceBotService = () => {
               log('receive | bot error code:' + String(code));
             }
             Message.error(message);
-            setWsConnected(false);
-            setBotSpeaking(false);
-            setBotAudioPlaying(false);
-            setUserSpeaking(false);
-            wsReadyRef.current = false;
+            resetWsState();
+            resetMediaState();
             break;
           }
           case EventType.TTSDone:
@@ -170,9 +202,18 @@ export const useVoiceBotService = () => {
         }
       },
     });
+    serviceRef.current = service;
+    return () => {
+      service.shutdown();
+      if (serviceRef.current === service) {
+        serviceRef.current = null;
+      }
+    };
   }, [wsUrl]);
 
   return {
     handleConnect,
+    disconnectSession,
+    shutdownSession,
   };
 };

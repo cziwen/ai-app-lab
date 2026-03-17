@@ -29,6 +29,7 @@ export const CallInterviewPage = () => {
           </span>
         </div>
       </header>
+      {uiState.endNotice && <div className="end-notice">{uiState.endNotice}</div>}
 
       <section className="call-grid">
         <CallParticipantCard

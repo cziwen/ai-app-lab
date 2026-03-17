@@ -171,6 +171,23 @@ body {
   word-break: break-word;
 }
 
+.subtitle-bar.is-empty {
+  visibility: hidden;
+}
+
+.end-notice {
+  align-self: center;
+  width: fit-content;
+  max-width: min(920px, 92%);
+  border-radius: 10px;
+  padding: 8px 14px;
+  background: rgba(255, 196, 95, 0.16);
+  border: 1px solid rgba(255, 196, 95, 0.35);
+  color: #ffe7b0;
+  text-align: center;
+  line-height: 1.4;
+}
+
 .control-bar {
   align-self: center;
   width: min(760px, 100%);
