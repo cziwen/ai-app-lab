@@ -22,15 +22,14 @@ import websockets
 from arkitect.telemetry.logger import INFO
 from arkitect.utils.event_loop import get_event_loop
 from service import VoiceBotService
+from startup_self_check import (
+    format_self_check_lines,
+    load_runtime_config,
+    run_startup_self_check,
+)
 from utils import *
 
-ASR_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
-ASR_APP_ID = "2057385740"
-# replace with your tts API access
-TTS_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
-TTS_APP_ID = "2057385740"
-# replace with your ark endpoint
-LLM_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
+RUNTIME_CONFIG = load_runtime_config()
 
 # Configure logging
 logging.basicConfig(
@@ -80,11 +79,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     """
     # Create a VoiceBotService instance and initialize it
     service = VoiceBotService(
-        llm_ep_id=LLM_ENDPOINT_ID,
-        tts_app_key=TTS_APP_ID,
-        tts_access_key=TTS_ACCESS_TOKEN,
-        asr_app_key=ASR_APP_ID,
-        asr_access_key=ASR_ACCESS_TOKEN,
+        llm_ep_id=RUNTIME_CONFIG.llm_endpoint_id,
+        tts_app_key=RUNTIME_CONFIG.tts_app_id,
+        tts_access_key=RUNTIME_CONFIG.tts_access_token,
+        asr_app_key=RUNTIME_CONFIG.asr_app_id,
+        asr_access_key=RUNTIME_CONFIG.asr_access_token,
         interview_mode=True,
     )
     await service.init()
@@ -207,6 +206,14 @@ async def main():
         log_path = os.path.join(LOG_DIR, log_file)
         if os.path.exists(log_path):
             open(log_path, "w").close()
+
+    INFO("[StartupSelfCheck] running preflight checks")
+    self_check_report = await run_startup_self_check(RUNTIME_CONFIG)
+    for line in format_self_check_lines(self_check_report):
+        INFO(line)
+    if not self_check_report.ok:
+        INFO("[StartupSelfCheck] failed, aborting server startup")
+        raise SystemExit(1)
 
     # Start the WebSocket server listening on 127.0.0.1:8888
     ws_server = await websockets.serve(handler, host="127.0.0.1", port=8888)

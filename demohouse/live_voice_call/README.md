@@ -83,6 +83,9 @@
     poetry run python -m handler
     ```
 
+   后端启动前会自动执行一次 `LLM + ASR + TTS` 开机自检。
+   若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
+
 4. 启动web端
 
     ```shell
