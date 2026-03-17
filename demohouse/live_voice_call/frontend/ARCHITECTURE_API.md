@@ -13,12 +13,17 @@
   - microphone
   - camera
   - screen sharing
-- Audio self-check buttons are provided in check-in:
-  - Checks are sequential; only current step can be tested and passed.
-  - Speaker test: select output device in dialog, play test tone, verify waveform, then confirm.
-  - Microphone test: select input device in dialog and verify real-time waveform.
-  - Camera test: select video device and verify preview in dialog.
-  - Screen sharing step requires selecting the entire screen (displaySurface = monitor).
+- Device checks are strictly sequential (later step buttons are hidden until previous step passes):
+  - Speaker test: dialog with output device selector + playback + waveform line + user confirmation.
+  - Microphone test: dialog with input device selector + real-time waveform line.
+  - Camera test: dialog with camera selector + live preview confirmation.
+  - Screen sharing: must select entire screen (`displaySurface = monitor`) or it is rejected.
+- On hang up, app navigates to a result page that only shows final notice text (no action buttons).
+- On `进入面试`, a final full re-check runs before navigation:
+  - screen-share track must still be live and still be entire-screen sharing
+  - selected speaker must still be available
+  - microphone + camera are reacquired and must both succeed
+  - if any check fails, app stays on check-in page and shows an error
 
 ## 2. Interface Overview
 
@@ -158,6 +163,7 @@ type WsContractEventMap = {
    - `real`: reads streaming text from `TTSSentenceStart` and completion from `TTSDone`.
 5. `hangUp`
    - stops active recording/simulation and clears active subtitle state.
+   - redirects to `/hangup-result` and displays "结果已收到，HR 后续联系" notice page.
 
 ## 6. Mock Contract
 - Script source: `DEFAULT_SCRIPT` in `useCallController`.
@@ -191,11 +197,19 @@ Example script entry:
 2. `pnpm install`
 3. `pnpm run dev`
 4. open `http://localhost:8080/check-in?token=t1&session=s1`
-5. grant mic/camera/screen, then run speaker test and confirm audio is heard
+5. complete sequential check-in:
+   - speaker dialog -> play + waveform + confirm
+   - microphone dialog -> waveform reacts to voice
+   - camera dialog -> preview works and confirm
+   - screen share -> select entire screen
 6. verify in call page:
    - subtitle updates
    - debug drawer opens
    - transcript panel toggles
-7. validation:
+   - mic/camera/share switches are not user-operable on main page
+7. click hang up:
+   - app redirects to `/hangup-result`
+   - page only contains result notice text, with no buttons
+8. validation:
    - open `/` without token -> invalid link page
    - in non-localhost domain with `session=s1` -> invalid link page

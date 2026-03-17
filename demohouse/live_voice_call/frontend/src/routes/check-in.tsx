@@ -30,6 +30,8 @@ const stopStream = (stream: MediaStream | null) => {
   }
 };
 
+const stepIndexOf = (step: CheckStep) => ORDERED_STEPS.indexOf(step);
+
 const allGranted = (permissions: PermissionState) =>
   Object.values(permissions).every(value => value === 'granted');
 
@@ -291,6 +293,7 @@ export const CheckInPage = () => {
 
   const failStep = (step: CheckStep, message: string) => {
     setPermissions(prev => ({ ...prev, [step]: 'denied' }));
+    setCurrentStepIndex(stepIndexOf(step));
     setErrorMessage(message);
   };
 
@@ -330,14 +333,128 @@ export const CheckInPage = () => {
     setModalType(step);
   };
 
-  const handleEnter = () => {
+  const validateSpeakerAtEnter = async () => {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputs = devices.filter(item => item.kind === 'audiooutput');
+    if (
+      selectedSpeaker &&
+      !outputs.find(item => item.deviceId === selectedSpeaker)
+    ) {
+      failStep('speaker', '扬声器设备不可用，请重新完成扬声器测试。');
+      throw new Error('speaker_failed');
+    }
+
+    const AudioContextClass = getAudioContextClass();
+    if (!AudioContextClass) {
+      failStep('speaker', '浏览器不支持扬声器校验，请更换浏览器。');
+      throw new Error('speaker_failed');
+    }
+
+    const audioContext = new AudioContextClass();
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+    const destination = audioContext.createMediaStreamDestination();
+    const testAudio = new Audio();
+
+    oscillator.type = 'sine';
+    oscillator.frequency.value = 560;
+    gainNode.gain.value = 0.03;
+    oscillator.connect(gainNode);
+    gainNode.connect(destination);
+    testAudio.srcObject = destination.stream;
+
+    const testAudioWithSink = testAudio as HTMLAudioElement & {
+      setSinkId?: (id: string) => Promise<void>;
+    };
+    if (selectedSpeaker && testAudioWithSink.setSinkId) {
+      await testAudioWithSink.setSinkId(selectedSpeaker);
+    }
+    try {
+      await testAudio.play();
+    } catch (_error) {
+      failStep('speaker', '扬声器校验播放失败，请检查系统音量或输出设备。');
+      await audioContext.close();
+      throw new Error('speaker_failed');
+    }
+    oscillator.start();
+    await new Promise(resolve => window.setTimeout(resolve, 220));
+    oscillator.stop();
+    testAudio.pause();
+    testAudio.srcObject = null;
+    await audioContext.close();
+  };
+
+  const validateBeforeEnter = async () => {
+    const screenTrack = mediaStreamsRef.current.displayMedia
+      ?.getVideoTracks()
+      ?.at(0);
+    if (!screenTrack || screenTrack.readyState !== 'live') {
+      failStep('screen', '屏幕共享已关闭，请重新共享“整个屏幕”。');
+      throw new Error('screen_failed');
+    }
+    const displaySurface = screenTrack.getSettings().displaySurface;
+    if (displaySurface !== 'monitor') {
+      failStep('screen', '请确保当前仍在共享“整个屏幕”。');
+      throw new Error('screen_failed');
+    }
+
+    await validateSpeakerAtEnter();
+
+    let audioStream: MediaStream | null = null;
+    let videoStream: MediaStream | null = null;
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+        video: false,
+      });
+    } catch (_error) {
+      failStep('mic', '麦克风状态异常，请重新完成麦克风测试。');
+      throw new Error('mic_failed');
+    }
+
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
+      });
+    } catch (_error) {
+      stopStream(audioStream);
+      failStep('camera', '摄像头状态异常，请重新完成摄像头测试。');
+      throw new Error('camera_failed');
+    }
+
+    const mergedStream = new MediaStream([
+      ...audioStream.getAudioTracks(),
+      ...videoStream.getVideoTracks(),
+    ]);
+    stopStream(mediaStreamsRef.current.userMedia);
+    mediaStreamsRef.current.userMedia = mergedStream;
+    stopStream(audioStream);
+    stopStream(videoStream);
+  };
+
+  const handleEnter = async () => {
     if (!allGranted(permissions)) {
       setCheckInPassed(false);
       setErrorMessage('请按顺序完成四项设备检查后再进入面试。');
       return;
     }
-    setCheckInPassed(true);
-    navigate(`/${location.search}`);
+    setChecking(true);
+    setErrorMessage('');
+    try {
+      await validateBeforeEnter();
+      setCheckInPassed(true);
+      navigate(`/${location.search}`);
+    } catch (error) {
+      setCheckInPassed(false);
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : '设备状态检查未通过，请重新确认设备。',
+      );
+    } finally {
+      setChecking(false);
+    }
   };
 
   return (
@@ -353,14 +470,13 @@ export const CheckInPage = () => {
           {ORDERED_STEPS.map((step, index) => {
             const status = permissions[step];
             const isCurrent = index === currentStepIndex;
-            const isPast = index < currentStepIndex || status === 'granted';
             const isLocked = index > currentStepIndex;
             return (
               <li className="permission-item" key={step}>
                 <span>{STEP_LABEL[step]}</span>
                 <div className="permission-right">
                   <strong className={`permission-status is-${status}`}>
-                    {isPast ? '已通过' : statusTextMap[status]}
+                    {status === 'granted' ? '已通过' : statusTextMap[status]}
                   </strong>
                   {!isLocked && (
                     <button
@@ -408,9 +524,9 @@ export const CheckInPage = () => {
             type="button"
             className="gate-btn is-enter"
             onClick={handleEnter}
-            disabled={!canEnter}
+            disabled={!canEnter || checking}
           >
-            进入面试
+            {checking ? '校验中...' : '进入面试'}
           </button>
         </div>
       </section>
