@@ -22,13 +22,13 @@ from service import VoiceBotService
 from utils import *
 
 # replace with your asr API access
-ASR_ACCESS_TOKEN = "{YOUR_ASR_ACCESS_TOKEN}"
-ASR_APP_ID = "{YOUR_ASR_APP_ID}"
+ASR_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
+ASR_APP_ID = "2057385740"
 # replace with your tts API access
-TTS_ACCESS_TOKEN = "{YOUR_TTS_ACCESS_TOKEN}"
-TTS_APP_ID = "{YOUR_TTS_APP_ID}"
+TTS_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
+TTS_APP_ID = "2057385740"
 # replace with your ark endpoint
-LLM_ENDPOINT_ID = "{YOUR_ARK_LLM_ENDPOINT_ID}"
+LLM_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
 
 # Configure logging
 logging.basicConfig(
