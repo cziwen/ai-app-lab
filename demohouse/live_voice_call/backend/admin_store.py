@@ -18,6 +18,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "app.db"
 STORAGE_DIR = DATA_DIR / "storage"
 AUDIO_DIR = STORAGE_DIR / "audio"
+INTERVIEW_LOG_DIR = STORAGE_DIR / "interview_logs"
 
 ADMIN_SESSION_COOKIE = "admin_session"
 
@@ -27,6 +28,8 @@ INTERVIEW_STATUS_COMPLETED = "completed"
 INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
 MAX_INTERRUPTION_COUNT = 3
+FIXED_INTRO_QUESTION_ID = "intro_fixed"
+FIXED_INTRO_QUESTION_TEXT = "请先做一个简短的自我介绍，包括你的学历和与岗位相关的经验。"
 
 
 @dataclass
@@ -126,6 +129,7 @@ def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    INTERVIEW_LOG_DIR.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA_SQL)
         _apply_schema_migrations(conn)
@@ -400,9 +404,10 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
 
 
 def _delete_interview_assets(token: str) -> None:
-    interview_dir = AUDIO_DIR / token
-    if interview_dir.exists():
-        shutil.rmtree(interview_dir, ignore_errors=True)
+    for base_dir in (AUDIO_DIR, INTERVIEW_LOG_DIR):
+        interview_dir = base_dir / token
+        if interview_dir.exists():
+            shutil.rmtree(interview_dir, ignore_errors=True)
 
 
 def delete_job_cascade(job_uid: str) -> bool:
@@ -777,6 +782,17 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
         }
 
 
+def interview_exists(token: str) -> bool:
+    if not token:
+        return False
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT token FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+    return bool(row)
+
+
 def _keywords_from_reference(reference: str) -> List[str]:
     parts = []
     for chunk in (
@@ -844,6 +860,15 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                         "evidence": {"must_cover": _keywords_from_reference(q["reference_answer"])},
                     }
                 )
+
+        selected_questions.insert(
+            0,
+            {
+                "question_id": FIXED_INTRO_QUESTION_ID,
+                "main_question": FIXED_INTRO_QUESTION_TEXT,
+                "evidence": {"must_cover": ["学历", "岗位相关经验"]},
+            },
+        )
 
         if row["status"] == INTERVIEW_STATUS_PENDING or row["reconnect_deadline_at"]:
             conn.execute(

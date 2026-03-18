@@ -75,7 +75,7 @@
     ```shell
     cd demohouse/live_voice_call/backend
 
-    python -m venv .venv
+    python3.11 -m venv .venv
     source .venv/bin/activate
     pip install poetry==1.6.1
 
@@ -87,7 +87,7 @@
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    默认会同时启动：
    - 面试 WebSocket：`ws://127.0.0.1:8888`
-   - 前端日志接收：`http://127.0.0.1:8889/api/frontend-logs`
+   - 前端日志接收：`http://127.0.0.1:8889/api/frontend-logs?token=INT-...`
    - 管理后台 API：`http://127.0.0.1:8890`
 
 4. 启动web端

@@ -26,10 +26,16 @@ const ControlButton = ({
   </button>
 );
 
-export const CallControlBar = ({ isInCall, onAction }: CallControlBarProps) => {
+export const CallControlBar = ({
+  isInCall,
+  debugAllowed,
+  onAction,
+}: CallControlBarProps) => {
   return (
     <nav className="control-bar" aria-label="通话控制">
-      <ControlButton label="更多" action="toggleDebug" onAction={onAction} />
+      {debugAllowed && (
+        <ControlButton label="更多" action="toggleDebug" onAction={onAction} />
+      )}
       <ControlButton
         label={isInCall ? '挂断' : '结束'}
         action="hangUp"

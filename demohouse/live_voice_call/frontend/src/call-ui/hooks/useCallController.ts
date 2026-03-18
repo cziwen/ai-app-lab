@@ -55,6 +55,17 @@ const transcriptFromScript = (script: MockCallScript): TranscriptItem[] => {
   ];
 };
 
+const isDebugAllowed = (search: string): boolean => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  if (window.location.hostname !== 'localhost') {
+    return false;
+  }
+  const params = new URLSearchParams(search);
+  return params.get('token') === 'DEBUG';
+};
+
 export const useCallController = (): CallController => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -99,6 +110,10 @@ export const useCallController = (): CallController => {
     useVoiceBotService();
   const { logContent } = useLogContent();
   const { mediaStreamsRef } = useSessionAuth();
+  const debugAllowed = useMemo(
+    () => isDebugAllowed(location.search),
+    [location.search],
+  );
 
   const stopStream = useCallback((stream: MediaStream | null) => {
     if (!stream) {
@@ -243,6 +258,13 @@ export const useCallController = (): CallController => {
   }, [botAudioPlaying, botSpeaking, endPhase, mode]);
 
   useEffect(() => {
+    if (!debugAllowed && debugOpen) {
+      setDebugOpen(false);
+      setMessagePanelOpen(false);
+    }
+  }, [debugAllowed, debugOpen]);
+
+  useEffect(() => {
     if (endPhase !== 'countdown' || endCountdownSec === null) {
       return;
     }
@@ -359,6 +381,10 @@ export const useCallController = (): CallController => {
         handleConnect();
         return;
       case 'toggleDebug':
+        if (!debugAllowed) {
+          setDebugOpen(false);
+          return;
+        }
         setDebugOpen(prev => !prev);
         return;
       case 'toggleMessagePanel':
@@ -410,6 +436,7 @@ export const useCallController = (): CallController => {
     },
     debugState,
     transcripts,
+    debugAllowed,
     debugOpen,
     messagePanelOpen,
     setWsUrl,

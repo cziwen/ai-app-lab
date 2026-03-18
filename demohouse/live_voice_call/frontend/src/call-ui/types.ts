@@ -57,6 +57,7 @@ export interface CallController {
   uiState: CallUiState;
   debugState: DebugPanelState;
   transcripts: TranscriptItem[];
+  debugAllowed: boolean;
   debugOpen: boolean;
   messagePanelOpen: boolean;
   setWsUrl: (nextUrl: string) => void;
@@ -110,6 +111,7 @@ export interface CallParticipantCardProps {
 
 export interface CallControlBarProps {
   isInCall: boolean;
+  debugAllowed: boolean;
   onAction: (action: CallControlAction) => void;
 }
 

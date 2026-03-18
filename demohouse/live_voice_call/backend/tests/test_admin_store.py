@@ -8,10 +8,12 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     data_dir = tmp_path / "data"
     storage_dir = data_dir / "storage"
     audio_dir = storage_dir / "audio"
+    interview_log_dir = storage_dir / "interview_logs"
     db_path = data_dir / "app.db"
     monkeypatch.setattr(admin_store, "DATA_DIR", data_dir)
     monkeypatch.setattr(admin_store, "STORAGE_DIR", storage_dir)
     monkeypatch.setattr(admin_store, "AUDIO_DIR", audio_dir)
+    monkeypatch.setattr(admin_store, "INTERVIEW_LOG_DIR", interview_log_dir)
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
 
 
@@ -144,3 +146,70 @@ def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch,
     assert detail is not None
     assert detail["interruption_count"] == 0
     assert detail["reconnect_deadline_at"] is None
+
+
+def test_start_interview_session_prepends_fixed_intro_question(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="算法工程师",
+        duties="负责模型研发",
+        requirements="熟悉机器学习与工程实现",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[
+            ("请介绍一个你做过的项目", "背景 职责 结果"),
+            ("你如何处理线上性能问题", "定位 优化 验证"),
+        ],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="赵六",
+        job_uid=job["job_uid"],
+        duration_minutes=30,
+        notes=None,
+    )
+
+    session = admin_store.start_interview_session(interview["token"])
+    assert session is not None
+    assert session.questions
+    assert session.questions[0]["question_id"] == admin_store.FIXED_INTRO_QUESTION_ID
+    assert session.questions[0]["main_question"] == admin_store.FIXED_INTRO_QUESTION_TEXT
+    assert session.questions[1]["question_id"] != admin_store.FIXED_INTRO_QUESTION_ID
+
+
+def test_delete_interview_removes_audio_and_log_dirs(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="运维工程师",
+        duties="负责系统稳定性",
+        requirements="熟悉监控告警",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("你如何处理服务故障", "发现 定位 恢复")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="孙七",
+        job_uid=job["job_uid"],
+        duration_minutes=15,
+        notes=None,
+    )
+    token = interview["token"]
+
+    audio_dir = admin_store.AUDIO_DIR / token
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / "candidate.wav").write_bytes(b"fake")
+
+    log_dir = admin_store.INTERVIEW_LOG_DIR / token
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "backend.log").write_text("test", encoding="utf-8")
+
+    assert admin_store.delete_interview(token) is True
+    assert not audio_dir.exists()
+    assert not log_dir.exists()

@@ -86,6 +86,7 @@ class VoiceBotService(BaseModel):
     on_bot_sentence: Optional[Callable[[str], None]] = None
     on_bot_audio_chunk: Optional[Callable[[bytes], None]] = None
     on_interview_completed: Optional[Callable[[], None]] = None
+    log_fn: Optional[Callable[[str], None]] = None
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
 
@@ -131,13 +132,22 @@ class VoiceBotService(BaseModel):
                 global_turn_limit=20,
             )
 
+    def _log(self, message: str) -> None:
+        if self.log_fn:
+            try:
+                self.log_fn(message)
+                return
+            except Exception as log_err:
+                INFO(f"[VoiceBotService] custom log_fn failed: {log_err}")
+        INFO(message)
+
     def _emit_bot_text(self, text: str) -> None:
         if not text or not self.on_bot_sentence:
             return
         try:
             self.on_bot_sentence(text)
         except Exception as callback_error:
-            INFO(f"[InterviewPersist] on_bot_sentence callback failed: {callback_error}")
+            self._log(f"[InterviewPersist] on_bot_sentence callback failed: {callback_error}")
 
     def _emit_candidate_text(self, text: str) -> None:
         if not text or not self.on_candidate_sentence:
@@ -145,7 +155,7 @@ class VoiceBotService(BaseModel):
         try:
             self.on_candidate_sentence(text)
         except Exception as callback_error:
-            INFO(
+            self._log(
                 f"[InterviewPersist] on_candidate_sentence callback failed: {callback_error}"
             )
 
@@ -155,7 +165,7 @@ class VoiceBotService(BaseModel):
         try:
             self.on_bot_audio_chunk(chunk)
         except Exception as callback_error:
-            INFO(f"[InterviewPersist] on_bot_audio_chunk callback failed: {callback_error}")
+            self._log(f"[InterviewPersist] on_bot_audio_chunk callback failed: {callback_error}")
 
     def _emit_interview_completed(self) -> None:
         if not self.on_interview_completed:
@@ -163,7 +173,7 @@ class VoiceBotService(BaseModel):
         try:
             self.on_interview_completed()
         except Exception as callback_error:
-            INFO(
+            self._log(
                 f"[InterviewPersist] on_interview_completed callback failed: {callback_error}"
             )
 
@@ -218,19 +228,19 @@ class VoiceBotService(BaseModel):
         async def async_gen() -> AsyncIterable[bytes]:
             async for input_event in inputs:
                 if self.state != StateIdle:
-                    INFO("service is InProgress, will ignore the incoming input")
+                    self._log("service is InProgress, will ignore the incoming input")
                     continue
                 elif not self.asr_client.inited:
-                    INFO("need recreate asr conn")
+                    self._log("need recreate asr conn")
                     inited_before = self.asr_client.inited
                     self.asr_init_count += 1
-                    INFO(
+                    self._log(
                         f"[ASR_INIT_COUNT] count={self.asr_init_count} source=runtime_reinit "
                         f"service_id={id(self)} inited_before={inited_before}"
                     )
                     await self.asr_client.init()
 
-                INFO(
+                self._log(
                     f"receive input, event={input_event.event} payload={input_event.payload}"
                 )
                 if input_event.event == BOT_UPDATE_CONFIG and isinstance(
@@ -266,11 +276,11 @@ class VoiceBotService(BaseModel):
                         self.asr_no_input_duration = (
                             response.audio.duration - self.asr_last_duration
                         )
-                    INFO(
+                    self._log(
                         f"asr buffer incremented: {increment_len}, utterances: {response.result.utterances}"
                     )
             else:
-                INFO("service is InProgress, will ignore the newer asr response")
+                self._log("service is InProgress, will ignore the newer asr response")
                 continue
 
     async def handle_tts_response(
@@ -283,12 +293,12 @@ class VoiceBotService(BaseModel):
         """
         buffer = bytearray()
         if not self.tts_client.inited:
-            INFO("need recreate tts client")
+            self._log("need recreate tts client")
             await self.tts_client.init()
         async for tts_rsp in self.tts_client.tts(
             source=llm_output, include_transcript=True
         ):
-            INFO(
+            self._log(
                 f"receive tts response: event={tts_rsp.event} transcript={tts_rsp.transcript} \
                 audio len={len(tts_rsp.audio) if tts_rsp.audio else 0}"
             )
@@ -404,11 +414,11 @@ class VoiceBotService(BaseModel):
     ) -> AsyncIterable[WebEvent]:
         """Interview-mode main loop using InterviewFlow state machine."""
         flow = self.interview_flow
-        INFO("[Interview] Starting interview handler loop")
+        self._log("[Interview] Starting interview handler loop")
 
         # Phase 1: Send intro and first question separately via TTS (no LLM needed)
         intro_response = await flow.produce_interviewer_message()
-        INFO(
+        self._log(
             f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
             f"text='{intro_response.interviewer_text}'"
         )
@@ -417,7 +427,7 @@ class VoiceBotService(BaseModel):
                 yield event
 
         first_question_response = await flow.produce_interviewer_message()
-        INFO(
+        self._log(
             f"[Interview] FirstQuestion: {first_question_response.state_before}->"
             f"{first_question_response.state_after} "
             f"q={first_question_response.question_id} "
@@ -428,7 +438,7 @@ class VoiceBotService(BaseModel):
                 first_question_response.interviewer_text
             ):
                 yield event
-        INFO("[Interview] Greeting sent via TTS, waiting for candidate")
+        self._log("[Interview] Greeting sent via TTS, waiting for candidate")
 
         # Phase 2: Main interview loop
         asr_responses = await self.handle_input_event(inputs)
@@ -436,7 +446,7 @@ class VoiceBotService(BaseModel):
             self.state = StateInProgress
             yield WebEvent.from_payload(asr_recognized)
             candidate_text = asr_recognized.sentence
-            INFO(f"[Interview] Candidate answer: '{candidate_text}'")
+            self._log(f"[Interview] Candidate answer: '{candidate_text}'")
             self._emit_candidate_text(candidate_text)
 
             # Add candidate answer to conversation history
@@ -445,14 +455,14 @@ class VoiceBotService(BaseModel):
             )
 
             # LLM call #1: InterviewJudge evaluates the answer
-            INFO("[Interview] Calling InterviewJudge (LLM #1)...")
+            self._log("[Interview] Calling InterviewJudge (LLM #1)...")
             answer_response: FlowResponse = await flow.receive_candidate_answer(
                 candidate_text
             )
             decision = answer_response.decision
 
             if decision:
-                INFO(
+                self._log(
                     f"[Interview] Judge result: "
                     f"{answer_response.state_before}->{answer_response.state_after} "
                     f"q={answer_response.question_id} "
@@ -462,27 +472,27 @@ class VoiceBotService(BaseModel):
                     f"reason={decision.reason}"
                 )
             else:
-                INFO(
+                self._log(
                     f"[Interview] Judge result: "
                     f"{answer_response.state_before}->{answer_response.state_after} "
                     f"q={answer_response.question_id} decision=None"
                 )
             for t in answer_response.transition_trace:
-                INFO(f"[Interview]   transition: {t}")
+                self._log(f"[Interview]   transition: {t}")
 
             # Check if interview ended (e.g. global turn limit)
             if flow.is_done:
-                INFO("[Interview] Flow reached DONE after judge, sending wrap-up")
+                self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
                 wrap_response = await flow.produce_interviewer_message()
                 if wrap_response.interviewer_text:
-                    INFO(f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'")
+                    self._log(f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'")
                     async for event in self._send_scripted_text(
                         wrap_response.interviewer_text
                     ):
                         yield event
                 self.state = StateIdle
                 self._emit_interview_completed()
-                INFO("[Interview] Interview ended")
+                self._log("[Interview] Interview ended")
                 break
 
             # Get next interviewer message if flow state needs one
@@ -490,7 +500,7 @@ class VoiceBotService(BaseModel):
             if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
                 next_response = await flow.produce_interviewer_message()
                 next_interviewer_text = next_response.interviewer_text
-                INFO(
+                self._log(
                     f"[Interview] Next action: "
                     f"{next_response.state_before}->{next_response.state_after} "
                     f"q={next_response.question_id} "
@@ -498,12 +508,12 @@ class VoiceBotService(BaseModel):
                 )
 
                 if flow.is_done:
-                    INFO("[Interview] Flow reached DONE after producing message")
+                    self._log("[Interview] Flow reached DONE after producing message")
                     async for event in self._send_scripted_text(next_interviewer_text):
                         yield event
                     self.state = StateIdle
                     self._emit_interview_completed()
-                    INFO("[Interview] Interview ended")
+                    self._log("[Interview] Interview ended")
                     break
 
             # LLM call #2: Generate natural interviewer speech
@@ -512,18 +522,18 @@ class VoiceBotService(BaseModel):
                 next_question_or_followup=next_interviewer_text,
                 flow_state=flow.state,
             )
-            INFO(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
+            self._log(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
 
             try:
                 llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
                 async for payload in self.handle_tts_response(llm_stream_rsp):
                     yield WebEvent.from_payload(payload)
-                INFO("[Interview] Interviewer LLM response sent via TTS")
+                self._log("[Interview] Interviewer LLM response sent via TTS")
             except Exception as e:
-                INFO(f"[Interview] Main LLM error: {e}, falling back to scripted text")
+                self._log(f"[Interview] Main LLM error: {e}, falling back to scripted text")
                 fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
                 async for event in self._send_scripted_text(fallback_text):
                     yield event
 
             self.state = StateIdle
-            INFO(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")
+            self._log(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")

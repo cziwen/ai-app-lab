@@ -47,10 +47,11 @@ export const CallInterviewPage = () => {
       <LiveSubtitleBar text={uiState.subtitle} />
       <CallControlBar
         isInCall={uiState.isInCall}
+        debugAllowed={controller.debugAllowed}
         onAction={controller.onControlAction}
       />
       <DebugDrawer
-        open={controller.debugOpen}
+        open={controller.debugAllowed && controller.debugOpen}
         mode={uiState.mode}
         state={debugState}
         transcripts={controller.transcripts}

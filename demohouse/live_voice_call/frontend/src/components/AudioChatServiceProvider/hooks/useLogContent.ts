@@ -11,15 +11,17 @@
 
 import { useContext } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
+import { useSessionAuth } from '@/auth/context';
 import { logSender } from '@/utils/log_sender';
 
 export const useLogContent = () => {
   const { logContent, setLogContent } = useContext(AudioChatServiceContext);
+  const { token } = useSessionAuth();
 
   const log = (v: string) => {
     const entry = `[${new Date().toLocaleTimeString()}]\t${v}`;
     setLogContent(prevState => [...prevState, entry]);
-    logSender.enqueue(entry);
+    logSender.enqueue(entry, token);
   };
   return {
     logContent,

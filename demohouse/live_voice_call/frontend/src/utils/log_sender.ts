@@ -16,10 +16,15 @@ const FLUSH_INTERVAL_MS = 5000;
 const MAX_BATCH_SIZE = 50;
 const MAX_RETRIES = 3;
 
+type BufferedLog = {
+  token: string;
+  message: string;
+};
+
 class LogSender {
-  private buffer: string[] = [];
+  private buffer: BufferedLog[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private retryCount = 0;
+  private retryCountByToken = new Map<string, number>();
 
   constructor() {
     this.startFlushTimer();
@@ -28,11 +33,39 @@ class LogSender {
     }
   }
 
-  enqueue(entry: string): void {
-    this.buffer.push(entry);
+  enqueue(entry: string, token?: string | null): void {
+    const normalizedToken = token?.trim();
+    if (!normalizedToken) {
+      console.warn('Log sender: missing interview token, drop entry');
+      return;
+    }
+    this.buffer.push({
+      token: normalizedToken,
+      message: entry,
+    });
     if (this.buffer.length >= MAX_BATCH_SIZE) {
       this.flush();
     }
+  }
+
+  private buildEndpoint(token: string): string {
+    if (typeof window !== 'undefined') {
+      const resolved = new URL(LOG_ENDPOINT, window.location.href);
+      resolved.searchParams.set('token', token);
+      return resolved.toString();
+    }
+    const separator = LOG_ENDPOINT.includes('?') ? '&' : '?';
+    return `${LOG_ENDPOINT}${separator}token=${encodeURIComponent(token)}`;
+  }
+
+  private groupByToken(batch: BufferedLog[]): Map<string, string[]> {
+    const grouped = new Map<string, string[]>();
+    for (const item of batch) {
+      const current = grouped.get(item.token) ?? [];
+      current.push(item.message);
+      grouped.set(item.token, current);
+    }
+    return grouped;
   }
 
   private startFlushTimer(): void {
@@ -44,31 +77,48 @@ class LogSender {
     const batch = [...this.buffer];
     this.buffer = [];
 
-    try {
-      const response = await fetch(LOG_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(batch),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      this.retryCount = 0;
-    } catch {
-      this.retryCount++;
-      if (this.retryCount < MAX_RETRIES) {
-        this.buffer = [...batch, ...this.buffer];
-      } else {
-        console.warn('Log sender: max retries exceeded, dropping batch');
-        this.retryCount = 0;
+    const grouped = this.groupByToken(batch);
+    const failedEntries: BufferedLog[] = [];
+
+    for (const [token, entries] of grouped) {
+      try {
+        const response = await fetch(this.buildEndpoint(token), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(entries),
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        this.retryCountByToken.delete(token);
+      } catch {
+        const retryCount = (this.retryCountByToken.get(token) ?? 0) + 1;
+        if (retryCount < MAX_RETRIES) {
+          this.retryCountByToken.set(token, retryCount);
+          for (const message of entries) {
+            failedEntries.push({ token, message });
+          }
+        } else {
+          console.warn(`Log sender: max retries exceeded for token=${token}, dropping batch`);
+          this.retryCountByToken.delete(token);
+        }
       }
+    }
+
+    if (failedEntries.length > 0) {
+      this.buffer = [...failedEntries, ...this.buffer];
     }
   }
 
   private flushSync(): void {
     if (this.buffer.length === 0) return;
-    const blob = new Blob([JSON.stringify(this.buffer)], {
-      type: 'application/json',
-    });
-    navigator.sendBeacon(LOG_ENDPOINT, blob);
+    const grouped = this.groupByToken(this.buffer);
+    for (const [token, entries] of grouped) {
+      const blob = new Blob([JSON.stringify(entries)], {
+        type: 'application/json',
+      });
+      navigator.sendBeacon(this.buildEndpoint(token), blob);
+    }
     this.buffer = [];
   }
 
