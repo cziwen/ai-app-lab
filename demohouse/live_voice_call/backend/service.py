@@ -11,6 +11,7 @@
 
 import asyncio
 import contextlib
+import os
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
 from arkitect.core.component.asr import ASRFullServerResponse, AsyncASRClient
@@ -46,8 +47,10 @@ ASR_INIT_TIMEOUT_SECONDS = 12
 ASR_INIT_MAX_ATTEMPTS = 2
 ASR_INIT_RETRY_BACKOFF_SECONDS = 0.2
 ASR_INIT_FATAL_FAILURE_STREAK = 3
-# Default tts live_voice_call
-DEFAULT_SPEAKER = "zh_female_sajiaonvyou_moon_bigtts"
+# Default TTS speaker. Prefer environment override to avoid code-level hardcoding.
+DEFAULT_SPEAKER = (
+    (os.getenv("TTS_SPEAKER") or "").strip() or "zh_female_sajiaonvyou_moon_bigtts"
+)
 # Greeting message spoken by the bot before the user starts
 GREETING_TEXT = "你好，欢迎参加今天的面试。请先做一个简短的自我介绍吧。"
 

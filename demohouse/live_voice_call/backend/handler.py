@@ -38,7 +38,7 @@ from admin_store import (
     save_interview_turns,
     start_interview_session,
 )
-from service import VoiceBotService
+from service import DEFAULT_SPEAKER, VoiceBotService
 from startup_self_check import (
     format_self_check_lines,
     load_runtime_config,
@@ -515,6 +515,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         llm_ep_id=RUNTIME_CONFIG.llm_endpoint_id,
         tts_app_key=RUNTIME_CONFIG.tts_app_id,
         tts_access_key=RUNTIME_CONFIG.tts_access_token,
+        tts_speaker=RUNTIME_CONFIG.tts_speaker or DEFAULT_SPEAKER,
         asr_app_key=RUNTIME_CONFIG.asr_app_id,
         asr_access_key=RUNTIME_CONFIG.asr_access_token,
         interview_mode=True,
@@ -703,11 +704,12 @@ async def main():
     PERSISTENCE.start()
     server_logger.info("[Server] startup begin")
     server_logger.info(
-        "[Server] config max_active=%s queue_timeout=%ss queue_heartbeat=%ss llm_limit=%s",
+        "[Server] config max_active=%s queue_timeout=%ss queue_heartbeat=%ss llm_limit=%s tts_speaker=%s",
         MAX_ACTIVE_INTERVIEWS,
         QUEUE_WAIT_TIMEOUT_SECONDS,
         QUEUE_HEARTBEAT_SECONDS,
         get_llm_limit(),
+        RUNTIME_CONFIG.tts_speaker or DEFAULT_SPEAKER,
     )
     server_logger.info("[StartupSelfCheck] running preflight checks")
     self_check_report = await run_startup_self_check(RUNTIME_CONFIG)

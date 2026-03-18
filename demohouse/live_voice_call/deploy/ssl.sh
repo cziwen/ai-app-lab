@@ -118,6 +118,39 @@ reload_gateway() {
   compose exec -T gateway nginx -s reload
 }
 
+wait_backend_startup_or_fail() {
+  local started_at_utc="$1"
+  local timeout_seconds="${INIT_BACKEND_STARTUP_TIMEOUT_SECONDS:-60}"
+  local waited=0
+
+  echo "[ssl] Waiting backend startup self-check (timeout=${timeout_seconds}s)"
+  while (( waited < timeout_seconds )); do
+    local logs
+    logs="$(compose logs --no-color --since "$started_at_utc" --tail 200 backend 2>/dev/null || true)"
+
+    if echo "$logs" | grep -Fq "[StartupSelfCheck] failed, aborting server startup"; then
+      echo "[ssl] Backend startup self-check failed; stopping services and aborting init"
+      compose stop gateway backend >/dev/null || true
+      echo "$logs" | tail -n 40
+      return 1
+    fi
+
+    if echo "$logs" | grep -Fq "WebSocket server is running on"; then
+      if echo "$logs" | grep -Fq "Admin API server is running on"; then
+        echo "[ssl] Backend startup passed"
+        return 0
+      fi
+    fi
+
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "[ssl] Backend startup check timed out; stopping services and aborting init"
+  compose stop gateway backend >/dev/null || true
+  return 1
+}
+
 activate_latest_cert() {
   local domain="$1"
   local cert_dir
@@ -137,7 +170,10 @@ run_init() {
   email="$(resolve_email)"
 
   echo "[ssl] Starting gateway/backend"
+  local started_at_utc
+  started_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   compose up -d --build gateway backend
+  wait_backend_startup_or_fail "$started_at_utc"
 
   local existing_cert
   existing_cert="$(pick_latest_cert_dir "$domain" || true)"
