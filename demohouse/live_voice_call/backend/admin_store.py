@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from arkitect.telemetry.logger import INFO
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "app.db"
@@ -563,6 +565,25 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             (token,),
         ).fetchall()
 
+        selected_ids = [
+            int(chunk)
+            for chunk in (row["selected_question_ids"] or "").split(",")
+            if chunk.strip().isdigit()
+        ]
+        question_rows = _load_job_questions(conn, row["job_uid"])
+        by_id = {int(item["id"]): item for item in question_rows}
+        selected_questions = []
+        for index, qid in enumerate(selected_ids):
+            question = by_id.get(qid)
+            if not question:
+                continue
+            selected_questions.append(
+                {
+                    "sort_order": index + 1,
+                    "question": question["question"],
+                }
+            )
+
     return {
         "token": row["token"],
         "candidate_name": row["candidate_name"],
@@ -579,6 +600,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             "job_uid": row["job_uid"],
             "name": row["job_name"],
         },
+        "selected_questions": selected_questions,
         "turns": [
             {
                 "role": t["role"],
@@ -746,11 +768,22 @@ def _write_pcm_to_wav(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
         wav.writeframes(pcm_bytes)
 
 
+def _is_mp3_audio(data: bytes) -> bool:
+    if not data:
+        return False
+    if data.startswith(b"ID3"):
+        return True
+    scan_limit = min(len(data) - 1, 4096)
+    for idx in range(scan_limit):
+        if data[idx] == 0xFF and (data[idx + 1] & 0xE0) == 0xE0:
+            return True
+    return False
+
+
 def persist_interview_audio(
     token: str,
     candidate_pcm_bytes: bytes,
-    interviewer_pcm_bytes: bytes,
-    interviewer_raw_bytes: bytes,
+    interviewer_encoded_bytes: bytes,
 ) -> Dict[str, Optional[str]]:
     interview_dir = AUDIO_DIR / token
     interview_dir.mkdir(parents=True, exist_ok=True)
@@ -762,12 +795,14 @@ def persist_interview_audio(
         candidate_path = interview_dir / "candidate.wav"
         _write_pcm_to_wav(candidate_path, candidate_pcm_bytes, sample_rate=16000)
 
-    if interviewer_pcm_bytes:
-        interviewer_path = interview_dir / "interviewer.wav"
-        _write_pcm_to_wav(interviewer_path, interviewer_pcm_bytes, sample_rate=24000)
-    elif interviewer_raw_bytes:
-        interviewer_path = interview_dir / "interviewer.raw"
-        interviewer_path.write_bytes(interviewer_raw_bytes)
+    if interviewer_encoded_bytes:
+        extension = "mp3" if _is_mp3_audio(interviewer_encoded_bytes) else "raw"
+        interviewer_path = interview_dir / f"interviewer.{extension}"
+        interviewer_path.write_bytes(interviewer_encoded_bytes)
+        INFO(
+            f"[InterviewPersist] token={token} interviewer_format={extension} "
+            f"interviewer_bytes={len(interviewer_encoded_bytes)}"
+        )
 
     with get_conn() as conn:
         conn.execute(

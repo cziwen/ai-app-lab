@@ -9,14 +9,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { BrowserRouter, Route, Routes } from '@modern-js/runtime/router';
+import { BrowserRouter, Navigate, Route, Routes } from '@modern-js/runtime/router';
 import { SessionAuthProvider } from '@/auth/context';
 import {
   RequireActiveInterviewToken,
   RequireToken,
   RequireTokenAndCheckIn,
 } from '@/auth/guards';
-import { AdminPage } from '@/routes/admin';
+import { AdminInterviewsPage } from '@/routes/admin-interviews';
+import { AdminJobsPage } from '@/routes/admin-jobs';
 import { AdminLoginPage } from '@/routes/admin-login';
 import { CheckInPage } from '@/routes/check-in';
 import { HangupResultPage } from '@/routes/hangup-result';
@@ -54,7 +55,9 @@ export default () => {
           />
           <Route path="/invalid-link" element={<InvalidLinkPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
-          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/admin" element={<Navigate replace to="/admin/jobs" />} />
+          <Route path="/admin/jobs" element={<AdminJobsPage />} />
+          <Route path="/admin/interviews" element={<AdminInterviewsPage />} />
         </Routes>
       </SessionAuthProvider>
     </BrowserRouter>

@@ -55,3 +55,10 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     access = admin_store.get_public_access(interview["token"])
     assert access is not None
     assert access["candidate_name"] == "张三"
+
+    interview_detail = admin_store.get_interview_detail(interview["token"])
+    assert interview_detail is not None
+    assert len(interview_detail["selected_questions"]) == interview["question_count"]
+    assert all(
+        "question" in item and item["question"] for item in interview_detail["selected_questions"]
+    )

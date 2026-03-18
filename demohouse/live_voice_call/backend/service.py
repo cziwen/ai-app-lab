@@ -406,12 +406,15 @@ class VoiceBotService(BaseModel):
         flow = self.interview_flow
         INFO("[Interview] Starting interview handler loop")
 
-        # Phase 1: Send intro + first question via TTS (no LLM needed)
+        # Phase 1: Send intro and first question separately via TTS (no LLM needed)
         intro_response = await flow.produce_interviewer_message()
         INFO(
             f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
             f"text='{intro_response.interviewer_text}'"
         )
+        if intro_response.interviewer_text:
+            async for event in self._send_scripted_text(intro_response.interviewer_text):
+                yield event
 
         first_question_response = await flow.produce_interviewer_message()
         INFO(
@@ -420,18 +423,11 @@ class VoiceBotService(BaseModel):
             f"q={first_question_response.question_id} "
             f"text='{first_question_response.interviewer_text}'"
         )
-
-        greeting_text = (
-            intro_response.interviewer_text + " " + first_question_response.interviewer_text
-        )
-        greeting_stream = self._greeting_text_stream(greeting_text)
-        async for payload in self.handle_tts_response(greeting_stream):
-            yield WebEvent.from_payload(payload)
-
-        self.history_messages.append(
-            ArkMessage(**{"role": "assistant", "content": greeting_text})
-        )
-        self._emit_bot_text(greeting_text)
+        if first_question_response.interviewer_text:
+            async for event in self._send_scripted_text(
+                first_question_response.interviewer_text
+            ):
+                yield event
         INFO("[Interview] Greeting sent via TTS, waiting for candidate")
 
         # Phase 2: Main interview loop

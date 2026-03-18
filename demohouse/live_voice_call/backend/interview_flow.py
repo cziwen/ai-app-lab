@@ -58,6 +58,7 @@ class InterviewFlow:
             )
             for item in questions
         ]
+        self.total_questions = len(self.questions)
 
         self.state = INTRO
         self.current_question_index = 0
@@ -81,7 +82,10 @@ class InterviewFlow:
             return FlowResponse(
                 state_before=before,
                 state_after=self.state,
-                interviewer_text="你好，欢迎参加面试。全程3道题，我会根据你的回答决定是否追问。",
+                interviewer_text=(
+                    f"你好，欢迎参加面试。本场共{self.total_questions}道题，"
+                    "我会根据你的回答决定是否追问。"
+                ),
                 decision=None,
                 question_id=None,
                 transition_trace=trace,

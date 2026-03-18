@@ -52,6 +52,10 @@ export type InterviewDetail = {
     job_uid: string;
     name: string;
   };
+  selected_questions?: Array<{
+    sort_order: number;
+    question: string;
+  }>;
   interview_link: string;
   completed: boolean;
   completion_message?: string;

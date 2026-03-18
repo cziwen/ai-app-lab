@@ -241,6 +241,7 @@ def create_admin_app() -> FastAPI:
                 "created_at": detail["created_at"],
                 "completed_at": detail["completed_at"],
                 "job": detail["job"],
+                "selected_questions": detail.get("selected_questions", []),
                 "interview_link": build_interview_link(detail["token"]),
                 "completed": completed,
             }
@@ -269,7 +270,13 @@ def create_admin_app() -> FastAPI:
         path = get_audio_file_path(token, track)
         if not path:
             raise HTTPException(status_code=404, detail="音频不存在")
-        media_type = "audio/wav" if path.suffix.lower() == ".wav" else "application/octet-stream"
+        suffix = path.suffix.lower()
+        if suffix == ".wav":
+            media_type = "audio/wav"
+        elif suffix == ".mp3":
+            media_type = "audio/mpeg"
+        else:
+            media_type = "application/octet-stream"
         return FileResponse(path=path, media_type=media_type, filename=Path(path).name)
 
     @app.get("/api/public/interviews/{token}/access")

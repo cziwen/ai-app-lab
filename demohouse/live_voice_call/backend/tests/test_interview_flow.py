@@ -155,3 +155,17 @@ def test_global_turn_limit_forces_wrap_up():
         assert flow.state == WRAP_UP
 
     asyncio.run(_run())
+
+
+def test_intro_mentions_dynamic_question_count():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[Decision(True, False, "", "ok", 0.9)]
+        )
+        one_question = [{"question_id": "q1", "main_question": "请做一个简短自我介绍。"}]
+        flow = InterviewFlow(questions=one_question, judge=judge)
+
+        intro = await flow.produce_interviewer_message()
+        assert "本场共1道题" in intro.interviewer_text
+
+    asyncio.run(_run())

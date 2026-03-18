@@ -15,7 +15,7 @@ export const AdminLoginPage = () => {
     setLoading(true);
     try {
       await adminApi.login(username.trim(), password);
-      navigate('/admin');
+      navigate('/admin/jobs');
     } catch (e) {
       setError(e instanceof Error ? e.message : '登录失败');
     } finally {

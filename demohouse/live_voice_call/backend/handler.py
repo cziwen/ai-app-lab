@@ -87,16 +87,37 @@ ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8890"))
 
 
 def _extract_pcm_audio(raw_audio: bytes) -> bytes:
-    """Extract raw PCM from the nested audio protocol if present."""
+    """Extract pure PCM bytes from nested length-prefixed audio payloads."""
     if not raw_audio:
         return b""
+
+    def _strip_length_prefix(data: bytes) -> bytes:
+        if len(data) < 4:
+            return b""
+        payload_size = int.from_bytes(data[:4], "big", signed=False)
+        if payload_size <= 0 or payload_size > len(data) - 4:
+            return b""
+        return data[4 : 4 + payload_size]
+
+    outer_payload = _strip_length_prefix(raw_audio)
+    if not outer_payload:
+        INFO("[InterviewPersist] drop candidate audio frame: invalid outer payload")
+        return b""
+
     try:
-        parsed = parse_request(raw_audio)
+        parsed = parse_request(outer_payload)
         if isinstance(parsed, (bytes, bytearray)):
-            return bytes(parsed)
-    except Exception:
-        pass
-    return raw_audio
+            inner_payload = bytes(parsed)
+            pcm_payload = _strip_length_prefix(inner_payload)
+            if pcm_payload:
+                return pcm_payload
+            INFO("[InterviewPersist] drop candidate audio frame: invalid inner payload")
+            return b""
+    except Exception as parse_err:
+        INFO(f"[InterviewPersist] drop candidate audio frame: parse error={parse_err}")
+
+    INFO("[InterviewPersist] drop candidate audio frame: unsupported payload")
+    return b""
 
 
 async def handler(websocket: websockets.WebSocketCommonProtocol, path):
@@ -122,8 +143,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
 
     turns = []
     candidate_audio = bytearray()
-    interviewer_audio_raw = bytearray()
-    interviewer_audio_pcm = bytearray()
+    interviewer_audio_encoded = bytearray()
+    candidate_audio_dropped_frames = 0
     interview_completed = False
 
     def record_turn(role: str, text: str):
@@ -136,8 +157,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         interview_completed = True
 
     def record_bot_audio(chunk: bytes):
-        interviewer_audio_raw.extend(chunk)
-        interviewer_audio_pcm.extend(chunk)
+        interviewer_audio_encoded.extend(chunk)
 
     # Create a VoiceBotService instance and initialize it
     service = VoiceBotService(
@@ -173,6 +193,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         Returns:
             AsyncIterable[WebEvent]: An asynchronous generator of input events.
         """
+        nonlocal candidate_audio_dropped_frames
         async for m in ws:
             input_event = convert_binary_to_web_event_to_binary(m)
             data_len = len(input_event.data) if input_event.data else 0
@@ -184,6 +205,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 pcm_bytes = _extract_pcm_audio(input_event.data)
                 if pcm_bytes:
                     candidate_audio.extend(pcm_bytes)
+                else:
+                    candidate_audio_dropped_frames += 1
             yield input_event
 
     async def fetch_output(
@@ -216,8 +239,13 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             persist_interview_audio(
                 token=token,
                 candidate_pcm_bytes=bytes(candidate_audio),
-                interviewer_pcm_bytes=bytes(interviewer_audio_pcm),
-                interviewer_raw_bytes=bytes(interviewer_audio_raw),
+                interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
+            )
+            INFO(
+                f"[InterviewPersist] token={token} "
+                f"candidate_bytes={len(candidate_audio)} "
+                f"interviewer_bytes={len(interviewer_audio_encoded)} "
+                f"candidate_dropped_frames={candidate_audio_dropped_frames}"
             )
             if interview_completed:
                 mark_interview_completed(token)
