@@ -28,11 +28,11 @@ from arkitect.utils.event_loop import get_event_loop
 from admin_api import create_admin_app
 from admin_store import (
     ensure_default_admin,
+    mark_interview_disconnected,
     mark_interview_completed,
     persist_interview_audio,
     save_interview_turns,
     start_interview_session,
-    update_interview_updated_at,
 )
 from service import VoiceBotService
 from startup_self_check import (
@@ -250,7 +250,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             if interview_completed:
                 mark_interview_completed(token)
             else:
-                update_interview_updated_at(token)
+                mark_interview_disconnected(token, grace_seconds=30)
         except Exception as persist_err:
             INFO(f"[InterviewPersist] failed token={token} error={persist_err}")
 

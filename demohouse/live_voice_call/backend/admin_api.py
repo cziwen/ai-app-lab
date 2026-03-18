@@ -238,6 +238,7 @@ def create_admin_app() -> FastAPI:
                 "question_count": detail["question_count"],
                 "notes": detail["notes"],
                 "status": detail["status"],
+                "interruption_count": detail.get("interruption_count", 0),
                 "created_at": detail["created_at"],
                 "completed_at": detail["completed_at"],
                 "job": detail["job"],

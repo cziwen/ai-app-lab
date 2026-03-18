@@ -24,7 +24,9 @@ ADMIN_SESSION_COOKIE = "admin_session"
 INTERVIEW_STATUS_PENDING = "pending"
 INTERVIEW_STATUS_IN_PROGRESS = "in_progress"
 INTERVIEW_STATUS_COMPLETED = "completed"
+INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
+MAX_INTERRUPTION_COUNT = 3
 
 
 @dataclass
@@ -88,6 +90,8 @@ CREATE TABLE IF NOT EXISTS interviews (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   completed_at TEXT,
+  interruption_count INTEGER NOT NULL DEFAULT 0,
+  reconnect_deadline_at TEXT,
   candidate_audio_path TEXT,
   interviewer_audio_path TEXT,
   FOREIGN KEY(job_uid) REFERENCES jobs(job_uid) ON DELETE CASCADE
@@ -124,7 +128,23 @@ def ensure_storage() -> None:
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA_SQL)
+        _apply_schema_migrations(conn)
         conn.commit()
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(interviews)").fetchall()
+    }
+    if "interruption_count" not in columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN interruption_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "reconnect_deadline_at" not in columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN reconnect_deadline_at TEXT"
+        )
 
 
 def get_conn() -> sqlite3.Connection:
@@ -420,6 +440,100 @@ def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.
     ).fetchall()
 
 
+def _is_interview_active(status: str) -> bool:
+    return status in (INTERVIEW_STATUS_PENDING, INTERVIEW_STATUS_IN_PROGRESS)
+
+
+def _is_interview_terminal(status: str) -> bool:
+    return status in (
+        INTERVIEW_STATUS_COMPLETED,
+        INTERVIEW_STATUS_FAILED,
+        INTERVIEW_STATUS_DELETED,
+    )
+
+
+def _resolve_interview_timeout_in_conn(
+    conn: sqlite3.Connection,
+    token: str,
+    now: datetime,
+    max_interruptions: int = MAX_INTERRUPTION_COUNT,
+) -> Optional[sqlite3.Row]:
+    row = conn.execute(
+        """
+        SELECT token, status, interruption_count, reconnect_deadline_at
+        FROM interviews
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+    if not row:
+        return None
+
+    status = row["status"]
+    if _is_interview_terminal(status):
+        return row
+
+    deadline = parse_iso_or_none(row["reconnect_deadline_at"])
+    if not deadline or now < deadline:
+        return row
+
+    current_count = int(row["interruption_count"] or 0)
+    next_count = current_count + 1
+    next_status = (
+        INTERVIEW_STATUS_FAILED if next_count >= max_interruptions else INTERVIEW_STATUS_IN_PROGRESS
+    )
+    conn.execute(
+        """
+        UPDATE interviews
+        SET interruption_count = ?, reconnect_deadline_at = ?, status = ?, updated_at = ?
+        WHERE token = ?
+        """,
+        (next_count, None, next_status, now.isoformat(), token),
+    )
+    return conn.execute(
+        """
+        SELECT token, status, interruption_count, reconnect_deadline_at
+        FROM interviews
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+
+
+def resolve_interview_timeout(
+    token: str,
+    max_interruptions: int = MAX_INTERRUPTION_COUNT,
+) -> None:
+    now = datetime.now(timezone.utc)
+    with get_conn() as conn:
+        _resolve_interview_timeout_in_conn(conn, token, now, max_interruptions=max_interruptions)
+        conn.commit()
+
+
+def resolve_all_interview_timeouts(
+    max_interruptions: int = MAX_INTERRUPTION_COUNT,
+) -> None:
+    now = datetime.now(timezone.utc)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT token
+            FROM interviews
+            WHERE reconnect_deadline_at IS NOT NULL
+              AND status IN (?, ?)
+            """,
+            (INTERVIEW_STATUS_PENDING, INTERVIEW_STATUS_IN_PROGRESS),
+        ).fetchall()
+        for row in rows:
+            _resolve_interview_timeout_in_conn(
+                conn,
+                row["token"],
+                now,
+                max_interruptions=max_interruptions,
+            )
+        conn.commit()
+
+
 def create_interview(
     candidate_name: str,
     job_uid: str,
@@ -484,6 +598,7 @@ def create_interview(
 
 
 def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]:
+    resolve_all_interview_timeouts()
     where = ""
     params: List[object] = []
     if search.strip():
@@ -505,7 +620,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
         rows = conn.execute(
             f"""
             SELECT i.token, i.candidate_name, i.duration_minutes, i.question_count,
-                   i.notes, i.status, i.created_at, i.completed_at,
+                   i.notes, i.status, i.created_at, i.completed_at, i.interruption_count,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -524,6 +639,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             "question_count": int(row["question_count"]),
             "notes": row["notes"],
             "status": row["status"],
+            "interruption_count": int(row["interruption_count"] or 0),
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
             "job": {
@@ -542,6 +658,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
 
 
 def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
+    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -591,9 +708,11 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "question_count": int(row["question_count"]),
         "notes": row["notes"],
         "status": row["status"],
+        "interruption_count": int(row["interruption_count"] or 0),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "completed_at": row["completed_at"],
+        "reconnect_deadline_at": row["reconnect_deadline_at"],
         "candidate_audio_path": row["candidate_audio_path"],
         "interviewer_audio_path": row["interviewer_audio_path"],
         "job": {
@@ -629,10 +748,11 @@ def delete_interview(token: str) -> bool:
 
 
 def get_public_access(token: str) -> Optional[Dict[str, object]]:
+    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
-            SELECT i.token, i.candidate_name, i.duration_minutes, i.status,
+            SELECT i.token, i.candidate_name, i.duration_minutes, i.status, i.interruption_count,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -642,13 +762,14 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
         ).fetchone()
         if not row:
             return None
-        if row["status"] in (INTERVIEW_STATUS_COMPLETED, INTERVIEW_STATUS_DELETED):
+        if not _is_interview_active(row["status"]):
             return None
         return {
             "token": row["token"],
             "candidate_name": row["candidate_name"],
             "duration_minutes": int(row["duration_minutes"]),
             "status": row["status"],
+            "interruption_count": int(row["interruption_count"] or 0),
             "job": {
                 "job_uid": row["job_uid"],
                 "name": row["job_name"],
@@ -675,12 +796,13 @@ def _keywords_from_reference(reference: str) -> List[str]:
 
 
 def start_interview_session(token: str) -> Optional[InterviewSessionData]:
+    resolve_interview_timeout(token)
     now = utc_now_iso()
     with get_conn() as conn:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.job_uid, i.status, i.selected_question_ids,
-                   j.name AS job_name
+                   i.reconnect_deadline_at, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
             WHERE i.token = ?
@@ -689,7 +811,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         ).fetchone()
         if not row:
             return None
-        if row["status"] in (INTERVIEW_STATUS_COMPLETED, INTERVIEW_STATUS_DELETED):
+        if not _is_interview_active(row["status"]):
             return None
 
         selected_ids = [
@@ -723,10 +845,14 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                     }
                 )
 
-        if row["status"] == INTERVIEW_STATUS_PENDING:
+        if row["status"] == INTERVIEW_STATUS_PENDING or row["reconnect_deadline_at"]:
             conn.execute(
-                "UPDATE interviews SET status = ?, updated_at = ? WHERE token = ?",
-                (INTERVIEW_STATUS_IN_PROGRESS, now, token),
+                """
+                UPDATE interviews
+                SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+                WHERE token = ?
+                """,
+                (INTERVIEW_STATUS_IN_PROGRESS, None, now, token),
             )
             conn.commit()
 
@@ -832,12 +958,36 @@ def mark_interview_completed(token: str) -> None:
         conn.execute(
             """
             UPDATE interviews
-            SET status = ?, completed_at = ?, updated_at = ?
+            SET status = ?, completed_at = ?, reconnect_deadline_at = ?, updated_at = ?
             WHERE token = ?
             """,
-            (INTERVIEW_STATUS_COMPLETED, now, now, token),
+            (INTERVIEW_STATUS_COMPLETED, now, None, now, token),
         )
         conn.commit()
+
+
+def mark_interview_disconnected(token: str, grace_seconds: int = 30) -> bool:
+    now = datetime.now(timezone.utc)
+    deadline = (now + timedelta(seconds=max(1, grace_seconds))).isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return False
+        if not _is_interview_active(row["status"]):
+            return False
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_STATUS_IN_PROGRESS, deadline, now.isoformat(), token),
+        )
+        conn.commit()
+    return True
 
 
 def update_interview_updated_at(token: str) -> None:

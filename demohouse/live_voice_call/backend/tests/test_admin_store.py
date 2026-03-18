@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import admin_store
@@ -62,3 +63,84 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     assert all(
         "question" in item and item["question"] for item in interview_detail["selected_questions"]
     )
+
+
+def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[
+            ("介绍一个项目", "背景、职责、结果"),
+            ("如何定位线上问题", "现象、排查、修复"),
+        ],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="李四",
+        job_uid=job["job_uid"],
+        duration_minutes=20,
+        notes=None,
+    )
+    token = interview["token"]
+
+    started = admin_store.start_interview_session(token)
+    assert started is not None
+
+    for expected_count in (1, 2, 3):
+        assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
+        expired = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+        with admin_store.get_conn() as conn:
+            conn.execute(
+                "UPDATE interviews SET reconnect_deadline_at = ? WHERE token = ?",
+                (expired, token),
+            )
+            conn.commit()
+        admin_store.resolve_interview_timeout(token)
+        detail = admin_store.get_interview_detail(token)
+        assert detail is not None
+        assert detail["interruption_count"] == expected_count
+
+    final_detail = admin_store.get_interview_detail(token)
+    assert final_detail is not None
+    assert final_detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
+    assert admin_store.get_public_access(token) is None
+    assert admin_store.start_interview_session(token) is None
+
+
+def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试工程师",
+        duties="负责测试",
+        requirements="熟悉自动化测试",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("如何设计测试用例", "覆盖边界和主流程")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="王五",
+        job_uid=job["job_uid"],
+        duration_minutes=10,
+        notes=None,
+    )
+    token = interview["token"]
+
+    assert admin_store.start_interview_session(token) is not None
+    assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
+    assert admin_store.start_interview_session(token) is not None
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["interruption_count"] == 0
+    assert detail["reconnect_deadline_at"] is None
