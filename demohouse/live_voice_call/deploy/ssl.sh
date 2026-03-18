@@ -118,56 +118,6 @@ reload_gateway() {
   compose exec -T gateway nginx -s reload
 }
 
-wait_backend_startup_or_fail() {
-  local timeout_seconds="${INIT_BACKEND_STARTUP_TIMEOUT_SECONDS:-60}"
-  local waited=0
-
-  echo "[ssl] Waiting backend startup self-check (timeout=${timeout_seconds}s)"
-  while (( waited < timeout_seconds )); do
-    local logs
-    logs="$(compose logs --no-color --tail 400 backend 2>/dev/null || true)"
-    local latest_startup_logs
-    latest_startup_logs="$(
-      echo "$logs" | awk '
-        /\[Server\] startup begin/ {block=$0 ORS; seen=1; next}
-        {if (seen) block=block $0 ORS}
-        END {if (seen) printf "%s", block; else printf "%s", $0}
-      '
-    )"
-    if [[ -z "$latest_startup_logs" ]]; then
-      latest_startup_logs="$logs"
-    fi
-
-    if echo "$latest_startup_logs" | grep -Fq "[StartupSelfCheck] failed, aborting server startup"; then
-      echo "[ssl] Backend startup self-check failed; stopping services and aborting init"
-      compose stop gateway backend >/dev/null || true
-      echo "$latest_startup_logs" | tail -n 60
-      return 1
-    fi
-
-    if echo "$latest_startup_logs" | grep -Fq "[StartupSelfCheck] summary status=PASS"; then
-      if echo "$latest_startup_logs" | grep -Fq "WebSocket server is running on"; then
-        if echo "$latest_startup_logs" | grep -Fq "HTTP log server is running on"; then
-          echo "[ssl] Backend startup passed"
-          return 0
-        fi
-        if echo "$latest_startup_logs" | grep -Fq "Admin API server is running on"; then
-          echo "[ssl] Backend startup passed"
-          return 0
-        fi
-      fi
-    fi
-
-    sleep 1
-    waited=$((waited + 1))
-  done
-
-  echo "[ssl] Backend startup check timed out; stopping services and aborting init"
-  compose logs --no-color --tail 80 backend 2>/dev/null || true
-  compose stop gateway backend >/dev/null || true
-  return 1
-}
-
 activate_latest_cert() {
   local domain="$1"
   local cert_dir
@@ -188,7 +138,6 @@ run_init() {
 
   echo "[ssl] Starting gateway/backend"
   compose up -d --build gateway backend
-  wait_backend_startup_or_fail
 
   local existing_cert
   existing_cert="$(pick_latest_cert_dir "$domain" || true)"
