@@ -234,11 +234,11 @@ class VoiceBotService(BaseModel):
                 elif not self.asr_client.inited:
                     self._log("need recreate asr conn")
                     inited_before = self.asr_client.inited
-                    self.asr_init_count += 1
-                    self._log(
-                        f"[ASR_INIT_COUNT] count={self.asr_init_count} source=runtime_reinit "
-                        f"service_id={id(self)} inited_before={inited_before}"
-                    )
+                    # self.asr_init_count += 1
+                    # self._log(
+                    #     f"[ASR_INIT_COUNT] count={self.asr_init_count} source=runtime_reinit "
+                    #     f"service_id={id(self)} inited_before={inited_before}"
+                    # )
                     await self.asr_client.init()
 
                 self._log(
