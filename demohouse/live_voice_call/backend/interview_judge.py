@@ -38,7 +38,7 @@ class InterviewJudge:
     def __init__(
         self,
         coverage_threshold: float = 0.7,
-        max_followups_per_question: int = 2,
+        max_followups_per_question: int = 1,
         llm_endpoint_id: Optional[str] = None,
         llm_decider: Optional[
             Callable[[str, str, int, Optional[Dict[str, Any]]], Awaitable[str]]
