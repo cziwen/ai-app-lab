@@ -9,6 +9,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License. 
 
+import asyncio
+import contextlib
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
 from arkitect.core.component.asr import ASRFullServerResponse, AsyncASRClient
@@ -40,6 +42,10 @@ StateInProgress = "InProgress"
 StateIdle = "Idle"
 # asr continuous detection no input duration, empirical value
 ASRInterval = 2000
+ASR_INIT_TIMEOUT_SECONDS = 12
+ASR_INIT_MAX_ATTEMPTS = 2
+ASR_INIT_RETRY_BACKOFF_SECONDS = 0.2
+ASR_INIT_FATAL_FAILURE_STREAK = 3
 # Default tts live_voice_call
 DEFAULT_SPEAKER = "zh_female_sajiaonvyou_moon_bigtts"
 # Greeting message spoken by the bot before the user starts
@@ -62,6 +68,10 @@ DEFAULT_INTERVIEW_QUESTIONS: List[Dict[str, Any]] = [
         "evidence": {"must_cover": ["拆解", "推动", "复盘"]},
     },
 ]
+
+
+class ASRInitUnavailableError(RuntimeError):
+    """Raised when ASR init keeps failing and should be surfaced to frontend."""
 
 
 class VoiceBotService(BaseModel):
@@ -95,6 +105,7 @@ class VoiceBotService(BaseModel):
     asr_no_input_duration: int = 0  # Cumulated no live_voice_call recognition duration
     asr_last_duration: int = 0  # Last asr recognition duration
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
+    asr_init_failure_streak: int = 0  # Consecutive init failures since last success
 
     class Config:
         """Configuration for this pydantic object."""
@@ -182,6 +193,55 @@ class VoiceBotService(BaseModel):
         """Yield a single greeting text for TTS processing (no LLM call)."""
         yield text
 
+    def _build_asr_unavailable_event(self) -> WebEvent:
+        return WebEvent.from_payload(
+            BotErrorPayload(
+                error=ErrorEvent(
+                    code="ASR_INIT_UNAVAILABLE",
+                    message="语音识别服务暂时不可用，请检查网络后重试",
+                )
+            )
+        )
+
+    async def _ensure_asr_ready(self) -> bool:
+        if not self.asr_client:
+            self._log("ASR_INIT_FAIL reason=client_missing")
+            return False
+        if self.asr_client.inited:
+            return True
+
+        for attempt in range(1, ASR_INIT_MAX_ATTEMPTS + 1):
+            self._log(
+                f"ASR_INIT_START attempt={attempt} timeout={ASR_INIT_TIMEOUT_SECONDS}s"
+            )
+            try:
+                await asyncio.wait_for(
+                    self.asr_client.init(), timeout=ASR_INIT_TIMEOUT_SECONDS
+                )
+                self._log(f"ASR_INIT_OK attempt={attempt}")
+                return True
+            except asyncio.TimeoutError:
+                self._log(
+                    f"ASR_INIT_TIMEOUT attempt={attempt} timeout={ASR_INIT_TIMEOUT_SECONDS}s"
+                )
+            except Exception as init_err:
+                self._log(f"ASR_INIT_FAIL attempt={attempt} stage=init error={init_err}")
+
+            try:
+                await self.asr_client.close()
+            except Exception as close_err:
+                self._log(f"ASR_INIT_FAIL attempt={attempt} stage=close error={close_err}")
+
+            if attempt < ASR_INIT_MAX_ATTEMPTS:
+                self._log(
+                    f"ASR_INIT_RETRY next_attempt={attempt + 1} "
+                    f"backoff={ASR_INIT_RETRY_BACKOFF_SECONDS}s"
+                )
+                await asyncio.sleep(ASR_INIT_RETRY_BACKOFF_SECONDS)
+
+        self._log(f"ASR_INIT_FAIL attempts={ASR_INIT_MAX_ATTEMPTS}")
+        return False
+
     async def send_greeting(self) -> AsyncIterable[WebEvent]:
         """Send an initial greeting through TTS before the conversation starts."""
         greeting_stream = self._greeting_text_stream(GREETING_TEXT)
@@ -209,15 +269,21 @@ class VoiceBotService(BaseModel):
             yield event
 
         asr_responses = await self.handle_input_event(inputs)
-        async for asr_recognized in self.handle_asr_response(asr_responses):
-            # set state into InProgress
-            self.state = StateInProgress
-            yield WebEvent.from_payload(asr_recognized)
-            llm_stream_rsp = self.stream_llm_chat(asr_recognized.sentence)
-            async for payload in self.handle_tts_response(llm_stream_rsp):
-                yield WebEvent.from_payload(payload)
-            # recreate the asr and tts client
+        try:
+            async for asr_recognized in self.handle_asr_response(asr_responses):
+                # set state into InProgress
+                self.state = StateInProgress
+                yield WebEvent.from_payload(asr_recognized)
+                llm_stream_rsp = self.stream_llm_chat(asr_recognized.sentence)
+                async for payload in self.handle_tts_response(llm_stream_rsp):
+                    yield WebEvent.from_payload(payload)
+                # recreate the asr and tts client
+                self.state = StateIdle
+        except ASRInitUnavailableError as asr_err:
             self.state = StateIdle
+            self._log(f"ASR_INIT_FATAL error={asr_err}")
+            yield self._build_asr_unavailable_event()
+            return
 
     async def handle_input_event(
         self, inputs: AsyncIterable[WebEvent]
@@ -225,6 +291,7 @@ class VoiceBotService(BaseModel):
         """
         Handle input events and generate ASR responses.
         """
+        fatal_error_queue: asyncio.Queue[ASRInitUnavailableError] = asyncio.Queue(maxsize=1)
 
         async def async_gen() -> AsyncIterable[bytes]:
             async for input_event in inputs:
@@ -233,13 +300,29 @@ class VoiceBotService(BaseModel):
                     continue
                 elif not self.asr_client.inited:
                     self._log("need recreate asr conn")
-                    inited_before = self.asr_client.inited
-                    # self.asr_init_count += 1
-                    # self._log(
-                    #     f"[ASR_INIT_COUNT] count={self.asr_init_count} source=runtime_reinit "
-                    #     f"service_id={id(self)} inited_before={inited_before}"
-                    # )
-                    await self.asr_client.init()
+                    ok = await self._ensure_asr_ready()
+                    if not ok:
+                        self.asr_init_failure_streak += 1
+                        self._log(
+                            f"ASR_INIT_STREAK value={self.asr_init_failure_streak} "
+                            f"threshold={ASR_INIT_FATAL_FAILURE_STREAK}"
+                        )
+                        if self.asr_init_failure_streak >= ASR_INIT_FATAL_FAILURE_STREAK:
+                            self._log(
+                                "ASR_INIT_FATAL reason=too_many_consecutive_failures "
+                                f"streak={self.asr_init_failure_streak}"
+                            )
+                            with contextlib.suppress(Exception):
+                                await self.asr_client.close()
+                            with contextlib.suppress(asyncio.QueueFull):
+                                fatal_error_queue.put_nowait(
+                                    ASRInitUnavailableError(
+                                        "ASR init failed repeatedly"
+                                    )
+                                )
+                            return
+                        continue
+                    self.asr_init_failure_streak = 0
 
                 self._log(
                     f"receive input, event={input_event.event} payload={input_event.payload}"
@@ -251,7 +334,32 @@ class VoiceBotService(BaseModel):
                 elif input_event.event == USER_AUDIO and input_event.data:
                     yield input_event.data
 
-        return self.asr_client.stream_asr(async_gen())
+        asr_stream = self.asr_client.stream_asr(async_gen())
+
+        async def merged_stream() -> AsyncIterable[ASRFullServerResponse]:
+            asr_iter = asr_stream.__aiter__()
+            while True:
+                next_asr_task = asyncio.create_task(asr_iter.__anext__())
+                fatal_error_task = asyncio.create_task(fatal_error_queue.get())
+                done, pending = await asyncio.wait(
+                    {next_asr_task, fatal_error_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if fatal_error_task in done:
+                    next_asr_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await next_asr_task
+                    raise fatal_error_task.result()
+
+                try:
+                    rsp = next_asr_task.result()
+                except StopAsyncIteration:
+                    break
+                yield rsp
+
+        return merged_stream()
 
     async def handle_asr_response(
         self, asr_responses: AsyncIterable[ASRFullServerResponse]
@@ -445,98 +553,104 @@ class VoiceBotService(BaseModel):
 
         # Phase 2: Main interview loop
         asr_responses = await self.handle_input_event(inputs)
-        async for asr_recognized in self.handle_asr_response(asr_responses):
-            self.state = StateInProgress
-            yield WebEvent.from_payload(asr_recognized)
-            candidate_text = asr_recognized.sentence
-            self._log(f"[Interview] Candidate answer: '{candidate_text}'")
-            self._emit_candidate_text(candidate_text)
+        try:
+            async for asr_recognized in self.handle_asr_response(asr_responses):
+                self.state = StateInProgress
+                yield WebEvent.from_payload(asr_recognized)
+                candidate_text = asr_recognized.sentence
+                self._log(f"[Interview] Candidate answer: '{candidate_text}'")
+                self._emit_candidate_text(candidate_text)
 
-            # Add candidate answer to conversation history
-            self.history_messages.append(
-                ArkMessage(**{"role": "user", "content": candidate_text})
-            )
-
-            # LLM call #1: InterviewJudge evaluates the answer
-            self._log("[Interview] Calling InterviewJudge (LLM #1)...")
-            answer_response: FlowResponse = await flow.receive_candidate_answer(
-                candidate_text
-            )
-            decision = answer_response.decision
-
-            if decision:
-                self._log(
-                    f"[Interview] Judge result: "
-                    f"{answer_response.state_before}->{answer_response.state_after} "
-                    f"q={answer_response.question_id} "
-                    f"move_forward={decision.move_forward} "
-                    f"need_follow_up={decision.need_follow_up} "
-                    f"coverage={decision.coverage_score:.2f} "
-                    f"reason={decision.reason}"
-                )
-            else:
-                self._log(
-                    f"[Interview] Judge result: "
-                    f"{answer_response.state_before}->{answer_response.state_after} "
-                    f"q={answer_response.question_id} decision=None"
-                )
-            for t in answer_response.transition_trace:
-                self._log(f"[Interview]   transition: {t}")
-
-            # Check if interview ended (e.g. global turn limit)
-            if flow.is_done:
-                self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
-                wrap_response = await flow.produce_interviewer_message()
-                if wrap_response.interviewer_text:
-                    self._log(f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'")
-                    async for event in self._send_scripted_text(
-                        wrap_response.interviewer_text
-                    ):
-                        yield event
-                self.state = StateIdle
-                self._emit_interview_completed()
-                self._log("[Interview] Interview ended")
-                break
-
-            # Get next interviewer message if flow state needs one
-            next_interviewer_text = ""
-            if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
-                next_response = await flow.produce_interviewer_message()
-                next_interviewer_text = next_response.interviewer_text
-                self._log(
-                    f"[Interview] Next action: "
-                    f"{next_response.state_before}->{next_response.state_after} "
-                    f"q={next_response.question_id} "
-                    f"text='{next_interviewer_text}'"
+                # Add candidate answer to conversation history
+                self.history_messages.append(
+                    ArkMessage(**{"role": "user", "content": candidate_text})
                 )
 
+                # LLM call #1: InterviewJudge evaluates the answer
+                self._log("[Interview] Calling InterviewJudge (LLM #1)...")
+                answer_response: FlowResponse = await flow.receive_candidate_answer(
+                    candidate_text
+                )
+                decision = answer_response.decision
+
+                if decision:
+                    self._log(
+                        f"[Interview] Judge result: "
+                        f"{answer_response.state_before}->{answer_response.state_after} "
+                        f"q={answer_response.question_id} "
+                        f"move_forward={decision.move_forward} "
+                        f"need_follow_up={decision.need_follow_up} "
+                        f"coverage={decision.coverage_score:.2f} "
+                        f"reason={decision.reason}"
+                    )
+                else:
+                    self._log(
+                        f"[Interview] Judge result: "
+                        f"{answer_response.state_before}->{answer_response.state_after} "
+                        f"q={answer_response.question_id} decision=None"
+                    )
+                for t in answer_response.transition_trace:
+                    self._log(f"[Interview]   transition: {t}")
+
+                # Check if interview ended (e.g. global turn limit)
                 if flow.is_done:
-                    self._log("[Interview] Flow reached DONE after producing message")
-                    async for event in self._send_scripted_text(next_interviewer_text):
-                        yield event
+                    self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
+                    wrap_response = await flow.produce_interviewer_message()
+                    if wrap_response.interviewer_text:
+                        self._log(f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'")
+                        async for event in self._send_scripted_text(
+                            wrap_response.interviewer_text
+                        ):
+                            yield event
                     self.state = StateIdle
                     self._emit_interview_completed()
                     self._log("[Interview] Interview ended")
                     break
 
-            # LLM call #2: Generate natural interviewer speech
-            interview_context = self._build_interview_context(
-                decision=decision,
-                next_question_or_followup=next_interviewer_text,
-                flow_state=flow.state,
-            )
-            self._log(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
+                # Get next interviewer message if flow state needs one
+                next_interviewer_text = ""
+                if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
+                    next_response = await flow.produce_interviewer_message()
+                    next_interviewer_text = next_response.interviewer_text
+                    self._log(
+                        f"[Interview] Next action: "
+                        f"{next_response.state_before}->{next_response.state_after} "
+                        f"q={next_response.question_id} "
+                        f"text='{next_interviewer_text}'"
+                    )
 
-            try:
-                llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
-                async for payload in self.handle_tts_response(llm_stream_rsp):
-                    yield WebEvent.from_payload(payload)
-                self._log("[Interview] Interviewer LLM response sent via TTS")
-            except Exception as e:
-                self._log(f"[Interview] Main LLM error: {e}, falling back to scripted text")
-                fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
-                async for event in self._send_scripted_text(fallback_text):
-                    yield event
+                    if flow.is_done:
+                        self._log("[Interview] Flow reached DONE after producing message")
+                        async for event in self._send_scripted_text(next_interviewer_text):
+                            yield event
+                        self.state = StateIdle
+                        self._emit_interview_completed()
+                        self._log("[Interview] Interview ended")
+                        break
 
+                # LLM call #2: Generate natural interviewer speech
+                interview_context = self._build_interview_context(
+                    decision=decision,
+                    next_question_or_followup=next_interviewer_text,
+                    flow_state=flow.state,
+                )
+                self._log(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
+
+                try:
+                    llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
+                    async for payload in self.handle_tts_response(llm_stream_rsp):
+                        yield WebEvent.from_payload(payload)
+                    self._log("[Interview] Interviewer LLM response sent via TTS")
+                except Exception as e:
+                    self._log(f"[Interview] Main LLM error: {e}, falling back to scripted text")
+                    fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
+                    async for event in self._send_scripted_text(fallback_text):
+                        yield event
+
+                self.state = StateIdle
+                self._log(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")
+        except ASRInitUnavailableError as asr_err:
             self.state = StateIdle
-            self._log(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")
+            self._log(f"[Interview] ASR init fatal: {asr_err}")
+            yield self._build_asr_unavailable_event()
+            return
