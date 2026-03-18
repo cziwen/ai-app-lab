@@ -4,3 +4,6 @@ deploy/letsencrypt/*
 deploy/acme-webroot/*
 !deploy/letsencrypt/.gitkeep
 !deploy/acme-webroot/.gitkeep
+*.wav
+*.mp3
+*.csv
