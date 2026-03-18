@@ -22,7 +22,7 @@ cp .env.example .env
 至少确认：
 
 - `PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in`
-- `LETSENCRYPT_EMAIL=2377963631@qq.com`
+- `LETSENCRYPT_EMAIL=2377963631@qq.com`（建议填写你常用且可收邮件的邮箱，用于到期提醒）
 - 业务凭据 `ARK_API_KEY`、`LLM_ENDPOINT_ID`、`ASR_*`、`TTS_*`
 
 ## 第二步：一键初始化 HTTPS
@@ -49,6 +49,14 @@ cp .env.example .env
 - 执行 `./deploy/ssl.sh renew`
 - 成功后自动重载 Nginx
 
+## 线上快速修复（证书已签发但链接错了）
+
+```bash
+./deploy/ssl.sh activate
+```
+
+说明：该命令不会重新签发证书，只会重新绑定最新证书并 reload Nginx。
+
 ## 手工续订 / 演练
 
 ```bash
@@ -72,7 +80,8 @@ openssl s_client -connect smartinterview.cn:443 -servername smartinterview.cn </
 ## 常见问题
 
 1. 仍是 self-signed
-- 执行：`./deploy/ssl.sh init`
+- 先执行：`./deploy/ssl.sh activate`
+- 不行再执行：`./deploy/ssl.sh init`
 - 检查：`ls -l deploy/letsencrypt/live/__active__`
 
 2. 续订失败

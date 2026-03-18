@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-}"
 if [[ -z "$MODE" ]]; then
-  echo "Usage: ./deploy/ssl.sh <init|renew|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+  echo "Usage: ./deploy/ssl.sh <init|renew|activate|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
   exit 1
 fi
 shift || true
@@ -91,14 +91,33 @@ pick_latest_cert_dir() {
 
 switch_active_link() {
   local cert_dir="$1"
+  local cert_name
+  cert_name="$(basename "$cert_dir")"
+
   mkdir -p "$LE_LIVE_DIR"
-  ln -sfn "$cert_dir" "$LE_LIVE_DIR/__active__"
-  echo "[ssl] __active__ -> $cert_dir"
+  (
+    cd "$LE_LIVE_DIR"
+    ln -sfn "$cert_name" "__active__"
+  )
+
+  echo "[ssl] selected cert dir: $cert_dir"
+  echo "[ssl] __active__ -> $cert_name"
 }
 
 reload_gateway() {
   compose exec -T gateway nginx -t
   compose exec -T gateway nginx -s reload
+}
+
+activate_latest_cert() {
+  local cert_dir
+  cert_dir="$(pick_latest_cert_dir)"
+  switch_active_link "$cert_dir"
+
+  echo "[ssl] Reloading gateway"
+  reload_gateway
+
+  echo "[ssl] Activate completed"
 }
 
 run_init() {
@@ -113,12 +132,7 @@ run_init() {
     -m "$EMAIL" \
     --agree-tos --no-eff-email
 
-  local cert_dir
-  cert_dir="$(pick_latest_cert_dir)"
-  switch_active_link "$cert_dir"
-
-  echo "[ssl] Reloading gateway"
-  reload_gateway
+  activate_latest_cert
 
   echo "[ssl] Init completed"
 }
@@ -129,12 +143,7 @@ run_renew() {
     --webroot -w "$ACME_WEBROOT" \
     "${EXTRA_ARGS[@]}"
 
-  local cert_dir
-  cert_dir="$(pick_latest_cert_dir)"
-  switch_active_link "$cert_dir"
-
-  echo "[ssl] Reloading gateway"
-  reload_gateway
+  activate_latest_cert
 
   echo "[ssl] Renew completed"
 }
@@ -162,12 +171,15 @@ case "$MODE" in
   renew)
     run_renew
     ;;
+  activate)
+    activate_latest_cert
+    ;;
   install-cron)
     install_cron
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Usage: ./deploy/ssl.sh <init|renew|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+    echo "Usage: ./deploy/ssl.sh <init|renew|activate|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
     exit 1
     ;;
 esac
