@@ -1,2 +1,6 @@
 backend/data/
 .env
+deploy/letsencrypt/*
+deploy/acme-webroot/*
+!deploy/letsencrypt/.gitkeep
+!deploy/acme-webroot/.gitkeep

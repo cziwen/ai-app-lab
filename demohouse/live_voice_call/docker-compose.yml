@@ -31,4 +31,17 @@ services:
       - backend
     ports:
       - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/letsencrypt:/etc/letsencrypt
+      - ./deploy/acme-webroot:/var/www/certbot
     restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: live-voice-certbot
+    profiles:
+      - certbot
+    volumes:
+      - ./deploy/letsencrypt:/etc/letsencrypt
+      - ./deploy/acme-webroot:/var/www/certbot

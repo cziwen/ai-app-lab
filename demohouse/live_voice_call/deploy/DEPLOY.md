@@ -1,146 +1,172 @@
-# ECS 单机部署指南（最小可用）
+# ECS 单机部署指南（HTTPS 正式对外）
 
-本文档用于在一台 ECS 上部署本项目，采用 Docker Compose + 单入口 Nginx（HTTP）。
-目标：10-20 分钟内完成从配置到可访问。
+本文档用于在一台 ECS 上部署本项目，并为 `smartinterview.cn` 配置 Let’s Encrypt 免费证书与自动续订。
 
-## 1. 架构与端口
+## 1. 架构说明
 
-- 对外入口：`gateway`（Nginx）暴露 `80`
-- 内部服务：`backend` 暴露容器内端口
-  - WebSocket: `8888`（通过 `/ws` 代理）
-  - 前端日志: `8889`（通过 `/api/frontend-logs` 代理）
-  - Admin API: `8890`（通过 `/api/*` 代理）
+- `gateway`（Nginx）对外暴露 `80/443`
+- `backend` 仅容器网络可见：`8888/8889/8890`
+- 证书方案：Let’s Encrypt + HTTP-01（`/.well-known/acme-challenge/`）
 
-## 2. 前置条件
+## 2. 前置检查
 
-- 已安装 Docker 与 Docker Compose
-- ECS 安全组已放通入方向 `80` 端口
-- 以下命令均在仓库根目录执行：
+以下命令均在仓库根目录执行：
 
 ```bash
 cd /path/to/demohouse/live_voice_call
 ```
 
-## 3. 配置环境变量
+确认 DNS 已解析到 ECS：
 
-1. 复制环境变量模板：
+```bash
+dig +short smartinterview.cn
+```
+
+要求：返回 ECS 公网 IP。
+
+确认安全组放通：
+
+- `80/tcp`
+- `443/tcp`
+
+## 3. 环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-2. 编辑 `.env` 并填写必填项：
+重点检查 `.env`：
 
-- 凭据类
-  - `ARK_API_KEY`
-  - `LLM_ENDPOINT_ID`
-  - `ASR_APP_ID`
-  - `ASR_ACCESS_TOKEN`
-  - `TTS_APP_ID`
-  - `TTS_ACCESS_TOKEN`
-  - `TTS_SPEAKER`
-- 管理后台账号
-  - `ADMIN_USERNAME`
-  - `ADMIN_PASSWORD`
-- 外链基址
-  - `PUBLIC_INTERVIEW_BASE_URL`，示例：`http://<ECS_PUBLIC_IP>/check-in`
+- `PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in`
+- 凭据：`ARK_API_KEY`、`LLM_ENDPOINT_ID`、`ASR_*`、`TTS_*`
+- 管理员：`ADMIN_USERNAME`、`ADMIN_PASSWORD`
 
-说明：后端启动会执行 LLM/ASR/TTS 自检，以上凭据缺失或错误会导致后端直接退出。
-
-## 4. 启动服务
+## 4. 启动网关与后端
 
 ```bash
-docker compose up --build -d
+docker compose up --build -d gateway backend
 docker compose ps
 ```
 
-预期：`gateway` 和 `backend` 均为 `Up`。
+说明：首次启动时网关会自动生成一张“临时自签证书”用于占位，避免 Nginx 因证书不存在而无法启动。
 
-## 5. 验证部署
+## 5. 首次签发正式证书
 
-1. 健康检查：
-
-```bash
-curl http://localhost/api/health
-```
-
-预期返回：
-
-```json
-{"status":"ok"}
-```
-
-2. 浏览器访问：
-
-- 首页：`http://<ECS_PUBLIC_IP>/`
-- 管理后台登录：`http://<ECS_PUBLIC_IP>/admin/login`
-- 面试链接（示例）：`http://<ECS_PUBLIC_IP>/check-in?token=INT-xxxx`
-
-## 6. 当前环境变量接口说明
-
-- 后端监听（compose 已默认注入）
-  - `WS_HOST` / `WS_PORT`
-  - `LOG_HOST` / `LOG_PORT`
-  - `ADMIN_API_HOST` / `ADMIN_API_PORT`
-- 业务与凭据
-  - `ARK_API_KEY`
-  - `LLM_ENDPOINT_ID`
-  - `ASR_APP_ID` / `ASR_ACCESS_TOKEN`
-  - `TTS_APP_ID` / `TTS_ACCESS_TOKEN` / `TTS_SPEAKER`
-- 管理后台
-  - `ADMIN_USERNAME` / `ADMIN_PASSWORD`
-- 外链
-  - `PUBLIC_INTERVIEW_BASE_URL`
-
-## 7. 基础运维命令
+执行签发（HTTP-01）：
 
 ```bash
-# 查看状态
+docker compose --profile certbot run --rm certbot certonly \
+  --webroot -w /var/www/certbot \
+  -d smartinterview.cn \
+  -m 2377963631@qq.com \
+  --agree-tos --no-eff-email
+```
+
+签发成功后重载网关：
+
+```bash
+docker compose exec gateway nginx -t
+docker compose exec gateway nginx -s reload
+```
+
+## 6. 上线验证
+
+1. ACME 路径可达（404 可接受）：
+
+```bash
+curl -I http://smartinterview.cn/.well-known/acme-challenge/test
+```
+
+2. HTTP 自动跳转 HTTPS：
+
+```bash
+curl -I http://smartinterview.cn
+```
+
+预期：`301` 且 `Location: https://smartinterview.cn/...`
+
+3. HTTPS 可用：
+
+```bash
+curl -I https://smartinterview.cn
+```
+
+4. 证书有效期：
+
+```bash
+openssl s_client -connect smartinterview.cn:443 -servername smartinterview.cn </dev/null 2>/dev/null | openssl x509 -noout -dates
+```
+
+5. 页面访问：
+
+- `https://smartinterview.cn/`
+- `https://smartinterview.cn/admin/login`
+- `https://smartinterview.cn/check-in?token=INT-xxxx`
+
+## 7. 自动续订（cron）
+
+编辑 crontab：
+
+```bash
+crontab -e
+```
+
+添加每日任务（凌晨 3 点）：
+
+```cron
+0 3 * * * cd /path/to/demohouse/live_voice_call && docker compose --profile certbot run --rm certbot renew --webroot -w /var/www/certbot && docker compose exec -T gateway nginx -s reload >> /var/log/live-voice-certbot-renew.log 2>&1
+```
+
+首次加完后执行一次 dry-run：
+
+```bash
+docker compose --profile certbot run --rm certbot renew --dry-run --webroot -w /var/www/certbot
+docker compose exec gateway nginx -s reload
+```
+
+## 8. 常用运维命令
+
+```bash
+# 状态
 docker compose ps
 
-# 查看日志
+# 日志
 docker compose logs -f gateway
 docker compose logs -f backend
 
 # 重启
 docker compose restart
 
-# 停止并移除容器（不删除挂载数据）
+# 停止
 docker compose down
 
-# 重新构建并启动
+# 重建并启动
 docker compose up --build -d
 ```
 
-## 8. 最小排障
+## 9. 常见问题
 
-### 8.1 后端反复退出
+### 9.1 certbot 签发失败
 
-现象：`backend` 容器不断重启或退出。
+常见原因：
+
+- 域名未正确解析到 ECS
+- 80 端口未放通
+- 域名被 CDN 代理且未放行 HTTP-01
 
 排查：
 
 ```bash
-docker compose logs -f backend
-```
-
-常见原因：启动自检失败（凭据缺失/错误、外部依赖不可用）。
-
-### 8.2 页面可打开但接口失败
-
-现象：前端页面能打开，但请求报错或管理后台不可用。
-
-排查顺序：
-
-1. 确认 ECS 安全组已放通 `80`。
-2. 查看网关日志：
-
-```bash
 docker compose logs -f gateway
+docker compose --profile certbot run --rm certbot certonly --webroot -w /var/www/certbot -d smartinterview.cn -m 2377963631@qq.com --agree-tos --no-eff-email -v
 ```
 
-3. 查看后端日志：
+### 9.2 后端容器反复退出
+
+后端启动前会执行 LLM/ASR/TTS 自检，失败会直接退出：
 
 ```bash
 docker compose logs -f backend
 ```
+
+修复 `.env` 中对应凭据后再重启。
