@@ -33,7 +33,7 @@
 ## 环境准备
 
 - Poetry 1.6.1 版本
-- Python 版本要求大于等于 3.8，小于 3.12
+- Python 版本要求大于等于 3.9，小于 3.12
 - Node 18.0 或以上版本 
 - PNPM 8.10 或以上版本
 - 获取语音技术产品的 APP ID 和 Access Token，获取方式参见【附录】
@@ -85,6 +85,10 @@
 
    后端启动前会自动执行一次 `LLM + ASR + TTS` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
+   默认会同时启动：
+   - 面试 WebSocket：`ws://127.0.0.1:8888`
+   - 前端日志接收：`http://127.0.0.1:8889/api/frontend-logs`
+   - 管理后台 API：`http://127.0.0.1:8890`
 
 4. 启动web端
 
@@ -95,6 +99,16 @@
     ```
 
 5. 访问`http://localhost:8080`即可
+
+## 管理后台
+
+- 登录页：`http://localhost:8080/admin/login`
+- 后台页：`http://localhost:8080/admin`
+- 默认管理员账号通过环境变量初始化：
+  - `ADMIN_USERNAME`（默认 `admin`）
+  - `ADMIN_PASSWORD`（默认 `admin123456`）
+- 候选人面试链接基址可通过 `PUBLIC_INTERVIEW_BASE_URL` 配置（默认 `http://localhost:8080/check-in`）
+- 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认 `http://localhost:8890`）
 
 ## WebSocket交互协议说明
 

@@ -11,7 +11,13 @@
 
 import { BrowserRouter, Route, Routes } from '@modern-js/runtime/router';
 import { SessionAuthProvider } from '@/auth/context';
-import { RequireToken, RequireTokenAndCheckIn } from '@/auth/guards';
+import {
+  RequireActiveInterviewToken,
+  RequireToken,
+  RequireTokenAndCheckIn,
+} from '@/auth/guards';
+import { AdminPage } from '@/routes/admin';
+import { AdminLoginPage } from '@/routes/admin-login';
 import { CheckInPage } from '@/routes/check-in';
 import { HangupResultPage } from '@/routes/hangup-result';
 import { InvalidLinkPage } from '@/routes/invalid-link';
@@ -33,9 +39,9 @@ export default () => {
           <Route
             path="/check-in"
             element={
-              <RequireToken>
+              <RequireActiveInterviewToken>
                 <CheckInPage />
-              </RequireToken>
+              </RequireActiveInterviewToken>
             }
           />
           <Route
@@ -47,6 +53,8 @@ export default () => {
             }
           />
           <Route path="/invalid-link" element={<InvalidLinkPage />} />
+          <Route path="/admin/login" element={<AdminLoginPage />} />
+          <Route path="/admin" element={<AdminPage />} />
         </Routes>
       </SessionAuthProvider>
     </BrowserRouter>

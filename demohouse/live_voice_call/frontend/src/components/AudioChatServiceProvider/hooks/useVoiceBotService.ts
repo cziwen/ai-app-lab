@@ -21,6 +21,24 @@ import { useSpeakerConfig } from '@/components/AudioChatServiceProvider/hooks/us
 import { useMessageList } from '@/components/AudioChatProvider/hooks/useMessageList';
 import { useSyncRef } from '@/hooks/useSyncRef';
 import { useWsUrl } from '@/components/AudioChatServiceProvider/hooks/useWsUrl';
+import { useSessionAuth } from '@/auth/context';
+
+const appendTokenToWsUrl = (baseWsUrl: string, token?: string | null) => {
+  if (!token) {
+    return baseWsUrl;
+  }
+  const trimmed = token.trim();
+  if (!trimmed) {
+    return baseWsUrl;
+  }
+  if (typeof window !== 'undefined') {
+    const resolved = new URL(baseWsUrl, window.location.href);
+    resolved.searchParams.set('token', trimmed);
+    return resolved.toString();
+  }
+  const separator = baseWsUrl.includes('?') ? '&' : '?';
+  return `${baseWsUrl}${separator}token=${encodeURIComponent(trimmed)}`;
+};
 
 export const useVoiceBotService = () => {
   const {
@@ -44,6 +62,7 @@ export const useVoiceBotService = () => {
   } = useAudioChatState();
 
   const { wsUrl } = useWsUrl();
+  const { token } = useSessionAuth();
 
   const { log } = useLogContent();
   const parseBotError = (payload?: Record<string, any> | BotErrorPayload) => {
@@ -83,8 +102,9 @@ export const useVoiceBotService = () => {
       if (!serviceRef.current) {
         return;
       }
+      const wsUrlWithToken = appendTokenToWsUrl(wsUrl, token);
       serviceRef.current
-        .connect()
+        .connect(wsUrlWithToken)
         .then(() => {
           setWsConnected(true);
           log('connect success');
