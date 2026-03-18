@@ -50,9 +50,10 @@ export default class VoiceBotService {
     this.onClose = props.onClose;
     this.onErrorCallback = props.onError;
   }
-  public async connect(): Promise<WebSocket> {
+  public async connect(overrideWsUrl?: string): Promise<WebSocket> {
+    const targetWsUrl = overrideWsUrl || this.ws_url;
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.ws_url);
+      const ws = new WebSocket(targetWsUrl);
       ws.onopen = () => {
         if (this.audioCtx.state === 'closed') {
           this.audioCtx = new AudioContext();

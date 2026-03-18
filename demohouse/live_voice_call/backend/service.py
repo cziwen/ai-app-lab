@@ -9,7 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License. 
 
-from typing import Any, AsyncIterable, Dict, List, Optional, Union
+from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
 from arkitect.core.component.asr import ASRFullServerResponse, AsyncASRClient
 from arkitect.core.component.llm import BaseChatLanguageModel
@@ -44,7 +44,7 @@ DEFAULT_SPEAKER = "zh_female_sajiaonvyou_moon_bigtts"
 # Greeting message spoken by the bot before the user starts
 GREETING_TEXT = "你好，欢迎参加今天的面试。请先做一个简短的自我介绍吧。"
 
-INTERVIEW_QUESTIONS: List[Dict[str, Any]] = [
+DEFAULT_INTERVIEW_QUESTIONS: List[Dict[str, Any]] = [
     {
         "question_id": "q1",
         "main_question": "请用1分钟做自我介绍，重点说与你申请岗位相关的经历。",
@@ -81,6 +81,11 @@ class VoiceBotService(BaseModel):
     interview_mode: bool = False
     interview_flow: Optional[Any] = None
     interview_judge: Optional[Any] = None
+    interview_questions: Optional[List[Dict[str, Any]]] = None
+    on_candidate_sentence: Optional[Callable[[str], None]] = None
+    on_bot_sentence: Optional[Callable[[str], None]] = None
+    on_bot_audio_chunk: Optional[Callable[[bytes], None]] = None
+    on_interview_completed: Optional[Callable[[], None]] = None
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
 
@@ -113,16 +118,53 @@ class VoiceBotService(BaseModel):
 
 
         if self.interview_mode:
+            flow_questions = self.interview_questions or DEFAULT_INTERVIEW_QUESTIONS
             self.interview_judge = InterviewJudge(
                 llm_endpoint_id=self.llm_ep_id,
                 max_followups_per_question=1,
                 coverage_threshold=0.7,
             )
             self.interview_flow = InterviewFlow(
-                questions=INTERVIEW_QUESTIONS,
+                questions=flow_questions,
                 judge=self.interview_judge,
                 max_followups_per_question=1,
                 global_turn_limit=20,
+            )
+
+    def _emit_bot_text(self, text: str) -> None:
+        if not text or not self.on_bot_sentence:
+            return
+        try:
+            self.on_bot_sentence(text)
+        except Exception as callback_error:
+            INFO(f"[InterviewPersist] on_bot_sentence callback failed: {callback_error}")
+
+    def _emit_candidate_text(self, text: str) -> None:
+        if not text or not self.on_candidate_sentence:
+            return
+        try:
+            self.on_candidate_sentence(text)
+        except Exception as callback_error:
+            INFO(
+                f"[InterviewPersist] on_candidate_sentence callback failed: {callback_error}"
+            )
+
+    def _emit_bot_audio_chunk(self, chunk: bytes) -> None:
+        if not chunk or not self.on_bot_audio_chunk:
+            return
+        try:
+            self.on_bot_audio_chunk(chunk)
+        except Exception as callback_error:
+            INFO(f"[InterviewPersist] on_bot_audio_chunk callback failed: {callback_error}")
+
+    def _emit_interview_completed(self) -> None:
+        if not self.on_interview_completed:
+            return
+        try:
+            self.on_interview_completed()
+        except Exception as callback_error:
+            INFO(
+                f"[InterviewPersist] on_interview_completed callback failed: {callback_error}"
             )
 
     async def _greeting_text_stream(self, text: str) -> AsyncIterable[str]:
@@ -137,6 +179,7 @@ class VoiceBotService(BaseModel):
         self.history_messages.append(
             ArkMessage(**{"role": "assistant", "content": GREETING_TEXT})
         )
+        self._emit_bot_text(GREETING_TEXT)
 
     async def handler_loop(
         self, inputs: AsyncIterable[WebEvent]
@@ -256,6 +299,7 @@ class VoiceBotService(BaseModel):
                 buffer.clear()
             elif tts_rsp.audio:
                 buffer.extend(tts_rsp.audio)
+                self._emit_bot_audio_chunk(tts_rsp.audio)
 
             if tts_rsp.event == EventSessionFinished:
                 yield TTSDonePayload()
@@ -284,6 +328,7 @@ class VoiceBotService(BaseModel):
             self.history_messages.append(
                 ArkMessage(**{"role": "assistant", "content": completion_buffer})
             )
+            self._emit_bot_text(completion_buffer)
 
     async def _send_scripted_text(self, text: str) -> AsyncIterable[WebEvent]:
         """Send a pre-determined text string through TTS without an LLM call."""
@@ -293,6 +338,7 @@ class VoiceBotService(BaseModel):
         self.history_messages.append(
             ArkMessage(**{"role": "assistant", "content": text})
         )
+        self._emit_bot_text(text)
 
     def _build_interview_context(
         self,
@@ -351,6 +397,7 @@ class VoiceBotService(BaseModel):
             self.history_messages.append(
                 ArkMessage(**{"role": "assistant", "content": completion_buffer})
             )
+            self._emit_bot_text(completion_buffer)
 
     async def _interview_handler_loop(
         self, inputs: AsyncIterable[WebEvent]
@@ -359,12 +406,15 @@ class VoiceBotService(BaseModel):
         flow = self.interview_flow
         INFO("[Interview] Starting interview handler loop")
 
-        # Phase 1: Send intro + first question via TTS (no LLM needed)
+        # Phase 1: Send intro and first question separately via TTS (no LLM needed)
         intro_response = await flow.produce_interviewer_message()
         INFO(
             f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
             f"text='{intro_response.interviewer_text}'"
         )
+        if intro_response.interviewer_text:
+            async for event in self._send_scripted_text(intro_response.interviewer_text):
+                yield event
 
         first_question_response = await flow.produce_interviewer_message()
         INFO(
@@ -373,17 +423,11 @@ class VoiceBotService(BaseModel):
             f"q={first_question_response.question_id} "
             f"text='{first_question_response.interviewer_text}'"
         )
-
-        greeting_text = (
-            intro_response.interviewer_text + " " + first_question_response.interviewer_text
-        )
-        greeting_stream = self._greeting_text_stream(greeting_text)
-        async for payload in self.handle_tts_response(greeting_stream):
-            yield WebEvent.from_payload(payload)
-
-        self.history_messages.append(
-            ArkMessage(**{"role": "assistant", "content": greeting_text})
-        )
+        if first_question_response.interviewer_text:
+            async for event in self._send_scripted_text(
+                first_question_response.interviewer_text
+            ):
+                yield event
         INFO("[Interview] Greeting sent via TTS, waiting for candidate")
 
         # Phase 2: Main interview loop
@@ -393,6 +437,7 @@ class VoiceBotService(BaseModel):
             yield WebEvent.from_payload(asr_recognized)
             candidate_text = asr_recognized.sentence
             INFO(f"[Interview] Candidate answer: '{candidate_text}'")
+            self._emit_candidate_text(candidate_text)
 
             # Add candidate answer to conversation history
             self.history_messages.append(
@@ -436,6 +481,7 @@ class VoiceBotService(BaseModel):
                     ):
                         yield event
                 self.state = StateIdle
+                self._emit_interview_completed()
                 INFO("[Interview] Interview ended")
                 break
 
@@ -456,6 +502,7 @@ class VoiceBotService(BaseModel):
                     async for event in self._send_scripted_text(next_interviewer_text):
                         yield event
                     self.state = StateIdle
+                    self._emit_interview_completed()
                     INFO("[Interview] Interview ended")
                     break
 

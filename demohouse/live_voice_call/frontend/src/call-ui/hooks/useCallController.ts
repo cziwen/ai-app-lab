@@ -273,9 +273,6 @@ export const useCallController = (): CallController => {
     if (mode !== 'real') {
       return undefined;
     }
-    if (endPhase === 'waiting_last_audio') {
-      return '面试已结束，正在播放最后一句...';
-    }
     if (endPhase === 'countdown' && endCountdownSec !== null) {
       return `面试已结束，${endCountdownSec} 秒后自动跳转结果页`;
     }

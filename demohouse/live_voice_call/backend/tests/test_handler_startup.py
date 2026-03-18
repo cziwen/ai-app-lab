@@ -60,7 +60,7 @@ def test_handler_main_aborts_on_failed_self_check(monkeypatch):
 
 def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
     async def _run():
-        called = {"ws": False, "http": False}
+        called = {"ws": False, "http": False, "api": False}
 
         class _WsServer:
             async def wait_closed(self):
@@ -68,6 +68,14 @@ def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
 
         class _HttpServer:
             async def serve_forever(self):
+                return None
+
+        class _ApiServer:
+            def __init__(self, _config):
+                pass
+
+            async def serve(self):
+                called["api"] = True
                 return None
 
         async def _fake_self_check(config):
@@ -84,9 +92,12 @@ def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
         monkeypatch.setattr(handler.websockets, "serve", _fake_ws_serve)
         monkeypatch.setattr(asyncio, "start_server", _fake_http_start)
+        monkeypatch.setattr(handler, "create_admin_app", lambda: object())
+        monkeypatch.setattr(handler.uvicorn, "Server", _ApiServer)
 
         await handler.main()
         assert called["ws"] is True
         assert called["http"] is True
+        assert called["api"] is True
 
     asyncio.run(_run())
