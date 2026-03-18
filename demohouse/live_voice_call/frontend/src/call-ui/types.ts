@@ -82,6 +82,15 @@ export interface WsReadyPayload {
   session?: string;
 }
 
+export interface WsQueuePayload {
+  position?: number;
+  active?: number;
+  limit?: number;
+  eta_seconds?: number;
+  wait_seconds?: number;
+  reason?: string;
+}
+
 export type WsContractEventMap = {
   BotReady: WsEventEnvelope<WsReadyPayload>;
   SentenceRecognized: WsEventEnvelope<WsSentencePayload>;
@@ -92,6 +101,11 @@ export type WsContractEventMap = {
   }>;
   BotUpdateConfig: WsEventEnvelope<{ speaker?: string }>;
   UserAudio: WsEventEnvelope<Record<string, never>>;
+  QueueEntered: WsEventEnvelope<WsQueuePayload>;
+  QueueUpdate: WsEventEnvelope<WsQueuePayload>;
+  QueueAdmitted: WsEventEnvelope<WsQueuePayload>;
+  QueueTimeout: WsEventEnvelope<WsQueuePayload>;
+  QueueCancelled: WsEventEnvelope<WsQueuePayload>;
 };
 
 export interface TranscriptListProps {

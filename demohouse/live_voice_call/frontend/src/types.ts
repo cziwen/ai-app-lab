@@ -37,6 +37,11 @@ export enum EventType {
   BotError = 'BotError',
   BotUpdateConfig = 'BotUpdateConfig',
   UserAudio = 'UserAudio',
+  QueueEntered = 'QueueEntered',
+  QueueUpdate = 'QueueUpdate',
+  QueueAdmitted = 'QueueAdmitted',
+  QueueTimeout = 'QueueTimeout',
+  QueueCancelled = 'QueueCancelled',
 }
 export interface IWebSocketResponse {
   messageType: number;

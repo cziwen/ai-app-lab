@@ -24,6 +24,11 @@ TTS_SENTENCE_END = "TTSSentenceEnd"
 TTS_DONE = "TTSDone"
 BOT_ERROR = "BotError"
 CONNECTION_CLOSED = "ConnectionClosed"
+QUEUE_ENTERED = "QueueEntered"
+QUEUE_UPDATE = "QueueUpdate"
+QUEUE_ADMITTED = "QueueAdmitted"
+QUEUE_TIMEOUT = "QueueTimeout"
+QUEUE_CANCELLED = "QueueCancelled"
 
 
 class WebPayload(ABC):
@@ -123,6 +128,32 @@ class BotErrorPayload(WebPayload, BaseModel):
     error: ErrorEvent = Field(default_factory=ErrorEvent)
 
 
+class QueueEnteredPayload(WebPayload, BaseModel):
+    position: int
+    active: int
+    limit: int
+
+
+class QueueUpdatePayload(WebPayload, BaseModel):
+    position: int
+    active: int
+    limit: int
+    eta_seconds: Optional[int] = None
+
+
+class QueueAdmittedPayload(WebPayload, BaseModel):
+    active: int
+    limit: int
+
+
+class QueueTimeoutPayload(WebPayload, BaseModel):
+    wait_seconds: int
+
+
+class QueueCancelledPayload(WebPayload, BaseModel):
+    reason: str
+
+
 # Define WebEvent
 class WebEvent(BaseModel):
     """
@@ -171,5 +202,15 @@ class WebEvent(BaseModel):
             return cls(event=TTS_DONE)
         elif isinstance(payload, BotErrorPayload):
             return cls(event=BOT_ERROR, payload=payload)
+        elif isinstance(payload, QueueEnteredPayload):
+            return cls(event=QUEUE_ENTERED, payload=payload)
+        elif isinstance(payload, QueueUpdatePayload):
+            return cls(event=QUEUE_UPDATE, payload=payload)
+        elif isinstance(payload, QueueAdmittedPayload):
+            return cls(event=QUEUE_ADMITTED, payload=payload)
+        elif isinstance(payload, QueueTimeoutPayload):
+            return cls(event=QUEUE_TIMEOUT, payload=payload)
+        elif isinstance(payload, QueueCancelledPayload):
+            return cls(event=QUEUE_CANCELLED, payload=payload)
         else:
             raise ValueError("Invalid payload type")

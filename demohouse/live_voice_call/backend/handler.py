@@ -10,13 +10,16 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import uuid
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
-from typing import AsyncIterable, Callable, Dict, Tuple
+from time import monotonic
+from typing import AsyncIterable, Callable, Deque, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import uvicorn
@@ -41,6 +44,8 @@ from startup_self_check import (
     load_runtime_config,
     run_startup_self_check,
 )
+from async_log import build_async_rotating_handler
+from llm_limiter import configure_llm_limit, get_llm_limit
 from utils import *
 
 RUNTIME_CONFIG = load_runtime_config()
@@ -58,28 +63,42 @@ os.makedirs(INTERVIEW_LOG_DIR, exist_ok=True)
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 SERVER_LOG_PATH = os.path.join(LOG_DIR, "backend.log")
+ASYNC_LOG_QUEUE_SIZE = int(os.getenv("ASYNC_LOG_QUEUE_SIZE", "10000"))
+ASYNC_LOG_FLUSH_INTERVAL_MS = int(os.getenv("ASYNC_LOG_FLUSH_INTERVAL_MS", "200"))
+ASYNC_LOG_DROP_POLICY = os.getenv("ASYNC_LOG_DROP_POLICY", "drop_oldest")
+
+MAX_ACTIVE_INTERVIEWS = int(os.getenv("MAX_ACTIVE_INTERVIEWS", "5"))
+QUEUE_WAIT_TIMEOUT_SECONDS = int(os.getenv("QUEUE_WAIT_TIMEOUT_SECONDS", "1800"))
+QUEUE_HEARTBEAT_SECONDS = max(1, int(os.getenv("QUEUE_HEARTBEAT_SECONDS", "5")))
+PERSISTENCE_QUEUE_SIZE = int(os.getenv("PERSISTENCE_QUEUE_SIZE", "200"))
+PERSISTENCE_MAX_RETRIES = int(os.getenv("PERSISTENCE_MAX_RETRIES", "3"))
+PERSISTENCE_RETRY_BASE_SECONDS = float(
+    os.getenv("PERSISTENCE_RETRY_BASE_SECONDS", "0.3")
+)
+PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS = float(
+    os.getenv("PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS", "5")
+)
 
 _INTERVIEW_LOGGER_CACHE: Dict[Tuple[str, str], logging.Logger] = {}
 
 
-def _build_file_handler(log_path: str, log_format: str) -> RotatingFileHandler:
-    handler = RotatingFileHandler(
-        log_path,
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
+def _build_file_handler(log_path: str, log_format: str):
+    return build_async_rotating_handler(
+        log_path=log_path,
+        max_bytes=LOG_MAX_BYTES,
+        backup_count=LOG_BACKUP_COUNT,
+        log_format=log_format,
+        queue_size=ASYNC_LOG_QUEUE_SIZE,
+        flush_interval_ms=ASYNC_LOG_FLUSH_INTERVAL_MS,
+        drop_policy=ASYNC_LOG_DROP_POLICY,
     )
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter(log_format))
-    return handler
 
 
 server_logger = logging.getLogger("server")
 server_logger.setLevel(logging.INFO)
 server_logger.propagate = False
 if not any(
-    isinstance(handler, RotatingFileHandler)
-    and os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(SERVER_LOG_PATH)
+    os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(SERVER_LOG_PATH)
     for handler in server_logger.handlers
 ):
     server_logger.addHandler(
@@ -108,8 +127,7 @@ def _get_interview_logger(token: str, stream: str) -> logging.Logger:
     logger.propagate = False
 
     handler_exists = any(
-        isinstance(handler, RotatingFileHandler)
-        and os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(log_path)
+        os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(log_path)
         for handler in logger.handlers
     )
     if not handler_exists:
@@ -125,6 +143,184 @@ def _get_interview_logger(token: str, stream: str) -> logging.Logger:
 
 ADMIN_API_HOST = os.getenv("ADMIN_API_HOST", "127.0.0.1")
 ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8890"))
+
+
+@dataclass
+class QueueWaiter:
+    token: str
+    admitted_event: asyncio.Event
+    enqueued_at: float
+    active_snapshot: int
+    limit_snapshot: int
+
+
+class AdmissionController:
+    def __init__(self, max_active: int):
+        self.max_active = max(1, int(max_active))
+        self.active_tokens = set()
+        self.active_counts: Dict[str, int] = {}
+        self.wait_queue: Deque[QueueWaiter] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire_or_enqueue(
+        self, token: str
+    ) -> Tuple[bool, Optional[QueueWaiter], bool]:
+        async with self._lock:
+            if token in self.active_tokens:
+                self.active_counts[token] = self.active_counts.get(token, 0) + 1
+                return True, None, False
+            if len(self.active_tokens) < self.max_active:
+                self.active_tokens.add(token)
+                self.active_counts[token] = 1
+                return True, None, False
+
+            for waiter in self.wait_queue:
+                if waiter.token == token:
+                    return False, waiter, True
+
+            waiter = QueueWaiter(
+                token=token,
+                admitted_event=asyncio.Event(),
+                enqueued_at=monotonic(),
+                active_snapshot=len(self.active_tokens),
+                limit_snapshot=self.max_active,
+            )
+            self.wait_queue.append(waiter)
+            return False, waiter, False
+
+    async def remove_waiter(self, token: str) -> bool:
+        async with self._lock:
+            for waiter in list(self.wait_queue):
+                if waiter.token == token:
+                    self.wait_queue.remove(waiter)
+                    return True
+        return False
+
+    async def release(self, token: str) -> None:
+        async with self._lock:
+            current = self.active_counts.get(token, 0)
+            if current > 1:
+                self.active_counts[token] = current - 1
+                return
+            self.active_counts.pop(token, None)
+            self.active_tokens.discard(token)
+            while self.wait_queue and len(self.active_tokens) < self.max_active:
+                waiter = self.wait_queue.popleft()
+                if waiter.admitted_event.is_set():
+                    continue
+                self.active_tokens.add(waiter.token)
+                self.active_counts[waiter.token] = 1
+                waiter.admitted_event.set()
+                break
+
+    async def snapshot(self, token: str) -> Tuple[int, int, int]:
+        async with self._lock:
+            active = len(self.active_tokens)
+            if token in self.active_tokens:
+                return 0, active, self.max_active
+            for idx, waiter in enumerate(self.wait_queue, start=1):
+                if waiter.token == token:
+                    return idx, active, self.max_active
+            return -1, active, self.max_active
+
+
+@dataclass
+class PersistenceTask:
+    token: str
+    turns: list
+    candidate_pcm_bytes: bytes
+    interviewer_encoded_bytes: bytes
+    interview_completed: bool
+    candidate_audio_dropped_frames: int
+    grace_seconds: int = 30
+    retries: int = 0
+
+
+class PersistenceQueue:
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self._queue: "asyncio.Queue[Optional[PersistenceTask]]" = asyncio.Queue(
+            maxsize=max(1, PERSISTENCE_QUEUE_SIZE)
+        )
+        self._worker_task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._worker_task and not self._worker_task.done():
+            return
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
+    async def submit(self, task: PersistenceTask) -> None:
+        await self._queue.put(task)
+
+    async def shutdown(self, timeout_seconds: float) -> None:
+        if not self._worker_task:
+            return
+        await self._queue.put(None)
+        try:
+            await asyncio.wait_for(self._worker_task, timeout=max(0.1, timeout_seconds))
+        except asyncio.TimeoutError:
+            self.logger.warning("[PersistenceQueue] shutdown timeout, cancelling worker")
+            self._worker_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._worker_task
+
+    async def _worker_loop(self) -> None:
+        while True:
+            task = await self._queue.get()
+            if task is None:
+                self._queue.task_done()
+                return
+            try:
+                await self._process(task)
+            finally:
+                self._queue.task_done()
+
+    async def _process(self, task: PersistenceTask) -> None:
+        try:
+            await asyncio.to_thread(save_interview_turns, task.token, task.turns)
+            await asyncio.to_thread(
+                persist_interview_audio,
+                token=task.token,
+                candidate_pcm_bytes=task.candidate_pcm_bytes,
+                interviewer_encoded_bytes=task.interviewer_encoded_bytes,
+            )
+            self.logger.info(
+                "[InterviewPersist] token=%s candidate_bytes=%s interviewer_bytes=%s candidate_dropped_frames=%s",
+                task.token,
+                len(task.candidate_pcm_bytes),
+                len(task.interviewer_encoded_bytes),
+                task.candidate_audio_dropped_frames,
+            )
+            if task.interview_completed:
+                await asyncio.to_thread(mark_interview_completed, task.token)
+            else:
+                await asyncio.to_thread(
+                    mark_interview_disconnected, task.token, task.grace_seconds
+                )
+        except Exception as persist_err:
+            if task.retries >= PERSISTENCE_MAX_RETRIES:
+                self.logger.error(
+                    "[InterviewPersist] failed token=%s retries=%s error=%s",
+                    task.token,
+                    task.retries,
+                    persist_err,
+                )
+                return
+            task.retries += 1
+            delay = PERSISTENCE_RETRY_BASE_SECONDS * (2 ** (task.retries - 1))
+            self.logger.warning(
+                "[InterviewPersist] retry token=%s retry=%s delay=%.2fs error=%s",
+                task.token,
+                task.retries,
+                delay,
+                persist_err,
+            )
+            await asyncio.sleep(delay)
+            await self._queue.put(task)
+
+
+ADMISSION = AdmissionController(MAX_ACTIVE_INTERVIEWS)
+PERSISTENCE = PersistenceQueue(server_logger)
 
 
 def _extract_pcm_audio(raw_audio: bytes, log_fn: Callable[[str], None]) -> bytes:
@@ -173,7 +369,9 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     """
     parsed_path = urlparse(path or "")
     token = (parse_qs(parsed_path.query).get("token", [None])[0] or "").strip()
-    interview_data = start_interview_session(token) if token else None
+    interview_data = (
+        await asyncio.to_thread(start_interview_session, token) if token else None
+    )
     if not interview_data:
         server_logger.info(
             "[Interview] rejected connection remote=%s token=%s",
@@ -188,6 +386,98 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         )
         await websocket.close()
         return
+
+    admitted, waiter, duplicated_waiter = await ADMISSION.acquire_or_enqueue(token)
+    if duplicated_waiter:
+        duplicate_waiting_payload = BotErrorPayload(
+            error=ErrorEvent(
+                code="TOKEN_ALREADY_WAITING",
+                message="该面试链接已在排队中，请不要重复打开多个页面。",
+            )
+        )
+        await websocket.send(
+            convert_web_event_to_binary(WebEvent.from_payload(duplicate_waiting_payload))
+        )
+        await websocket.close()
+        return
+
+    if not admitted:
+        assert waiter is not None
+        initial_position, initial_active, initial_limit = await ADMISSION.snapshot(token)
+        await websocket.send(
+            convert_web_event_to_binary(
+                WebEvent.from_payload(
+                    QueueEnteredPayload(
+                        position=max(1, initial_position),
+                        active=initial_active
+                        if initial_active >= 0
+                        else waiter.active_snapshot,
+                        limit=initial_limit if initial_limit > 0 else waiter.limit_snapshot,
+                    )
+                )
+            )
+        )
+        queue_wait_start = monotonic()
+        while True:
+            if websocket.closed:
+                await ADMISSION.remove_waiter(token)
+                return
+            if waiter.admitted_event.is_set():
+                break
+            waited_seconds = monotonic() - queue_wait_start
+            if waited_seconds >= QUEUE_WAIT_TIMEOUT_SECONDS:
+                await ADMISSION.remove_waiter(token)
+                await websocket.send(
+                    convert_web_event_to_binary(
+                        WebEvent.from_payload(
+                            QueueTimeoutPayload(
+                                wait_seconds=int(waited_seconds),
+                            )
+                        )
+                    )
+                )
+                await websocket.close()
+                return
+            try:
+                await asyncio.wait_for(
+                    waiter.admitted_event.wait(),
+                    timeout=QUEUE_HEARTBEAT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                position, active, limit = await ADMISSION.snapshot(token)
+                if position < 0:
+                    await websocket.send(
+                        convert_web_event_to_binary(
+                            WebEvent.from_payload(
+                                QueueCancelledPayload(reason="queue_removed")
+                            )
+                        )
+                    )
+                    await websocket.close()
+                    return
+                await websocket.send(
+                    convert_web_event_to_binary(
+                        WebEvent.from_payload(
+                            QueueUpdatePayload(
+                                position=position,
+                                active=active,
+                                limit=limit,
+                            )
+                        )
+                    )
+                )
+
+        _, active_after_admit, limit_after_admit = await ADMISSION.snapshot(token)
+        await websocket.send(
+            convert_web_event_to_binary(
+                WebEvent.from_payload(
+                    QueueAdmittedPayload(
+                        active=active_after_admit,
+                        limit=limit_after_admit,
+                    )
+                )
+            )
+        )
 
     interview_logger = _get_interview_logger(token, "backend")
     interview_log: Callable[[str], None] = interview_logger.info
@@ -291,25 +581,20 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     except websockets.exceptions.ConnectionClosed as e:
         interview_log(f"Connection closed: {e}")
     finally:
+        await ADMISSION.release(token)
         try:
-            save_interview_turns(token, turns)
-            persist_interview_audio(
-                token=token,
-                candidate_pcm_bytes=bytes(candidate_audio),
-                interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
+            await PERSISTENCE.submit(
+                PersistenceTask(
+                    token=token,
+                    turns=turns,
+                    candidate_pcm_bytes=bytes(candidate_audio),
+                    interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
+                    interview_completed=interview_completed,
+                    candidate_audio_dropped_frames=candidate_audio_dropped_frames,
+                    grace_seconds=30,
+                )
             )
-            interview_log(
-                f"[InterviewPersist] token={token} "
-                f"candidate_bytes={len(candidate_audio)} "
-                f"interviewer_bytes={len(interviewer_audio_encoded)} "
-                f"candidate_dropped_frames={candidate_audio_dropped_frames}"
-            )
-            if interview_completed:
-                mark_interview_completed(token)
-                end_status = "completed"
-            else:
-                mark_interview_disconnected(token, grace_seconds=30)
-                end_status = "disconnected"
+            end_status = "completed" if interview_completed else "disconnected"
             interview_log(f"[Session] closed status={end_status}")
             server_logger.info(
                 "[Interview] closed token=%s remote=%s status=%s",
@@ -353,7 +638,8 @@ async def handle_frontend_log_request(
     token = (parse_qs(parsed_path.query).get("token", [None])[0] or "").strip()
 
     if method == "POST" and request_path == "/api/frontend-logs":
-        if not token or not interview_exists(token):
+        token_exists = await asyncio.to_thread(interview_exists, token) if token else False
+        if not token_exists:
             response = _http_response(
                 b"HTTP/1.1 400 Bad Request",
                 b"Bad Request",
@@ -409,7 +695,16 @@ async def main():
     """
     Main function to start the WebSocket server and HTTP log server.
     """
+    configure_llm_limit(int(os.getenv("LLM_CONCURRENT_REQUESTS", "5")))
+    PERSISTENCE.start()
     server_logger.info("[Server] startup begin")
+    server_logger.info(
+        "[Server] config max_active=%s queue_timeout=%ss queue_heartbeat=%ss llm_limit=%s",
+        MAX_ACTIVE_INTERVIEWS,
+        QUEUE_WAIT_TIMEOUT_SECONDS,
+        QUEUE_HEARTBEAT_SECONDS,
+        get_llm_limit(),
+    )
     server_logger.info("[StartupSelfCheck] running preflight checks")
     self_check_report = await run_startup_self_check(RUNTIME_CONFIG)
     for line in format_self_check_lines(self_check_report):
@@ -446,6 +741,7 @@ async def main():
             admin_server.serve(),
         )
     finally:
+        await PERSISTENCE.shutdown(PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS)
         server_logger.info("[Server] shutdown")
 
 

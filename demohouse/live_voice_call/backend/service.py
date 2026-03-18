@@ -34,6 +34,7 @@ from interview_flow import (
 )
 from interview_judge import Decision, InterviewJudge
 from prompt import InterviewerPrompt, VoiceBotPrompt
+from llm_limiter import llm_slot
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -329,10 +330,11 @@ class VoiceBotService(BaseModel):
         )
         completion_buffer = ""
 
-        async for chunk in llm.astream():
-            if chunk.choices and chunk.choices[0].delta:
-                yield chunk.choices[0].delta.content
-                completion_buffer += chunk.choices[0].delta.content
+        async with llm_slot():
+            async for chunk in llm.astream():
+                if chunk.choices and chunk.choices[0].delta:
+                    yield chunk.choices[0].delta.content
+                    completion_buffer += chunk.choices[0].delta.content
 
         if completion_buffer:
             self.history_messages.append(
@@ -398,10 +400,11 @@ class VoiceBotService(BaseModel):
         )
         completion_buffer = ""
 
-        async for chunk in llm.astream():
-            if chunk.choices and chunk.choices[0].delta:
-                yield chunk.choices[0].delta.content
-                completion_buffer += chunk.choices[0].delta.content
+        async with llm_slot():
+            async for chunk in llm.astream():
+                if chunk.choices and chunk.choices[0].delta:
+                    yield chunk.choices[0].delta.content
+                    completion_buffer += chunk.choices[0].delta.content
 
         if completion_buffer:
             self.history_messages.append(

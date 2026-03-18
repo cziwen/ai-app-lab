@@ -7,6 +7,8 @@ from arkitect.core.component.llm.model import ArkMessage
 from langchain.prompts.chat import BaseChatPromptTemplate
 from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, SystemMessage
 
+from llm_limiter import llm_slot
+
 
 @dataclass
 class Decision:
@@ -120,9 +122,14 @@ class InterviewJudge:
         )
 
         chunks: List[str] = []
-        async for chunk in llm.astream():
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                chunks.append(chunk.choices[0].delta.content)
+        async with llm_slot():
+            async for chunk in llm.astream():
+                if (
+                    chunk.choices
+                    and chunk.choices[0].delta
+                    and chunk.choices[0].delta.content
+                ):
+                    chunks.append(chunk.choices[0].delta.content)
 
         if not chunks:
             return None

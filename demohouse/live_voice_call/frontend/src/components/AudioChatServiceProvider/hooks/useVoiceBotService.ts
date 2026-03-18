@@ -223,6 +223,33 @@ export const useVoiceBotService = () => {
             resetMediaState();
             break;
           }
+          case EventType.QueueEntered:
+          case EventType.QueueUpdate: {
+            const queuePayload = payload as
+              | { position?: number; active?: number; limit?: number }
+              | undefined;
+            const position = queuePayload?.position;
+            if (typeof position === 'number' && position > 0) {
+              setCurrentBotSentence(`当前排队第 ${position} 位，请稍候`);
+            }
+            break;
+          }
+          case EventType.QueueAdmitted: {
+            setCurrentBotSentence('排队结束，正在进入面试...');
+            break;
+          }
+          case EventType.QueueTimeout: {
+            Message.warning('排队超时，请稍后重试');
+            resetWsState();
+            resetMediaState();
+            break;
+          }
+          case EventType.QueueCancelled: {
+            Message.warning('排队已取消');
+            resetWsState();
+            resetMediaState();
+            break;
+          }
           case EventType.TTSDone:
             setBotSpeaking(false);
             if (configNeedUpdateRef.current) {
