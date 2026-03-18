@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-}"
 if [[ -z "$MODE" ]]; then
-  echo "Usage: ./deploy/ssl.sh <init|renew|activate|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+  echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [extra renew args]"
   exit 1
 fi
 shift || true
@@ -52,30 +52,39 @@ extract_domain_from_url() {
   echo "$input"
 }
 
-DOMAIN="${DOMAIN_OVERRIDE:-}"
-if [[ -z "$DOMAIN" ]]; then
-  DOMAIN="$(extract_domain_from_url "${PUBLIC_INTERVIEW_BASE_URL:-}")"
-fi
-if [[ -z "$DOMAIN" ]]; then
-  echo "[ssl] Missing domain. Set PUBLIC_INTERVIEW_BASE_URL in .env or pass --domain"
-  exit 1
-fi
+resolve_domain() {
+  local domain="${DOMAIN_OVERRIDE:-}"
+  if [[ -z "$domain" ]]; then
+    domain="$(extract_domain_from_url "${PUBLIC_INTERVIEW_BASE_URL:-}")"
+  fi
+  if [[ -z "$domain" ]]; then
+    echo "[ssl] Missing domain. Set PUBLIC_INTERVIEW_BASE_URL in .env or pass --domain" >&2
+    return 1
+  fi
 
-EMAIL="${EMAIL_OVERRIDE:-${LETSENCRYPT_EMAIL:-}}"
-if [[ -z "$EMAIL" ]]; then
-  echo "[ssl] Missing email. Set LETSENCRYPT_EMAIL in .env or pass --email"
-  exit 1
-fi
+  echo "$domain"
+}
+
+resolve_email() {
+  local email="${EMAIL_OVERRIDE:-${LETSENCRYPT_EMAIL:-}}"
+  if [[ -z "$email" ]]; then
+    echo "[ssl] Missing email. Set LETSENCRYPT_EMAIL in .env or pass --email" >&2
+    return 1
+  fi
+
+  echo "$email"
+}
 
 compose() {
   docker compose "$@"
 }
 
 pick_latest_cert_dir() {
+  local domain="$1"
   local candidates=()
   local d
   shopt -s nullglob
-  for d in "$LE_LIVE_DIR"/"$DOMAIN"*; do
+  for d in "$LE_LIVE_DIR"/"$domain"*; do
     [[ -d "$d" ]] || continue
     [[ -f "$d/fullchain.pem" && -f "$d/privkey.pem" ]] || continue
     candidates+=("$d")
@@ -110,8 +119,9 @@ reload_gateway() {
 }
 
 activate_latest_cert() {
+  local domain="$1"
   local cert_dir
-  cert_dir="$(pick_latest_cert_dir)"
+  cert_dir="$(pick_latest_cert_dir "$domain")"
   switch_active_link "$cert_dir"
 
   echo "[ssl] Reloading gateway"
@@ -121,47 +131,65 @@ activate_latest_cert() {
 }
 
 run_init() {
+  local domain
+  local email
+  domain="$(resolve_domain)"
+  email="$(resolve_email)"
+
   echo "[ssl] Starting gateway/backend"
   compose up -d --build gateway backend
 
-  echo "[ssl] Requesting certificate for $DOMAIN"
-  compose --profile certbot run --rm certbot certonly \
-    --webroot -w "$ACME_WEBROOT" \
-    -d "$DOMAIN" \
-    --cert-name "$DOMAIN" \
-    -m "$EMAIL" \
-    --agree-tos --no-eff-email
+  local existing_cert
+  existing_cert="$(pick_latest_cert_dir "$domain" || true)"
+  if [[ -n "$existing_cert" ]]; then
+    echo "[ssl] Reusing existing certificate for $domain: $existing_cert"
+  else
+    echo "[ssl] No existing certificate found, requesting certificate for $domain"
+    compose --profile certbot run --rm certbot certonly \
+      --webroot -w "$ACME_WEBROOT" \
+      -d "$domain" \
+      --cert-name "$domain" \
+      -m "$email" \
+      --agree-tos --no-eff-email
+  fi
 
-  activate_latest_cert
+  activate_latest_cert "$domain"
 
   echo "[ssl] Init completed"
 }
 
 run_renew() {
+  local domain
+  domain="$(resolve_domain)"
+
   echo "[ssl] Renewing certificates"
   compose --profile certbot run --rm certbot renew \
     --webroot -w "$ACME_WEBROOT" \
     "${EXTRA_ARGS[@]}"
 
-  activate_latest_cert
+  activate_latest_cert "$domain"
 
   echo "[ssl] Renew completed"
 }
 
-install_cron() {
-  local cron_cmd
-  cron_cmd="0 3 * * * cd $PROJECT_DIR && $SCRIPT_DIR/ssl.sh renew >> /var/log/live-voice-certbot-renew.log 2>&1 $CRON_MARKER"
-
+uninstall_cron() {
   local current
   current="$(crontab -l 2>/dev/null || true)"
 
-  {
-    echo "$current" | sed '/live-voice-ssl-renew/d'
-    echo "$cron_cmd"
-  } | crontab -
+  if [[ -z "$current" ]]; then
+    echo "[ssl] No crontab found, nothing to remove"
+    return 0
+  fi
 
-  echo "[ssl] Cron installed"
-  crontab -l | grep 'live-voice-ssl-renew'
+  local updated
+  updated="$(echo "$current" | sed '/live-voice-ssl-renew/d')"
+  if [[ "$updated" == "$current" ]]; then
+    echo "[ssl] No auto-renew cron entry found ($CRON_MARKER)"
+    return 0
+  fi
+
+  echo "$updated" | crontab -
+  echo "[ssl] Removed auto-renew cron entry ($CRON_MARKER)"
 }
 
 case "$MODE" in
@@ -172,14 +200,14 @@ case "$MODE" in
     run_renew
     ;;
   activate)
-    activate_latest_cert
+    activate_latest_cert "$(resolve_domain)"
     ;;
-  install-cron)
-    install_cron
+  uninstall-cron)
+    uninstall_cron
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Usage: ./deploy/ssl.sh <init|renew|activate|install-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+    echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [extra renew args]"
     exit 1
     ;;
 esac
