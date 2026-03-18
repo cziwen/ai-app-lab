@@ -141,7 +141,11 @@ def _get_interview_logger(token: str, stream: str) -> logging.Logger:
     _INTERVIEW_LOGGER_CACHE[cache_key] = logger
     return logger
 
-ADMIN_API_HOST = os.getenv("ADMIN_API_HOST", "127.0.0.1")
+WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
+WS_PORT = int(os.getenv("WS_PORT", "8888"))
+LOG_HOST = os.getenv("LOG_HOST", "0.0.0.0")
+LOG_PORT = int(os.getenv("LOG_PORT", "8889"))
+ADMIN_API_HOST = os.getenv("ADMIN_API_HOST", "0.0.0.0")
 ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8890"))
 
 
@@ -713,15 +717,15 @@ async def main():
         server_logger.info("[StartupSelfCheck] failed, aborting server startup")
         raise SystemExit(1)
 
-    # Start the WebSocket server listening on 127.0.0.1:8888
-    ws_server = await websockets.serve(handler, host="127.0.0.1", port=8888)
-    server_logger.info("WebSocket server is running on ws://127.0.0.1:8888")
+    # Start the WebSocket server
+    ws_server = await websockets.serve(handler, host=WS_HOST, port=WS_PORT)
+    server_logger.info(f"WebSocket server is running on ws://{WS_HOST}:{WS_PORT}")
 
-    # Start the HTTP log server on port 8889
+    # Start the HTTP log server
     http_server = await asyncio.start_server(
-        handle_frontend_log_request, host="127.0.0.1", port=8889
+        handle_frontend_log_request, host=LOG_HOST, port=LOG_PORT
     )
-    server_logger.info("HTTP log server is running on http://127.0.0.1:8889")
+    server_logger.info(f"HTTP log server is running on http://{LOG_HOST}:{LOG_PORT}")
 
     admin_app = create_admin_app()
     admin_config = uvicorn.Config(

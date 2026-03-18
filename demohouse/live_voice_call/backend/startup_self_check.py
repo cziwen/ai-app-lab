@@ -10,23 +10,15 @@ from arkitect.core.component.tts.constants import EventSessionFinished
 
 from prompt import VoiceBotPrompt
 
-DEFAULT_LLM_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
-DEFAULT_ASR_APP_ID = "2057385740"
-DEFAULT_ASR_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
-DEFAULT_TTS_APP_ID = "2057385740"
-DEFAULT_TTS_ACCESS_TOKEN = "bnO29ab2sIHtKyt3f-Dn8SAYaMZr04BP"
-DEFAULT_TTS_SPEAKER = "zh_female_sajiaonvyou_moon_bigtts"
-
-
 @dataclass(frozen=True)
 class RuntimeConfig:
     ark_api_key: Optional[str]
-    llm_endpoint_id: str
-    asr_app_id: str
-    asr_access_token: str
-    tts_app_id: str
-    tts_access_token: str
-    tts_speaker: str
+    llm_endpoint_id: Optional[str]
+    asr_app_id: Optional[str]
+    asr_access_token: Optional[str]
+    tts_app_id: Optional[str]
+    tts_access_token: Optional[str]
+    tts_speaker: Optional[str]
 
 
 @dataclass
@@ -43,19 +35,23 @@ class SelfCheckReport:
     errors: Dict[str, str] = field(default_factory=dict)
 
 
-def _env(key: str, default: str) -> str:
-    return os.environ.get(key) or default
+def _env(key: str) -> Optional[str]:
+    value = os.environ.get(key)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def load_runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
-        ark_api_key=os.environ.get("ARK_API_KEY"),
-        llm_endpoint_id=_env("LLM_ENDPOINT_ID", DEFAULT_LLM_ENDPOINT_ID),
-        asr_app_id=_env("ASR_APP_ID", DEFAULT_ASR_APP_ID),
-        asr_access_token=_env("ASR_ACCESS_TOKEN", DEFAULT_ASR_ACCESS_TOKEN),
-        tts_app_id=_env("TTS_APP_ID", DEFAULT_TTS_APP_ID),
-        tts_access_token=_env("TTS_ACCESS_TOKEN", DEFAULT_TTS_ACCESS_TOKEN),
-        tts_speaker=_env("TTS_SPEAKER", DEFAULT_TTS_SPEAKER),
+        ark_api_key=_env("ARK_API_KEY"),
+        llm_endpoint_id=_env("LLM_ENDPOINT_ID"),
+        asr_app_id=_env("ASR_APP_ID"),
+        asr_access_token=_env("ASR_ACCESS_TOKEN"),
+        tts_app_id=_env("TTS_APP_ID"),
+        tts_access_token=_env("TTS_ACCESS_TOKEN"),
+        tts_speaker=_env("TTS_SPEAKER"),
     )
 
 
@@ -65,6 +61,12 @@ async def check_llm(config: RuntimeConfig) -> CheckResult:
             ok=False,
             detail="ARK_API_KEY missing",
             error="missing ARK_API_KEY",
+        )
+    if not config.llm_endpoint_id:
+        return CheckResult(
+            ok=False,
+            detail="LLM_ENDPOINT_ID missing",
+            error="missing LLM_ENDPOINT_ID",
         )
 
     messages = [ArkMessage(**{"role": "user", "content": "你好，回复一句话即可。"})]
@@ -95,6 +97,19 @@ async def check_llm(config: RuntimeConfig) -> CheckResult:
 
 
 async def check_asr(config: RuntimeConfig) -> CheckResult:
+    if not config.asr_app_id:
+        return CheckResult(
+            ok=False,
+            detail="ASR_APP_ID missing",
+            error="missing ASR_APP_ID",
+        )
+    if not config.asr_access_token:
+        return CheckResult(
+            ok=False,
+            detail="ASR_ACCESS_TOKEN missing",
+            error="missing ASR_ACCESS_TOKEN",
+        )
+
     client = AsyncASRClient(
         app_key=config.asr_app_id,
         access_key=config.asr_access_token,
@@ -118,6 +133,25 @@ async def check_asr(config: RuntimeConfig) -> CheckResult:
 
 
 async def check_tts(config: RuntimeConfig) -> CheckResult:
+    if not config.tts_app_id:
+        return CheckResult(
+            ok=False,
+            detail="TTS_APP_ID missing",
+            error="missing TTS_APP_ID",
+        )
+    if not config.tts_access_token:
+        return CheckResult(
+            ok=False,
+            detail="TTS_ACCESS_TOKEN missing",
+            error="missing TTS_ACCESS_TOKEN",
+        )
+    if not config.tts_speaker:
+        return CheckResult(
+            ok=False,
+            detail="TTS_SPEAKER missing",
+            error="missing TTS_SPEAKER",
+        )
+
     client = AsyncTTSClient(
         app_key=config.tts_app_id,
         access_key=config.tts_access_token,

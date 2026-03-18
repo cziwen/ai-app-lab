@@ -52,22 +52,16 @@
     cd demohouse/live_voice_call
     ```
 
-2. 修改配置
-
-- 修改`backend/handler.py`
-
-    ```python
-    ASR_ACCESS_TOKEN = "{YOUR_ASR_ACCESS_TOKEN}"
-    ASR_APP_ID = "{YOUR_ASR_APP_ID}"
-    TTS_ACCESS_TOKEN = "{YOUR_TTS_ACCESS_TOKEN}"
-    TTS_APP_ID = "{YOUR_TTS_APP_ID}"
-    LLM_ENDPOINT_ID = "{YOUR_ARK_LLM_ENDPOINT_ID}"
-    ```
-
-- 修改本地环境变量注入方舟APIKEY
+2. 修改配置（环境变量）
 
     ```shell
     export ARK_API_KEY={YOUR_API_KEY}
+    export LLM_ENDPOINT_ID={YOUR_ARK_LLM_ENDPOINT_ID}
+    export ASR_APP_ID={YOUR_ASR_APP_ID}
+    export ASR_ACCESS_TOKEN={YOUR_ASR_ACCESS_TOKEN}
+    export TTS_APP_ID={YOUR_TTS_APP_ID}
+    export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
+    export TTS_SPEAKER={YOUR_TTS_SPEAKER}
     ```
 
 3. 启动服务端
@@ -86,9 +80,9 @@
    后端启动前会自动执行一次 `LLM + ASR + TTS` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    默认会同时启动：
-   - 面试 WebSocket：`ws://127.0.0.1:8888`
-   - 前端日志接收：`http://127.0.0.1:8889/api/frontend-logs?token=INT-...`
-   - 管理后台 API：`http://127.0.0.1:8890`
+   - 面试 WebSocket：`ws://0.0.0.0:8888`
+   - 前端日志接收：`http://0.0.0.0:8889/api/frontend-logs?token=INT-...`
+   - 管理后台 API：`http://0.0.0.0:8890`
 
 4. 启动web端
 
@@ -100,6 +94,81 @@
 
 5. 访问`http://localhost:8080`即可
 
+## Docker Compose 部署（ECS 单机）
+
+1. 准备环境
+
+   - 安装 Docker 与 Docker Compose
+   - 打开 ECS 安全组入方向端口：`80`
+
+2. 配置环境变量
+
+    ```shell
+    cp .env.example .env
+    # 编辑 .env，填入真实凭据与参数
+    ```
+
+3. 启动服务
+
+    ```shell
+    docker compose up --build -d
+    ```
+
+4. 验证服务
+
+    ```shell
+    curl http://localhost/api/health
+    ```
+
+   预期返回：`{"status":"ok"}`
+
+5. 访问入口
+
+   - 应用首页：`http://<ECS_PUBLIC_IP>/`
+   - 管理后台登录：`http://<ECS_PUBLIC_IP>/admin/login`
+   - 候选人面试页：`http://<ECS_PUBLIC_IP>/check-in?token=...`
+
+### 架构说明（单入口）
+
+- `gateway`（Nginx）对外暴露 `80` 端口
+- `backend` 仅在容器网络内暴露：
+  - WebSocket：`8888`（通过 `/ws` 代理）
+  - 前端日志：`8889`（通过 `/api/frontend-logs` 代理）
+  - Admin API：`8890`（通过 `/api/*` 代理）
+
+### 常用运维命令
+
+```shell
+# 查看状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f gateway
+docker compose logs -f backend
+
+# 重启服务
+docker compose restart
+
+# 停止并移除容器
+docker compose down
+```
+
+### 持久化说明
+
+- 已挂载宿主机目录：
+  - `./backend/data:/app/backend/data`
+  - `./backend/logs:/app/backend/logs`
+- 容器重建后，SQLite 数据与音频/日志文件不会丢失。
+
+### 常见问题排查
+
+- 后端容器反复退出：
+  - 原因通常是启动自检失败（LLM/ASR/TTS 任一失败即退出）
+  - 用 `docker compose logs -f backend` 查看失败项并修复 `.env`
+- 页面可打开但请求失败：
+  - 检查安全组是否放通 `80`
+  - 检查 `gateway` 是否运行正常：`docker compose logs -f gateway`
+
 ## 管理后台
 
 - 登录页：`http://localhost:8080/admin/login`
@@ -108,7 +177,7 @@
   - `ADMIN_USERNAME`（默认 `admin`）
   - `ADMIN_PASSWORD`（默认 `admin123456`）
 - 候选人面试链接基址可通过 `PUBLIC_INTERVIEW_BASE_URL` 配置（默认 `http://localhost:8080/check-in`）
-- 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认 `http://localhost:8890`）
+- 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认同源地址）
 
 ## WebSocket交互协议说明
 
