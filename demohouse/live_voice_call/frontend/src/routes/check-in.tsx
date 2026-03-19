@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from '@modern-js/runtime/router';
 import { useSessionAuth } from '@/auth/context';
-import type { PermissionState, PermissionStatus } from '@/auth/types';
+import { API_URL } from '@/config/endpoints';
+import type { PermissionKey, PermissionState, PermissionStatus } from '@/auth/types';
 
-type CheckStep = 'speaker' | 'mic' | 'camera' | 'screen';
-type ModalType = 'speaker' | 'mic' | 'camera' | null;
+type CheckStep = PermissionKey;
+type ModalType = Extract<CheckStep, 'speaker' | 'mic' | 'camera'> | null;
 
 const ORDERED_STEPS: CheckStep[] = ['speaker', 'mic', 'camera', 'screen'];
+const DEFAULT_REQUIRED_STEPS: CheckStep[] = ['speaker', 'mic'];
 
 const STEP_LABEL: Record<CheckStep, string> = {
   speaker: '扬声器',
@@ -30,10 +32,32 @@ const stopStream = (stream: MediaStream | null) => {
   }
 };
 
-const stepIndexOf = (step: CheckStep) => ORDERED_STEPS.indexOf(step);
+const allGranted = (permissions: PermissionState, requiredSteps: CheckStep[]) =>
+  requiredSteps.every(step => permissions[step] === 'granted');
 
-const allGranted = (permissions: PermissionState) =>
-  Object.values(permissions).every(value => value === 'granted');
+const normalizeRequiredCheckins = (input: unknown): CheckStep[] => {
+  if (!Array.isArray(input)) {
+    return [...DEFAULT_REQUIRED_STEPS];
+  }
+  const seen = new Set<CheckStep>();
+  for (const item of input) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const normalized = item.trim() as CheckStep;
+    if (ORDERED_STEPS.includes(normalized)) {
+      seen.add(normalized);
+    }
+  }
+  return ORDERED_STEPS.filter(step => seen.has(step));
+};
+
+const isMobileBrowser = () => {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+};
 
 const getAudioContextClass = () => {
   return (
@@ -46,9 +70,13 @@ const getAudioContextClass = () => {
 export const CheckInPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { setCheckInPassed, permissions, setPermissions, mediaStreamsRef } =
+  const { token, setCheckInPassed, permissions, setPermissions, mediaStreamsRef } =
     useSessionAuth();
 
+  const [loadingCheckinConfig, setLoadingCheckinConfig] = useState(true);
+  const [requiredSteps, setRequiredSteps] = useState<CheckStep[]>([
+    ...DEFAULT_REQUIRED_STEPS,
+  ]);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
   const [checking, setChecking] = useState(false);
@@ -78,7 +106,11 @@ export const CheckInPage = () => {
   const testAudioRef = useRef<HTMLAudioElement | null>(null);
   const testMediaStreamRef = useRef<MediaStream | null>(null);
 
-  const canEnter = useMemo(() => allGranted(permissions), [permissions]);
+  const canEnter = useMemo(
+    () => allGranted(permissions, requiredSteps),
+    [permissions, requiredSteps],
+  );
+  const requiredStepsKey = useMemo(() => requiredSteps.join(','), [requiredSteps]);
 
   const cleanupTestMedia = useCallback(() => {
     if (testAnimationRef.current) {
@@ -126,7 +158,54 @@ export const CheckInPage = () => {
     setModalType(null);
   };
 
+  useEffect(() => {
+    let active = true;
+    const loadCheckinConfig = async () => {
+      if (!token) {
+        if (active) {
+          setRequiredSteps([...DEFAULT_REQUIRED_STEPS]);
+          setLoadingCheckinConfig(false);
+        }
+        return;
+      }
+      setLoadingCheckinConfig(true);
+      try {
+        const response = await fetch(
+          `${API_URL}/api/public/interviews/${encodeURIComponent(token)}/access`,
+        );
+        if (!response.ok) {
+          throw new Error('面试链接无效或已失效');
+        }
+        const data = await response.json();
+        if (!active) {
+          return;
+        }
+        const nextRequired = normalizeRequiredCheckins(
+          data?.interview?.required_checkins,
+        );
+        setRequiredSteps(nextRequired);
+      } catch (_error) {
+        if (!active) {
+          return;
+        }
+        setRequiredSteps([...DEFAULT_REQUIRED_STEPS]);
+        setErrorMessage('读取面试检查项失败，已按默认检查项（扬声器/麦克风）处理。');
+      } finally {
+        if (active) {
+          setLoadingCheckinConfig(false);
+        }
+      }
+    };
+    loadCheckinConfig();
+    return () => {
+      active = false;
+    };
+  }, [token]);
+
   const loadDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const outputs = devices.filter(item => item.kind === 'audiooutput');
@@ -144,11 +223,28 @@ export const CheckInPage = () => {
   }, []);
 
   useEffect(() => {
-    loadDevices();
+    if (
+      requiredSteps.some(step =>
+        step === 'speaker' || step === 'mic' || step === 'camera',
+      )
+    ) {
+      loadDevices();
+    }
     return () => {
       cleanupTestMedia();
     };
-  }, [loadDevices, cleanupTestMedia]);
+  }, [requiredSteps, loadDevices, cleanupTestMedia]);
+
+  useEffect(() => {
+    setCurrentStepIndex(0);
+    setCheckInPassed(false);
+    setPermissions({
+      speaker: 'pending',
+      mic: 'pending',
+      camera: 'pending',
+      screen: 'pending',
+    });
+  }, [requiredStepsKey, setCheckInPassed, setPermissions]);
 
   const drawWave = (analyser: AnalyserNode, canvas: HTMLCanvasElement) => {
     const context = canvas.getContext('2d');
@@ -285,21 +381,33 @@ export const CheckInPage = () => {
   };
 
   const passStep = (step: CheckStep) => {
+    const maxIndex = Math.max(requiredSteps.length - 1, 0);
     setPermissions(prev => ({ ...prev, [step]: 'granted' }));
-    setCurrentStepIndex(prev => Math.min(prev + 1, ORDERED_STEPS.length - 1));
+    setCurrentStepIndex(prev => Math.min(prev + 1, maxIndex));
     cleanupTestMedia();
     setModalType(null);
   };
 
   const failStep = (step: CheckStep, message: string) => {
     setPermissions(prev => ({ ...prev, [step]: 'denied' }));
-    setCurrentStepIndex(stepIndexOf(step));
+    const index = requiredSteps.indexOf(step);
+    setCurrentStepIndex(index >= 0 ? index : 0);
     setErrorMessage(message);
   };
 
   const startScreenShareStep = async () => {
     setChecking(true);
     setErrorMessage('');
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      failStep('screen', '当前浏览器不支持屏幕共享，请使用电脑端 Chrome 或 Edge。');
+      setChecking(false);
+      return;
+    }
+    if (isMobileBrowser()) {
+      failStep('screen', '手机浏览器不支持“整个屏幕”共享，请改用电脑浏览器完成面试。');
+      setChecking(false);
+      return;
+    }
     try {
       const displayMedia = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: 'monitor' },
@@ -323,7 +431,7 @@ export const CheckInPage = () => {
   };
 
   const openStepTest = (step: CheckStep) => {
-    if (ORDERED_STEPS[currentStepIndex] !== step) {
+    if (requiredSteps[currentStepIndex] !== step) {
       return;
     }
     if (step === 'screen') {
@@ -334,6 +442,10 @@ export const CheckInPage = () => {
   };
 
   const validateSpeakerAtEnter = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      failStep('speaker', '当前浏览器不支持扬声器设备校验，请更换浏览器。');
+      throw new Error('speaker_failed');
+    }
     const devices = await navigator.mediaDevices.enumerateDevices();
     const outputs = devices.filter(item => item.kind === 'audiooutput');
     if (
@@ -385,58 +497,69 @@ export const CheckInPage = () => {
   };
 
   const validateBeforeEnter = async () => {
-    const screenTrack = mediaStreamsRef.current.displayMedia
-      ?.getVideoTracks()
-      ?.at(0);
-    if (!screenTrack || screenTrack.readyState !== 'live') {
-      failStep('screen', '屏幕共享已关闭，请重新共享“整个屏幕”。');
-      throw new Error('screen_failed');
-    }
-    const displaySurface = screenTrack.getSettings().displaySurface;
-    if (displaySurface !== 'monitor') {
-      failStep('screen', '请确保当前仍在共享“整个屏幕”。');
-      throw new Error('screen_failed');
+    if (requiredSteps.includes('screen')) {
+      const screenTrack = mediaStreamsRef.current.displayMedia
+        ?.getVideoTracks()
+        ?.at(0);
+      if (!screenTrack || screenTrack.readyState !== 'live') {
+        failStep('screen', '屏幕共享已关闭，请重新共享“整个屏幕”。');
+        throw new Error('screen_failed');
+      }
+      const displaySurface = screenTrack.getSettings().displaySurface;
+      if (displaySurface !== 'monitor') {
+        failStep('screen', '请确保当前仍在共享“整个屏幕”。');
+        throw new Error('screen_failed');
+      }
     }
 
-    await validateSpeakerAtEnter();
+    if (requiredSteps.includes('speaker')) {
+      await validateSpeakerAtEnter();
+    }
 
     let audioStream: MediaStream | null = null;
     let videoStream: MediaStream | null = null;
-    try {
-      audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
-        video: false,
-      });
-    } catch (_error) {
-      failStep('mic', '麦克风状态异常，请重新完成麦克风测试。');
-      throw new Error('mic_failed');
+    if (requiredSteps.includes('mic')) {
+      try {
+        audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+          video: false,
+        });
+      } catch (_error) {
+        failStep('mic', '麦克风状态异常，请重新完成麦克风测试。');
+        throw new Error('mic_failed');
+      }
     }
 
-    try {
-      videoStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
-      });
-    } catch (_error) {
-      stopStream(audioStream);
-      failStep('camera', '摄像头状态异常，请重新完成摄像头测试。');
-      throw new Error('camera_failed');
+    if (requiredSteps.includes('camera')) {
+      try {
+        videoStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
+        });
+      } catch (_error) {
+        stopStream(audioStream);
+        failStep('camera', '摄像头状态异常，请重新完成摄像头测试。');
+        throw new Error('camera_failed');
+      }
     }
 
-    const mergedStream = new MediaStream([
-      ...audioStream.getAudioTracks(),
-      ...videoStream.getVideoTracks(),
-    ]);
-    stopStream(mediaStreamsRef.current.userMedia);
-    mediaStreamsRef.current.userMedia = mergedStream;
+    const tracks = [
+      ...(audioStream?.getAudioTracks() || []),
+      ...(videoStream?.getVideoTracks() || []),
+    ];
+    if (tracks.length > 0) {
+      const mergedStream = new MediaStream(tracks);
+      stopStream(mediaStreamsRef.current.userMedia);
+      mediaStreamsRef.current.userMedia = mergedStream;
+    }
     stopStream(audioStream);
     stopStream(videoStream);
   };
 
   const handleEnter = async () => {
-    if (!allGranted(permissions)) {
+    if (!allGranted(permissions, requiredSteps)) {
       setCheckInPassed(false);
-      setErrorMessage('请按顺序完成四项设备检查后再进入面试。');
+      setErrorMessage('请完成当前面试配置的设备检查后再进入面试。');
       return;
     }
     setChecking(true);
@@ -457,74 +580,97 @@ export const CheckInPage = () => {
     }
   };
 
+  const currentStep = requiredSteps[currentStepIndex];
+  const needPhysicalDevices = requiredSteps.some(
+    step => step === 'speaker' || step === 'mic' || step === 'camera',
+  );
+
   return (
     <main className="gate-page">
       <section className="gate-card">
         <h1>面试设备检查</h1>
-        <p>
-          请按顺序完成：扬声器 {'->'} 麦克风 {'->'} 摄像头 {'->'}{' '}
-          屏幕共享（整个屏幕）。
-        </p>
+        {loadingCheckinConfig && <p>正在加载本场面试检查项...</p>}
+        {!loadingCheckinConfig && requiredSteps.length > 0 && (
+          <p>
+            请按顺序完成：
+            {requiredSteps.map((step, index) => (
+              <span key={step}>
+                {index > 0 ? ' -> ' : ' '}
+                {STEP_LABEL[step]}
+              </span>
+            ))}
+            。
+          </p>
+        )}
+        {!loadingCheckinConfig && requiredSteps.length === 0 && (
+          <p>本场面试无需设备检查，可直接进入面试。</p>
+        )}
 
-        <ul className="permission-list">
-          {ORDERED_STEPS.map((step, index) => {
-            const status = permissions[step];
-            const isCurrent = index === currentStepIndex;
-            const isLocked = index > currentStepIndex;
-            return (
-              <li className="permission-item" key={step}>
-                <span>{STEP_LABEL[step]}</span>
-                <div className="permission-right">
-                  <strong className={`permission-status is-${status}`}>
-                    {status === 'granted' ? '已通过' : statusTextMap[status]}
-                  </strong>
-                  {!isLocked && (
-                    <button
-                      type="button"
-                      className="permission-test-btn"
-                      disabled={checking}
-                      onClick={() => openStepTest(step)}
-                    >
-                      {step === 'screen'
-                        ? '共享全屏'
-                        : isCurrent
-                          ? '测试'
-                          : '已完成'}
-                    </button>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        {!loadingCheckinConfig && requiredSteps.length > 0 && (
+          <ul className="permission-list">
+            {requiredSteps.map((step, index) => {
+              const status = permissions[step];
+              const isCurrent = index === currentStepIndex;
+              const isLocked = index > currentStepIndex;
+              return (
+                <li className="permission-item" key={step}>
+                  <span>{STEP_LABEL[step]}</span>
+                  <div className="permission-right">
+                    <strong className={`permission-status is-${status}`}>
+                      {status === 'granted' ? '已通过' : statusTextMap[status]}
+                    </strong>
+                    {!isLocked && (
+                      <button
+                        type="button"
+                        className="permission-test-btn"
+                        disabled={checking}
+                        onClick={() => openStepTest(step)}
+                      >
+                        {step === 'screen'
+                          ? '共享全屏'
+                          : isCurrent
+                            ? '测试'
+                            : '已完成'}
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
 
         {errorMessage && <p className="gate-error">{errorMessage}</p>}
-        {!errorMessage && (
+        {!errorMessage && !loadingCheckinConfig && requiredSteps.length > 0 && (
           <p className="gate-hint">
-            当前步骤：{STEP_LABEL[ORDERED_STEPS[currentStepIndex]]}
+            当前步骤：{currentStep ? STEP_LABEL[currentStep] : '已完成'}
           </p>
         )}
 
         <div className="gate-actions">
-          <button
-            type="button"
-            className="gate-btn is-secondary"
-            onClick={loadDevices}
-          >
-            刷新设备列表
-          </button>
-          <button
-            type="button"
-            className="gate-btn is-secondary"
-            onClick={resetAll}
-          >
-            重新检查
-          </button>
+          {needPhysicalDevices && (
+            <button
+              type="button"
+              className="gate-btn is-secondary"
+              onClick={loadDevices}
+            >
+              刷新设备列表
+            </button>
+          )}
+          {requiredSteps.length > 0 && (
+            <button
+              type="button"
+              className="gate-btn is-secondary"
+              onClick={resetAll}
+            >
+              重新检查
+            </button>
+          )}
           <button
             type="button"
             className="gate-btn is-enter"
             onClick={handleEnter}
-            disabled={!canEnter || checking}
+            disabled={loadingCheckinConfig || checking || !canEnter}
           >
             {checking ? '校验中...' : '进入面试'}
           </button>

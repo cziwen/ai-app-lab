@@ -54,13 +54,16 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
         notes="重点看项目经验",
     )
     assert interview["question_count"] == 2
+    assert interview["required_checkins"] == ["speaker", "mic"]
 
     access = admin_store.get_public_access(interview["token"])
     assert access is not None
     assert access["candidate_name"] == "张三"
+    assert access["required_checkins"] == ["speaker", "mic"]
 
     interview_detail = admin_store.get_interview_detail(interview["token"])
     assert interview_detail is not None
+    assert interview_detail["required_checkins"] == ["speaker", "mic"]
     assert len(interview_detail["selected_questions"]) == interview["question_count"]
     assert all(
         "question" in item and item["question"] for item in interview_detail["selected_questions"]
@@ -213,3 +216,73 @@ def test_delete_interview_removes_audio_and_log_dirs(monkeypatch, tmp_path):
     assert admin_store.delete_interview(token) is True
     assert not audio_dir.exists()
     assert not log_dir.exists()
+
+
+def test_required_checkins_custom_and_empty(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="移动端工程师",
+        duties="负责客户端开发",
+        requirements="熟悉跨端能力",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍你的项目", "背景 职责 结果")],
+    )
+
+    interview = admin_store.create_interview(
+        candidate_name="钱八",
+        job_uid=job["job_uid"],
+        duration_minutes=15,
+        notes=None,
+        required_checkins=["screen", "speaker", "screen"],
+    )
+    assert interview["required_checkins"] == ["speaker", "screen"]
+
+    detail = admin_store.get_interview_detail(interview["token"])
+    assert detail is not None
+    assert detail["required_checkins"] == ["speaker", "screen"]
+
+    access = admin_store.get_public_access(interview["token"])
+    assert access is not None
+    assert access["required_checkins"] == ["speaker", "screen"]
+
+    empty_interview = admin_store.create_interview(
+        candidate_name="周九",
+        job_uid=job["job_uid"],
+        duration_minutes=15,
+        notes=None,
+        required_checkins=[],
+    )
+    assert empty_interview["required_checkins"] == []
+
+
+def test_required_checkins_invalid_value_raises(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目", "答案")],
+    )
+
+    try:
+        admin_store.create_interview(
+            candidate_name="吴十",
+            job_uid=job["job_uid"],
+            duration_minutes=15,
+            notes=None,
+            required_checkins=["mic", "foo"],
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "invalid_required_checkins"

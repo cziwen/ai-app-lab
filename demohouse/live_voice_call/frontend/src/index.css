@@ -540,6 +540,22 @@ body {
   object-fit: cover;
 }
 
+.admin-checkin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-checkin-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 8px 10px;
+}
+
 @keyframes card-enter {
   from {
     transform: translateY(14px);
@@ -548,6 +564,136 @@ body {
   to {
     transform: translateY(0);
     opacity: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .call-page {
+    padding: 14px 10px calc(14px + env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+
+  .call-header {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .call-header h1 {
+    font-size: 1.2rem;
+  }
+
+  .call-header p {
+    margin-top: 4px;
+    font-size: 0.9rem;
+  }
+
+  .header-meta {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .status-pill,
+  .timer-pill,
+  .mode-pill {
+    padding: 6px 10px;
+  }
+
+  .call-card {
+    min-height: min(34vh, 280px);
+    border-radius: 12px;
+  }
+
+  .avatar-shell {
+    width: 126px;
+    height: 126px;
+  }
+
+  .avatar-core {
+    width: 104px;
+    height: 104px;
+  }
+
+  .card-footer {
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    font-size: 0.82rem;
+  }
+
+  .subtitle-bar,
+  .end-notice {
+    max-width: 100%;
+    width: 100%;
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+
+  .control-bar {
+    border-radius: 12px;
+    padding: 10px;
+  }
+
+  .control-btn,
+  .link-btn {
+    width: 100%;
+    border-radius: 10px;
+  }
+
+  .gate-page {
+    padding: 10px;
+    align-items: flex-start;
+  }
+
+  .gate-card {
+    width: 100%;
+    padding: 14px 12px;
+    border-radius: 12px;
+  }
+
+  .gate-card h1 {
+    font-size: 1.2rem;
+  }
+
+  .permission-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .permission-right {
+    justify-content: space-between;
+  }
+
+  .permission-test-btn,
+  .gate-btn {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .gate-actions {
+    gap: 8px;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .test-modal-mask {
+    padding: 0;
+  }
+
+  .test-modal {
+    width: 100%;
+    height: 100%;
+    max-height: 100dvh;
+    border-radius: 0;
+    padding: 14px 12px calc(14px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+
+  .mic-wave-canvas {
+    min-height: 120px;
+  }
+
+  .camera-preview {
+    min-height: 180px;
   }
 }
 

@@ -9,7 +9,7 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from arkitect.telemetry.logger import INFO
 
@@ -30,6 +30,8 @@ INTERVIEW_STATUS_DELETED = "deleted"
 MAX_INTERRUPTION_COUNT = 3
 FIXED_INTRO_QUESTION_ID = "intro_fixed"
 FIXED_INTRO_QUESTION_TEXT = "请先做一个简短的自我介绍，包括你的学历和与岗位相关的经验。"
+CHECKIN_ORDER = ("speaker", "mic", "camera", "screen")
+DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
 
 
 @dataclass
@@ -87,6 +89,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   job_uid TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL,
   question_count INTEGER NOT NULL,
+  required_checkins TEXT NOT NULL DEFAULT 'speaker,mic',
   selected_question_ids TEXT NOT NULL,
   notes TEXT,
   status TEXT NOT NULL,
@@ -149,6 +152,43 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN reconnect_deadline_at TEXT"
         )
+    if "required_checkins" not in columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN required_checkins TEXT NOT NULL DEFAULT 'speaker,mic'"
+        )
+        conn.execute(
+            "UPDATE interviews SET required_checkins = 'speaker,mic' WHERE required_checkins IS NULL"
+        )
+
+
+def normalize_required_checkins(required_checkins: Optional[Sequence[str]]) -> List[str]:
+    if required_checkins is None:
+        return list(DEFAULT_REQUIRED_CHECKINS)
+    if isinstance(required_checkins, str):
+        raise ValueError("invalid_required_checkins")
+
+    seen: Set[str] = set()
+    for item in required_checkins:
+        if not isinstance(item, str):
+            raise ValueError("invalid_required_checkins")
+        normalized = item.strip()
+        if not normalized:
+            continue
+        if normalized not in CHECKIN_ORDER:
+            raise ValueError("invalid_required_checkins")
+        seen.add(normalized)
+    return [step for step in CHECKIN_ORDER if step in seen]
+
+
+def serialize_required_checkins(required_checkins: Sequence[str]) -> str:
+    return ",".join(required_checkins)
+
+
+def parse_required_checkins(raw: Optional[str]) -> List[str]:
+    if raw is None:
+        return list(DEFAULT_REQUIRED_CHECKINS)
+    values = {item.strip() for item in raw.split(",") if item.strip()}
+    return [step for step in CHECKIN_ORDER if step in values]
 
 
 def get_conn() -> sqlite3.Connection:
@@ -547,8 +587,11 @@ def create_interview(
     job_uid: str,
     duration_minutes: int,
     notes: Optional[str],
+    required_checkins: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     now = utc_now_iso()
+    normalized_checkins = normalize_required_checkins(required_checkins)
+    serialized_checkins = serialize_required_checkins(normalized_checkins)
     with get_conn() as conn:
         job = conn.execute(
             "SELECT job_uid, name FROM jobs WHERE job_uid = ?",
@@ -572,10 +615,10 @@ def create_interview(
         conn.execute(
             """
             INSERT INTO interviews (
-                token, candidate_name, job_uid, duration_minutes, question_count,
+                token, candidate_name, job_uid, duration_minutes, question_count, required_checkins,
                 selected_question_ids, notes, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -583,6 +626,7 @@ def create_interview(
                 job_uid,
                 duration_minutes,
                 question_count,
+                serialized_checkins,
                 ",".join(str(i) for i in selected_ids),
                 notes,
                 INTERVIEW_STATUS_PENDING,
@@ -599,6 +643,7 @@ def create_interview(
         "job_name": job["name"],
         "duration_minutes": duration_minutes,
         "question_count": question_count,
+        "required_checkins": normalized_checkins,
         "notes": notes,
         "status": INTERVIEW_STATUS_PENDING,
         "created_at": now,
@@ -728,6 +773,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             "name": row["job_name"],
         },
         "selected_questions": selected_questions,
+        "required_checkins": parse_required_checkins(row["required_checkins"]),
         "turns": [
             {
                 "role": t["role"],
@@ -761,6 +807,7 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.duration_minutes, i.status, i.interruption_count,
+                   i.required_checkins,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -778,6 +825,7 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
             "duration_minutes": int(row["duration_minutes"]),
             "status": row["status"],
             "interruption_count": int(row["interruption_count"] or 0),
+            "required_checkins": parse_required_checkins(row["required_checkins"]),
             "job": {
                 "job_uid": row["job_uid"],
                 "name": row["job_name"],

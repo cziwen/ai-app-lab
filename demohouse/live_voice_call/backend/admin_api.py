@@ -107,6 +107,7 @@ class CreateInterviewBody(BaseModel):
     job_uid: str = Field(min_length=1)
     duration_minutes: int = Field(ge=5, le=180)
     notes: Optional[str] = Field(default=None, max_length=1000)
+    required_checkins: Optional[List[str]] = Field(default=None)
 
 
 def create_admin_app() -> FastAPI:
@@ -213,12 +214,18 @@ def create_admin_app() -> FastAPI:
                 job_uid=body.job_uid.strip(),
                 duration_minutes=body.duration_minutes,
                 notes=(body.notes or "").strip() or None,
+                required_checkins=body.required_checkins,
             )
         except ValueError as e:
             if str(e) == "job_not_found":
                 raise HTTPException(status_code=404, detail="岗位不存在")
             if str(e) == "job_question_bank_empty":
                 raise HTTPException(status_code=400, detail="岗位题库为空")
+            if str(e) == "invalid_required_checkins":
+                raise HTTPException(
+                    status_code=400,
+                    detail="required_checkins 仅支持 speaker/mic/camera/screen",
+                )
             raise
         interview["interview_link"] = build_interview_link(interview["token"])
         return {"interview": interview}
@@ -243,6 +250,7 @@ def create_admin_app() -> FastAPI:
                 "completed_at": detail["completed_at"],
                 "job": detail["job"],
                 "selected_questions": detail.get("selected_questions", []),
+                "required_checkins": detail.get("required_checkins", []),
                 "interview_link": build_interview_link(detail["token"]),
                 "completed": completed,
             }

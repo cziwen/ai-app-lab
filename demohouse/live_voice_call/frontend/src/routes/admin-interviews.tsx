@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { API_URL } from '@/config/endpoints';
 import {
   adminApi,
+  type CheckInKey,
   type InterviewDetail,
   type InterviewListItem,
   type JobListItem,
@@ -15,6 +16,20 @@ const normalizeDurationMinutes = (value: string): number => {
     return 5;
   }
   return Math.max(5, parsed);
+};
+
+const CHECKIN_OPTIONS: Array<{ key: CheckInKey; label: string }> = [
+  { key: 'speaker', label: '扬声器' },
+  { key: 'mic', label: '麦克风' },
+  { key: 'camera', label: '摄像头' },
+  { key: 'screen', label: '屏幕共享' },
+];
+
+const CHECKIN_LABEL: Record<CheckInKey, string> = {
+  speaker: '扬声器',
+  mic: '麦克风',
+  camera: '摄像头',
+  screen: '屏幕共享',
 };
 
 export const AdminInterviewsPage = () => {
@@ -32,6 +47,10 @@ export const AdminInterviewsPage = () => {
   const [selectedJobUid, setSelectedJobUid] = useState('');
   const [durationMinutesInput, setDurationMinutesInput] = useState('10');
   const [interviewNotes, setInterviewNotes] = useState('');
+  const [requiredCheckins, setRequiredCheckins] = useState<CheckInKey[]>([
+    'speaker',
+    'mic',
+  ]);
   const [creatingInterview, setCreatingInterview] = useState(false);
 
   const loadJobs = async () => {
@@ -117,11 +136,13 @@ export const AdminInterviewsPage = () => {
         job_uid: selectedJobUid,
         duration_minutes: durationMinutes,
         notes: interviewNotes.trim(),
+        required_checkins: requiredCheckins,
       });
       setShowCreateInterview(false);
       setCandidateName('');
       setInterviewNotes('');
       setDurationMinutesInput('10');
+      setRequiredCheckins(['speaker', 'mic']);
       await loadInterviews('');
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : '创建面试失败');
@@ -223,6 +244,34 @@ export const AdminInterviewsPage = () => {
 
             <p className="admin-hint">预计提问数：{estimatedQuestionCount}（包含 5 分钟 intro 预留）</p>
 
+            <label>必检项配置</label>
+            <div className="admin-checkin-grid">
+              {CHECKIN_OPTIONS.map(item => (
+                <label className="admin-checkin-item" key={item.key}>
+                  <input
+                    type="checkbox"
+                    checked={requiredCheckins.includes(item.key)}
+                    onChange={event => {
+                      setRequiredCheckins(prev => {
+                        if (event.target.checked) {
+                          const next = new Set(prev);
+                          next.add(item.key);
+                          return CHECKIN_OPTIONS.map(option => option.key).filter(key =>
+                            next.has(key),
+                          );
+                        }
+                        return prev.filter(key => key !== item.key);
+                      });
+                    }}
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
+            <p className="admin-hint">
+              默认勾选扬声器和麦克风。未勾选项不会出现在候选人 check-in 流程中。
+            </p>
+
             <label htmlFor="interview-notes">备注（可选）</label>
             <textarea
               id="interview-notes"
@@ -274,6 +323,17 @@ export const AdminInterviewsPage = () => {
               <section>
                 <h3 className="admin-detail-title">备注</h3>
                 <p>{interviewDetail.notes || '无'}</p>
+              </section>
+
+              <section>
+                <h3 className="admin-detail-title">必检项</h3>
+                <p>
+                  {interviewDetail.required_checkins?.length
+                    ? interviewDetail.required_checkins
+                        .map(item => CHECKIN_LABEL[item] || item)
+                        .join(' / ')
+                    : '无（本场无需设备检查）'}
+                </p>
               </section>
 
               <section>

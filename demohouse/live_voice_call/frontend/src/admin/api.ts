@@ -1,5 +1,7 @@
 import { API_URL } from '@/config/endpoints';
 
+export type CheckInKey = 'speaker' | 'mic' | 'camera' | 'screen';
+
 export type JobListItem = {
   job_uid: string;
   name: string;
@@ -56,6 +58,7 @@ export type InterviewDetail = {
     sort_order: number;
     question: string;
   }>;
+  required_checkins: CheckInKey[];
   interview_link: string;
   completed: boolean;
   completion_message?: string;
@@ -143,6 +146,7 @@ export const adminApi = {
     job_uid: string;
     duration_minutes: number;
     notes?: string;
+    required_checkins?: CheckInKey[];
   }) =>
     request<{ interview: InterviewListItem & { interview_link: string } }>(
       '/api/admin/interviews',
