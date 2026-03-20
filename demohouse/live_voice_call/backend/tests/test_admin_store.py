@@ -183,6 +183,7 @@ def test_start_interview_session_prepends_fixed_intro_question(monkeypatch, tmp_
     assert session.questions[0]["main_question"] == admin_store.FIXED_INTRO_QUESTION_TEXT
     assert session.questions[1]["question_id"] != admin_store.FIXED_INTRO_QUESTION_ID
     assert "must_cover" in session.questions[1]["evidence"]
+    assert "scoring_boundary" in session.questions[1]["evidence"]
     assert "ability_dimension" in session.questions[1]["evidence"]
     assert "best_standard" in session.questions[1]["evidence"]
 

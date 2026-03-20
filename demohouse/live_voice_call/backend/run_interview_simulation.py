@@ -14,17 +14,17 @@ QUESTIONS: List[Dict[str, Any]] = [
     {
         "question_id": "q1",
         "main_question": "请用1分钟做自我介绍，重点说与你申请岗位相关的经历。",
-        "evidence": {"must_cover": ["经历", "岗位", "优势"]},
+        "evidence": {"scoring_boundary": "是否清晰说明岗位相关经历，并体现与岗位匹配度"},
     },
     {
         "question_id": "q2",
         "main_question": "请介绍一个你主导的项目，说明目标、你的动作和结果。",
-        "evidence": {"must_cover": ["目标", "动作", "结果"]},
+        "evidence": {"scoring_boundary": "是否完整覆盖项目目标、个人关键动作和可验证结果"},
     },
     {
         "question_id": "q3",
         "main_question": "当你遇到复杂问题时，通常如何拆解并推动解决？",
-        "evidence": {"must_cover": ["拆解", "推动", "复盘"]},
+        "evidence": {"scoring_boundary": "是否体现问题拆解方法、推进机制和复盘意识"},
     },
 ]
 

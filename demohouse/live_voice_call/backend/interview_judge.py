@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -31,6 +32,8 @@ class JudgePrompt(BaseChatPromptTemplate):
                 "follow_up_question(str), reason(str), coverage_score(float 0~1)。"
                 "遵守：当 need_follow_up=true 时，follow_up_question 必须非空；"
                 "当 move_forward=true 时，need_follow_up 必须为 false。"
+                "评分时只允许参考：题目(question)、评分分界线(scoring_boundary)、候选人回答(candidate_answer)。"
+                "禁止参考 must_cover、reference_answer、best_standard、medium_standard、worst_standard。"
             )
         )
         return [system] + messages
@@ -107,11 +110,11 @@ class InterviewJudge:
 
         prompt_payload = {
             "question": question,
+            "scoring_boundary": self._extract_scoring_boundary(evidence),
             "candidate_answer": candidate_answer,
             "follow_up_count": follow_up_count,
-            "evidence": evidence or {},
             "instruction": (
-                "根据回答完整度决定 move_forward 或 need_follow_up。"
+                "仅基于 question 与 scoring_boundary 评估 candidate_answer 的覆盖度。"
                 "若需要追问，给出一个具体追问。仅返回JSON。"
             ),
         }
@@ -198,36 +201,78 @@ class InterviewJudge:
     def _heuristic_decision_json(
         self, question: str, candidate_answer: str, evidence: Optional[Dict[str, Any]]
     ) -> str:
-        must_cover = []
-        if evidence and isinstance(evidence.get("must_cover"), list):
-            must_cover = [str(x) for x in evidence["must_cover"] if str(x).strip()]
+        scoring_boundary = self._extract_scoring_boundary(evidence)
+        rubric_keywords = self._extract_keywords(f"{question} {scoring_boundary}".strip())
+        answer_keywords = self._extract_keywords(candidate_answer)
 
-        hit_count = 0
-        for keyword in must_cover:
-            if keyword in candidate_answer:
-                hit_count += 1
+        if not answer_keywords:
+            coverage = 0.0
+        elif not rubric_keywords:
+            coverage = min(1.0, max(0.2, len(candidate_answer.strip()) / 120))
+        else:
+            rubric_set = set(rubric_keywords)
+            answer_set = set(answer_keywords)
+            overlap_count = len(rubric_set & answer_set)
+            coverage = overlap_count / len(rubric_set)
 
-        coverage = 0.5
-        if must_cover:
-            coverage = hit_count / len(must_cover)
-        elif len(candidate_answer) >= 40:
-            coverage = 0.8
+        if coverage < self.coverage_threshold and len(candidate_answer.strip()) >= 80:
+            coverage = max(coverage, self.coverage_threshold - 0.05)
 
         if coverage >= self.coverage_threshold:
             decision = {
                 "move_forward": True,
                 "need_follow_up": False,
                 "follow_up_question": "",
-                "reason": "heuristic_enough_coverage",
+                "reason": "semantic_enough_coverage",
                 "coverage_score": coverage,
             }
         else:
             decision = {
                 "move_forward": False,
                 "need_follow_up": True,
-                "follow_up_question": "请补充你具体做了什么，以及最终结果如何。",
-                "reason": "heuristic_need_more_detail",
+                "follow_up_question": (
+                    "请围绕这个评价标准补充："
+                    f"{scoring_boundary or '你是如何判断并落实关键决策的'}。"
+                ),
+                "reason": "semantic_need_more_detail",
                 "coverage_score": coverage,
             }
 
         return json.dumps(decision, ensure_ascii=False)
+
+    def _extract_scoring_boundary(self, evidence: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(evidence, dict):
+            return ""
+        return str(evidence.get("scoring_boundary", "") or "").strip()
+
+    def _extract_keywords(self, text: str) -> List[str]:
+        normalized = (
+            (text or "")
+            .replace("，", " ")
+            .replace("。", " ")
+            .replace("；", " ")
+            .replace("：", " ")
+            .replace("、", " ")
+            .replace(",", " ")
+            .replace(";", " ")
+            .replace(":", " ")
+        )
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", normalized)
+        if not tokens:
+            return []
+        picked: List[str] = []
+        seen = set()
+        for token in tokens:
+            candidates = [token]
+            if re.search(r"[\u4e00-\u9fff]", token) and len(token) >= 4:
+                candidates.extend(token[idx : idx + 2] for idx in range(len(token) - 1))
+            for candidate in candidates:
+                if len(candidate) < 2 or candidate in seen:
+                    continue
+                seen.add(candidate)
+                picked.append(candidate)
+                if len(picked) >= 16:
+                    return picked
+            if len(picked) >= 16:
+                break
+        return picked

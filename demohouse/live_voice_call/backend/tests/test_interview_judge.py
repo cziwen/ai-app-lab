@@ -83,3 +83,39 @@ def test_decide_output_contract():
         assert decision.follow_up_question == ""
 
     asyncio.run(_run())
+
+
+def test_semantic_heuristic_uses_question_and_scoring_boundary():
+    async def _run():
+        judge = InterviewJudge(llm_endpoint_id=None, coverage_threshold=0.7)
+        decision = await judge.decide(
+            question="你如何处理客户投诉？",
+            candidate_answer="我会先厘清事实，再给出可执行方案，并确认客户是否认可。",
+            follow_up_count=0,
+            evidence={"scoring_boundary": "是否先厘清事实再给可执行方案"},
+        )
+        assert decision.move_forward is True
+        assert decision.need_follow_up is False
+        assert decision.coverage_score >= 0.7
+
+    asyncio.run(_run())
+
+
+def test_semantic_heuristic_does_not_use_reference_or_best_standard():
+    async def _run():
+        judge = InterviewJudge(llm_endpoint_id=None, coverage_threshold=0.7)
+        decision = await judge.decide(
+            question="你如何处理客户投诉？",
+            candidate_answer="我主要强调高净值、私域和成交转化。",
+            follow_up_count=0,
+            evidence={
+                "scoring_boundary": "是否先厘清事实再给可执行方案",
+                "reference_answer": "高净值、私域、成交转化",
+                "best_standard": "高净值、私域、成交转化",
+            },
+        )
+        assert decision.move_forward is False
+        assert decision.need_follow_up is True
+        assert decision.reason == "semantic_need_more_detail"
+
+    asyncio.run(_run())
