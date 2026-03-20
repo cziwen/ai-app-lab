@@ -16,6 +16,25 @@ export default defineConfig({
   runtime: {
     router: false,
   },
+  tools: {
+    devServer: {
+      proxy: {
+        '/api/frontend-logs': {
+          target: 'http://127.0.0.1:8889',
+          changeOrigin: true,
+        },
+        '/api': {
+          target: 'http://127.0.0.1:8890',
+          changeOrigin: true,
+        },
+        '/ws': {
+          target: 'ws://127.0.0.1:8888',
+          ws: true,
+          changeOrigin: true,
+        },
+      },
+    },
+  },
   html: {
     disableHtmlFolder: true,
   },

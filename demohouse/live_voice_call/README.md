@@ -92,6 +92,8 @@
     pnpm run dev
     ```
 
+   本地开发模式下，前端 `pnpm dev` 已内置代理：`/api/*` 转发到 `8890`、`/api/frontend-logs` 转发到 `8889`、`/ws` 转发到 `8888`。
+
 5. 访问`http://localhost:8080`即可
 
 ## Docker Compose 部署（ECS 单机）
