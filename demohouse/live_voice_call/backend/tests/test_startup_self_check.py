@@ -79,6 +79,24 @@ def test_check_llm1_rejects_invalid_thinking_type():
     asyncio.run(_run())
 
 
+def test_check_llm1_reports_upgrade_hint_when_sdk_lacks_responses(monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            ssc,
+            "detect_responses_capability",
+            lambda: (
+                False,
+                "AsyncArk.responses is unavailable; installed=1.0.123, required=5.0.19",
+            ),
+        )
+        result = await ssc.check_llm1(_make_config())
+        assert result.ok is False
+        assert result.detail == "LLM1 sdk unsupported"
+        assert "required=5.0.19" in (result.error or "")
+
+    asyncio.run(_run())
+
+
 def test_run_startup_self_check_collects_failures(monkeypatch):
     async def _run():
         async def _fake_llm1(config):

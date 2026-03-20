@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from importlib import metadata
 from typing import Any, AsyncIterable, Dict, List, Optional, Tuple
 
 from volcenginesdkarkruntime import AsyncArk
 
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+REQUIRED_VOLCENGINE_SDK_VERSION = "5.0.19"
 THINKING_TYPE_DISABLED = "disabled"
 THINKING_TYPE_ENABLED = "enabled"
 THINKING_TYPE_AUTO = "auto"
@@ -167,3 +169,33 @@ class ArkResponsesAdapter:
                 if text and not saw_delta:
                     yield text
                 saw_delta = False
+
+
+def detect_responses_capability() -> Tuple[bool, str]:
+    try:
+        installed_version = metadata.version("volcengine-python-sdk")
+    except metadata.PackageNotFoundError:
+        return (
+            False,
+            "volcengine-python-sdk is not installed; "
+            f"please install {REQUIRED_VOLCENGINE_SDK_VERSION}",
+        )
+    except Exception as err:
+        return False, f"failed to read volcengine-python-sdk version: {err}"
+
+    try:
+        probe_client = AsyncArk(base_url=ARK_BASE_URL, api_key="probe")
+    except Exception as err:
+        return (
+            False,
+            f"failed to initialize AsyncArk for capability check: {err}; "
+            f"installed={installed_version}, required={REQUIRED_VOLCENGINE_SDK_VERSION}",
+        )
+
+    if hasattr(probe_client, "responses"):
+        return True, f"responses supported (installed={installed_version})"
+    return (
+        False,
+        "AsyncArk.responses is unavailable; "
+        f"installed={installed_version}, required={REQUIRED_VOLCENGINE_SDK_VERSION}",
+    )

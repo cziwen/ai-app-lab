@@ -88,8 +88,15 @@
     poetry run python -m handler
     ```
 
+   若你刚升级后端依赖，请先重建容器镜像再启动：
+
+   ```shell
+   docker compose up -d --build backend
+   ```
+
    后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
+   若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：
    - 面试 WebSocket：`ws://0.0.0.0:8888`
    - 前端日志接收：`http://0.0.0.0:8889/api/frontend-logs?token=INT-...`

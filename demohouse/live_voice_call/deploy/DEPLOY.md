@@ -38,6 +38,12 @@ cp .env.example .env
 - 自动切换活动证书软链 `deploy/letsencrypt/live/__active__`
 - 校验并重载 Nginx
 
+若你刚升级了后端依赖（例如 `volcengine-python-sdk`），必须重建 backend 镜像：
+
+```bash
+docker compose up -d --build backend
+```
+
 ## 第三步（可选）：关闭历史自动续签任务
 
 ```bash
@@ -90,6 +96,21 @@ openssl s_client -connect smartinterview.cn:443 -servername smartinterview.cn </
 3. 后端未启动
 - 查看：`docker compose logs -f backend`
 - 先修复 `.env` 中 LLM/ASR/TTS 凭据
+
+4. 出现 `AsyncArk ... no attribute responses`
+- 说明 backend 容器仍在使用旧版 SDK（镜像未重建或 lock 未生效）
+- 执行：`docker compose up -d --build backend`
+- 校验容器内 SDK 与能力：
+```bash
+docker compose exec backend python -c "import importlib.metadata as m; from volcenginesdkarkruntime import AsyncArk; c=AsyncArk(base_url='https://ark.cn-beijing.volces.com/api/v3', api_key='x'); print('sdk', m.version('volcengine-python-sdk')); print('responses', hasattr(c, 'responses'))"
+```
+- 预期：`sdk 5.0.19` 且 `responses True`
+
+5. 本地能力自检（可选）
+```bash
+cd backend
+poetry run python -c "import importlib.metadata as m; from volcenginesdkarkruntime import AsyncArk; c=AsyncArk(base_url='https://ark.cn-beijing.volces.com/api/v3', api_key='x'); print('sdk', m.version('volcengine-python-sdk')); print('responses', hasattr(c, 'responses'))"
+```
 
 4. 命中 Let’s Encrypt 频率限制（too many certificates）
 - 不要重复执行签发，先执行：`./deploy/ssl.sh activate`

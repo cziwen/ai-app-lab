@@ -1,8 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import ark_responses_adapter as adapter_module
 from ark_responses_adapter import (
     ArkResponsesAdapter,
+    REQUIRED_VOLCENGINE_SDK_VERSION,
+    detect_responses_capability,
     extract_text_from_response,
     normalize_stage_config,
 )
@@ -136,3 +139,26 @@ def test_stream_text_uses_delta_and_done_fallback():
         assert kwargs["reasoning"] is None
 
     asyncio.run(_run())
+
+
+def test_detect_responses_capability_reports_true_for_real_runtime():
+    ok, detail = detect_responses_capability()
+    assert isinstance(ok, bool)
+    assert isinstance(detail, str)
+
+
+def test_detect_responses_capability_reports_false_when_responses_missing(monkeypatch):
+    class _NoResponsesClient:
+        def __init__(self, *args, **kwargs):
+            self.chat = object()
+
+    monkeypatch.setattr(adapter_module, "AsyncArk", _NoResponsesClient)
+    monkeypatch.setattr(
+        adapter_module.metadata,
+        "version",
+        lambda _name: "1.0.123",
+    )
+    ok, detail = detect_responses_capability()
+    assert ok is False
+    assert "AsyncArk.responses is unavailable" in detail
+    assert f"required={REQUIRED_VOLCENGINE_SDK_VERSION}" in detail

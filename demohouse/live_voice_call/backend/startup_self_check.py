@@ -6,7 +6,11 @@ from arkitect.core.component.asr import AsyncASRClient
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
 from arkitect.core.component.tts.constants import EventSessionFinished
 
-from ark_responses_adapter import ArkResponsesAdapter, normalize_stage_config
+from ark_responses_adapter import (
+    ArkResponsesAdapter,
+    detect_responses_capability,
+    normalize_stage_config,
+)
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -71,6 +75,14 @@ async def _check_llm_stage(
     thinking_type: Optional[str],
     reasoning_effort: Optional[str],
 ) -> CheckResult:
+    responses_ok, capability_detail = detect_responses_capability()
+    if not responses_ok:
+        return CheckResult(
+            ok=False,
+            detail=f"{stage_env_prefix} sdk unsupported",
+            error=capability_detail,
+        )
+
     if not config.ark_api_key:
         return CheckResult(
             ok=False,

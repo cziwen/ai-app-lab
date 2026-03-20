@@ -4,6 +4,7 @@
 
 环境变量（与 handler 启动保持一致）：
   ARK_API_KEY          - 火山方舟 API Key（必填）
+  volcengine-python-sdk - 需为 5.0.19（用于 responses API）
   LLM1_ENDPOINT_ID     - 方舟 LLM#1 endpoint ID（Judge）
   LLM2_ENDPOINT_ID     - 方舟 LLM#2 endpoint ID（Interviewer）
   LLM1_THINKING_TYPE   - enabled|disabled|auto

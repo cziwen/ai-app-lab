@@ -2122,22 +2122,23 @@ test = ["aiohttp (>=3.10.5)", "flake8 (>=5.0,<6.0)", "mypy (>=0.800)", "psutil",
 
 [[package]]
 name = "volcengine-python-sdk"
-version = "1.0.123"
+version = "5.0.19"
 description = "Volcengine SDK for Python"
 optional = false
-python-versions = "*"
+python-versions = ">=2.7"
 files = [
-    {file = "volcengine-python-sdk-1.0.123.tar.gz", hash = "sha256:9d062b9aef55a4556498769b52c9f5a24df1b795c0380c35d5c2f5962a3f9660"},
+    {file = "volcengine_python_sdk-5.0.19-py2.py3-none-any.whl", hash = "sha256:95cd4e473d9f59423ee1cbcbe37e0f543448f133a3c1c540d2c6eaf83b526ed2"},
+    {file = "volcengine_python_sdk-5.0.19.tar.gz", hash = "sha256:4154e5d1d13603d146c3b972d82433287c8b9e7f8a5f94210280e0ef2875e659"},
 ]
 
 [package.dependencies]
 certifi = ">=2017.4.17"
 python-dateutil = ">=2.1"
-six = ">=1.10"
-urllib3 = ">=1.23"
+six = ">=1.16"
+urllib3 = ">=1.26.5"
 
 [package.extras]
-ark = ["anyio (>=3.5.0,<5)", "cached-property", "cryptography (>=43.0.3,<43.0.4)", "httpx (>=0.23.0,<1)", "pydantic (>=1.9.0,<3)"]
+ark = ["anyio (>=3.5.0,<5)", "cached-property", "cryptography (>=44.0.1)", "httpx (>=0.23.0,<1)", "pydantic (>=1.9.0,<3)"]
 
 [[package]]
 name = "websockets"
@@ -2456,4 +2457,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.9,<3.12.0"
-content-hash = "667b6561a2f78873ed4d22eb0b81ae1fbe335239cb34d4e1df4e96bd741e094e"
+content-hash = "5af0fd1268f9939d1e8b7c0d6a03ceae7a94854d7f6a5421ce4deb264668845d"
