@@ -1,13 +1,10 @@
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from arkitect.core.component.llm import BaseChatLanguageModel
-from arkitect.core.component.llm.model import ArkMessage
-from langchain.prompts.chat import BaseChatPromptTemplate
-from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, SystemMessage
-
+from ark_responses_adapter import ArkResponsesAdapter
 from llm_limiter import llm_slot
 
 
@@ -20,23 +17,15 @@ class Decision:
     coverage_score: float
 
 
-class JudgePrompt(BaseChatPromptTemplate):
-    input_variables: List[str] = ["messages"]
-
-    def format_messages(self, **kwargs: Any) -> List[BaseMessage]:
-        messages: List[AnyMessage] = kwargs["messages"]
-        system = SystemMessage(
-            content=(
-                "你是结构化面试裁决器。只输出一个JSON对象，不要输出任何额外文字。"
-                "JSON字段必须包含：move_forward(bool), need_follow_up(bool), "
-                "follow_up_question(str), reason(str), coverage_score(float 0~1)。"
-                "遵守：当 need_follow_up=true 时，follow_up_question 必须非空；"
-                "当 move_forward=true 时，need_follow_up 必须为 false。"
-                "评分时只允许参考：题目(question)、评分分界线(scoring_boundary)、候选人回答(candidate_answer)。"
-                "禁止参考 must_cover、reference_answer、best_standard、medium_standard、worst_standard。"
-            )
-        )
-        return [system] + messages
+JUDGE_INSTRUCTIONS = (
+    "你是结构化面试裁决器。只输出一个JSON对象，不要输出任何额外文字。"
+    "JSON字段必须包含：move_forward(bool), need_follow_up(bool), "
+    "follow_up_question(str), reason(str), coverage_score(float 0~1)。"
+    "遵守：当 need_follow_up=true 时，follow_up_question 必须非空；"
+    "当 move_forward=true 时，need_follow_up 必须为 false。"
+    "评分时只允许参考：题目(question)、评分分界线(scoring_boundary)、候选人回答(candidate_answer)。"
+    "禁止参考 must_cover、reference_answer、best_standard、medium_standard、worst_standard。"
+)
 
 
 class InterviewJudge:
@@ -45,6 +34,9 @@ class InterviewJudge:
         coverage_threshold: float = 0.7,
         max_followups_per_question: int = 1,
         llm_endpoint_id: Optional[str] = None,
+        llm_thinking_type: str = "disabled",
+        llm_reasoning_effort: Optional[str] = None,
+        responses_adapter: Optional[ArkResponsesAdapter] = None,
         llm_decider: Optional[
             Callable[[str, str, int, Optional[Dict[str, Any]]], Awaitable[str]]
         ] = None,
@@ -52,6 +44,9 @@ class InterviewJudge:
         self.coverage_threshold = coverage_threshold
         self.max_followups_per_question = max_followups_per_question
         self.llm_endpoint_id = llm_endpoint_id
+        self.llm_thinking_type = llm_thinking_type
+        self.llm_reasoning_effort = llm_reasoning_effort
+        self.responses_adapter = responses_adapter
         self.llm_decider = llm_decider
 
     async def decide(
@@ -108,6 +103,13 @@ class InterviewJudge:
         if not self.llm_endpoint_id:
             return self._heuristic_decision_json(question, candidate_answer, evidence)
 
+        adapter = self.responses_adapter
+        if adapter is None:
+            api_key = (os.getenv("ARK_API_KEY") or "").strip()
+            if not api_key:
+                return None
+            adapter = ArkResponsesAdapter(api_key=api_key)
+
         prompt_payload = {
             "question": question,
             "scoring_boundary": self._extract_scoring_boundary(evidence),
@@ -118,25 +120,22 @@ class InterviewJudge:
                 "若需要追问，给出一个具体追问。仅返回JSON。"
             ),
         }
-        llm = BaseChatLanguageModel(
-            template=JudgePrompt(),
-            messages=[ArkMessage(**{"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)})],
-            endpoint_id=self.llm_endpoint_id,
-        )
-
-        chunks: List[str] = []
         async with llm_slot():
-            async for chunk in llm.astream():
-                if (
-                    chunk.choices
-                    and chunk.choices[0].delta
-                    and chunk.choices[0].delta.content
-                ):
-                    chunks.append(chunk.choices[0].delta.content)
-
-        if not chunks:
+            result = await adapter.complete_text(
+                model=self.llm_endpoint_id,
+                instructions=JUDGE_INSTRUCTIONS,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(prompt_payload, ensure_ascii=False),
+                    }
+                ],
+                thinking_type=self.llm_thinking_type,
+                reasoning_effort=self.llm_reasoning_effort,
+            )
+        if not result:
             return None
-        return "".join(chunks)
+        return result
 
     def _parse_json(self, raw: str) -> Optional[Dict[str, Any]]:
         content = raw.strip()

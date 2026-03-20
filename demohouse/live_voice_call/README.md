@@ -56,7 +56,14 @@
 
     ```shell
     export ARK_API_KEY={YOUR_API_KEY}
-    export LLM_ENDPOINT_ID={YOUR_ARK_LLM_ENDPOINT_ID}
+    export LLM1_ENDPOINT_ID={YOUR_ARK_LLM1_ENDPOINT_ID}
+    export LLM2_ENDPOINT_ID={YOUR_ARK_LLM2_ENDPOINT_ID}
+    # 可选：深度思考配置（默认 disabled）
+    export LLM1_THINKING_TYPE=disabled   # enabled|disabled|auto
+    export LLM2_THINKING_TYPE=disabled   # enabled|disabled|auto
+    # 仅在 THINKING_TYPE=enabled 时生效；未设置默认 minimal
+    # export LLM1_REASONING_EFFORT=minimal  # minimal|low|medium|high
+    # export LLM2_REASONING_EFFORT=minimal  # minimal|low|medium|high
     export ASR_APP_ID={YOUR_ASR_APP_ID}
     export ASR_ACCESS_TOKEN={YOUR_ASR_ACCESS_TOKEN}
     export TTS_APP_ID={YOUR_TTS_APP_ID}
@@ -81,7 +88,7 @@
     poetry run python -m handler
     ```
 
-   后端启动前会自动执行一次 `LLM + ASR + TTS` 开机自检。
+   后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    默认会同时启动：
    - 面试 WebSocket：`ws://0.0.0.0:8888`
@@ -180,7 +187,7 @@ docker compose down
 ### 常见问题排查
 
 - 后端容器反复退出：
-  - 原因通常是启动自检失败（LLM/ASR/TTS 任一失败即退出）
+  - 原因通常是启动自检失败（LLM1/LLM2/ASR/TTS 任一失败即退出）
   - 用 `docker compose logs -f backend` 查看失败项并修复 `.env`
 - 页面可打开但请求失败：
   - 检查安全组是否放通 `80`

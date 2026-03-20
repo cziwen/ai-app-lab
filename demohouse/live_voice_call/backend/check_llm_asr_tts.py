@@ -2,9 +2,14 @@
 """
 同时检测 LLM、ASR、TTS 是否可用。
 
-环境变量（均可选覆盖 handler 默认值）：
-  ARK_API_KEY          - 火山方舟 API Key（LLM 必填）
-  LLM_ENDPOINT_ID      - 方舟 LLM endpoint ID
+环境变量（与 handler 启动保持一致）：
+  ARK_API_KEY          - 火山方舟 API Key（必填）
+  LLM1_ENDPOINT_ID     - 方舟 LLM#1 endpoint ID（Judge）
+  LLM2_ENDPOINT_ID     - 方舟 LLM#2 endpoint ID（Interviewer）
+  LLM1_THINKING_TYPE   - enabled|disabled|auto
+  LLM2_THINKING_TYPE   - enabled|disabled|auto
+  LLM1_REASONING_EFFORT - minimal|low|medium|high（仅 thinking=enabled 生效）
+  LLM2_REASONING_EFFORT - minimal|low|medium|high（仅 thinking=enabled 生效）
   ASR_APP_ID           - ASR 应用 ID
   ASR_ACCESS_TOKEN     - ASR Access Token
   TTS_APP_ID           - TTS 应用 ID

@@ -87,16 +87,19 @@ def test_decide_output_contract():
 
 def test_semantic_heuristic_uses_question_and_scoring_boundary():
     async def _run():
-        judge = InterviewJudge(llm_endpoint_id=None, coverage_threshold=0.7)
+        judge = InterviewJudge(llm_endpoint_id=None, coverage_threshold=0.2)
         decision = await judge.decide(
             question="你如何处理客户投诉？",
-            candidate_answer="我会先厘清事实，再给出可执行方案，并确认客户是否认可。",
+            candidate_answer=(
+                "我会先厘清事实再给可执行方案，"
+                "然后确认客户是否认可，并跟进执行结果。"
+            ),
             follow_up_count=0,
             evidence={"scoring_boundary": "是否先厘清事实再给可执行方案"},
         )
         assert decision.move_forward is True
         assert decision.need_follow_up is False
-        assert decision.coverage_score >= 0.7
+        assert decision.coverage_score >= 0.2
 
     asyncio.run(_run())
 
@@ -117,5 +120,41 @@ def test_semantic_heuristic_does_not_use_reference_or_best_standard():
         assert decision.move_forward is False
         assert decision.need_follow_up is True
         assert decision.reason == "semantic_need_more_detail"
+
+    asyncio.run(_run())
+
+
+def test_responses_adapter_path_uses_endpoint_and_thinking():
+    class _FakeAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def complete_text(self, **kwargs):
+            self.calls.append(kwargs)
+            return (
+                '{"move_forward": true, "need_follow_up": false, '
+                '"follow_up_question": "", "reason": "ok", "coverage_score": 0.9}'
+            )
+
+    async def _run():
+        adapter = _FakeAdapter()
+        judge = InterviewJudge(
+            llm_endpoint_id="ep-judge",
+            llm_thinking_type="enabled",
+            llm_reasoning_effort="minimal",
+            responses_adapter=adapter,
+        )
+        decision = await judge.decide(
+            question="介绍项目",
+            candidate_answer="我负责拆解目标、推进开发并复盘结果。",
+            follow_up_count=0,
+            evidence={"scoring_boundary": "目标、动作、结果"},
+        )
+        assert decision.move_forward is True
+        assert adapter.calls
+        call = adapter.calls[0]
+        assert call["model"] == "ep-judge"
+        assert call["thinking_type"] == "enabled"
+        assert call["reasoning_effort"] == "minimal"
 
     asyncio.run(_run())

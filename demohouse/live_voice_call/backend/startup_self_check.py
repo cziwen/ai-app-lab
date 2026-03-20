@@ -3,17 +3,20 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from arkitect.core.component.asr import AsyncASRClient
-from arkitect.core.component.llm import BaseChatLanguageModel
-from arkitect.core.component.llm.model import ArkMessage
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
 from arkitect.core.component.tts.constants import EventSessionFinished
 
-from prompt import VoiceBotPrompt
+from ark_responses_adapter import ArkResponsesAdapter, normalize_stage_config
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     ark_api_key: Optional[str]
-    llm_endpoint_id: Optional[str]
+    llm1_endpoint_id: Optional[str]
+    llm2_endpoint_id: Optional[str]
+    llm1_thinking_type: Optional[str]
+    llm2_thinking_type: Optional[str]
+    llm1_reasoning_effort: Optional[str]
+    llm2_reasoning_effort: Optional[str]
     asr_app_id: Optional[str]
     asr_access_token: Optional[str]
     tts_app_id: Optional[str]
@@ -46,7 +49,12 @@ def _env(key: str) -> Optional[str]:
 def load_runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
         ark_api_key=_env("ARK_API_KEY"),
-        llm_endpoint_id=_env("LLM_ENDPOINT_ID"),
+        llm1_endpoint_id=_env("LLM1_ENDPOINT_ID"),
+        llm2_endpoint_id=_env("LLM2_ENDPOINT_ID"),
+        llm1_thinking_type=_env("LLM1_THINKING_TYPE"),
+        llm2_thinking_type=_env("LLM2_THINKING_TYPE"),
+        llm1_reasoning_effort=_env("LLM1_REASONING_EFFORT"),
+        llm2_reasoning_effort=_env("LLM2_REASONING_EFFORT"),
         asr_app_id=_env("ASR_APP_ID"),
         asr_access_token=_env("ASR_ACCESS_TOKEN"),
         tts_app_id=_env("TTS_APP_ID"),
@@ -55,45 +63,81 @@ def load_runtime_config() -> RuntimeConfig:
     )
 
 
-async def check_llm(config: RuntimeConfig) -> CheckResult:
+async def _check_llm_stage(
+    config: RuntimeConfig,
+    *,
+    stage_env_prefix: str,
+    endpoint_id: Optional[str],
+    thinking_type: Optional[str],
+    reasoning_effort: Optional[str],
+) -> CheckResult:
     if not config.ark_api_key:
         return CheckResult(
             ok=False,
             detail="ARK_API_KEY missing",
             error="missing ARK_API_KEY",
         )
-    if not config.llm_endpoint_id:
+    stage_config, normalize_error = normalize_stage_config(
+        stage_name=stage_env_prefix,
+        endpoint_id=endpoint_id,
+        thinking_type=thinking_type,
+        reasoning_effort=reasoning_effort,
+    )
+    if normalize_error:
         return CheckResult(
             ok=False,
-            detail="LLM_ENDPOINT_ID missing",
-            error="missing LLM_ENDPOINT_ID",
+            detail=f"{stage_env_prefix} config invalid",
+            error=normalize_error,
+        )
+    if stage_config is None:
+        return CheckResult(
+            ok=False,
+            detail=f"{stage_env_prefix} config invalid",
+            error=f"internal error: normalized config missing for {stage_env_prefix}",
         )
 
-    messages = [ArkMessage(**{"role": "user", "content": "你好，回复一句话即可。"})]
-    llm = BaseChatLanguageModel(
-        template=VoiceBotPrompt(),
-        messages=messages,
-        endpoint_id=config.llm_endpoint_id,
-    )
+    adapter = ArkResponsesAdapter(api_key=config.ark_api_key)
     try:
-        has_content = False
-        async for chunk in llm.astream():
-            if (
-                chunk.choices
-                and chunk.choices[0].delta
-                and chunk.choices[0].delta.content
-            ):
-                has_content = True
-                break
-        if has_content:
-            return CheckResult(ok=True, detail="LLM ok")
+        text = await adapter.complete_text(
+            model=stage_config.endpoint_id,
+            instructions="你是一个中文助手。请用一句话回复用户。",
+            messages=[{"role": "user", "content": "你好，回复一句话即可。"}],
+            thinking_type=stage_config.thinking_type,
+            reasoning_effort=stage_config.reasoning_effort,
+        )
+        if text.strip():
+            return CheckResult(ok=True, detail=f"{stage_env_prefix} ok")
         return CheckResult(
             ok=False,
-            detail="LLM no content",
-            error="no content from LLM stream",
+            detail=f"{stage_env_prefix} no content",
+            error=f"no content from {stage_env_prefix}",
         )
     except Exception as e:
-        return CheckResult(ok=False, detail="LLM failed", error=str(e))
+        return CheckResult(
+            ok=False,
+            detail=f"{stage_env_prefix} failed",
+            error=str(e),
+        )
+
+
+async def check_llm1(config: RuntimeConfig) -> CheckResult:
+    return await _check_llm_stage(
+        config,
+        stage_env_prefix="LLM1",
+        endpoint_id=config.llm1_endpoint_id,
+        thinking_type=config.llm1_thinking_type,
+        reasoning_effort=config.llm1_reasoning_effort,
+    )
+
+
+async def check_llm2(config: RuntimeConfig) -> CheckResult:
+    return await _check_llm_stage(
+        config,
+        stage_env_prefix="LLM2",
+        endpoint_id=config.llm2_endpoint_id,
+        thinking_type=config.llm2_thinking_type,
+        reasoning_effort=config.llm2_reasoning_effort,
+    )
 
 
 async def check_asr(config: RuntimeConfig) -> CheckResult:
@@ -194,7 +238,8 @@ async def run_startup_self_check(
     runtime = config or load_runtime_config()
     checks: Dict[str, CheckResult] = {}
 
-    checks["llm"] = await check_llm(runtime)
+    checks["llm1"] = await check_llm1(runtime)
+    checks["llm2"] = await check_llm2(runtime)
     checks["asr"] = await check_asr(runtime)
     checks["tts"] = await check_tts(runtime)
 
@@ -210,7 +255,7 @@ async def run_startup_self_check(
 def format_self_check_lines(report: SelfCheckReport) -> List[str]:
     status = "PASS" if report.ok else "FAIL"
     lines = [f"[StartupSelfCheck] summary status={status}"]
-    for name in ("llm", "asr", "tts"):
+    for name in ("llm1", "llm2", "asr", "tts"):
         result = report.checks.get(name)
         if not result:
             lines.append(f"[StartupSelfCheck] {name} status=FAIL detail=missing_result")

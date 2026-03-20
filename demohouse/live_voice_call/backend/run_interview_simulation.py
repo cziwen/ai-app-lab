@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from interview_flow import ASK_FOLLOWUP, ASK_QUESTION, DONE, INTRO, WAIT_ANSWER, WRAP_UP, InterviewFlow
 from interview_judge import InterviewJudge
 
-DEFAULT_LLM_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
+DEFAULT_LLM1_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
 
 QUESTIONS: List[Dict[str, Any]] = [
     {
@@ -44,10 +44,14 @@ async def main() -> int:
         print("ERROR: missing ARK_API_KEY")
         return 1
 
-    endpoint_id = os.environ.get("LLM_ENDPOINT_ID", DEFAULT_LLM_ENDPOINT_ID)
+    endpoint_id = os.environ.get("LLM1_ENDPOINT_ID", DEFAULT_LLM1_ENDPOINT_ID)
+    thinking_type = (os.environ.get("LLM1_THINKING_TYPE") or "disabled").strip().lower()
+    reasoning_effort = (os.environ.get("LLM1_REASONING_EFFORT") or "").strip().lower() or None
 
     judge = InterviewJudge(
         llm_endpoint_id=endpoint_id,
+        llm_thinking_type=thinking_type,
+        llm_reasoning_effort=reasoning_effort,
         max_followups_per_question=2,
         coverage_threshold=0.7,
     )
@@ -60,7 +64,9 @@ async def main() -> int:
 
     lines: List[str] = []
     lines.append(f"Simulation Timestamp: {datetime.now().isoformat()}")
-    lines.append(f"LLM Endpoint: {endpoint_id}")
+    lines.append(f"LLM1 Endpoint: {endpoint_id}")
+    lines.append(f"LLM1 Thinking: {thinking_type}")
+    lines.append(f"LLM1 Reasoning Effort: {reasoning_effort or '<none>'}")
     lines.append("=" * 80)
 
     answer_idx = 0

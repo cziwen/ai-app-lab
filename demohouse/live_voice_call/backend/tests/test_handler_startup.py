@@ -10,7 +10,8 @@ def _ok_report():
     return SelfCheckReport(
         ok=True,
         checks={
-            "llm": CheckResult(ok=True, detail="LLM ok"),
+            "llm1": CheckResult(ok=True, detail="LLM1 ok"),
+            "llm2": CheckResult(ok=True, detail="LLM2 ok"),
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
         },
@@ -22,11 +23,12 @@ def _fail_report():
     return SelfCheckReport(
         ok=False,
         checks={
-            "llm": CheckResult(ok=False, detail="LLM failed", error="missing key"),
+            "llm1": CheckResult(ok=False, detail="LLM1 failed", error="missing key"),
+            "llm2": CheckResult(ok=True, detail="LLM2 ok"),
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
         },
-        errors={"llm": "missing key"},
+        errors={"llm1": "missing key"},
     )
 
 
@@ -60,6 +62,11 @@ def test_handler_main_logs_selected_log_file(monkeypatch):
             messages.append(text)
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(
+            handler,
+            "PERSISTENCE",
+            handler.PersistenceQueue(handler.server_logger),
+        )
         monkeypatch.setattr(handler.server_logger, "info", _capture_info)
 
         try:
@@ -91,6 +98,11 @@ def test_handler_main_aborts_on_failed_self_check(monkeypatch):
             raise AssertionError("http server should not start on failed self check")
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(
+            handler,
+            "PERSISTENCE",
+            handler.PersistenceQueue(handler.server_logger),
+        )
         monkeypatch.setattr(handler.websockets, "serve", _fake_ws_serve)
         monkeypatch.setattr(asyncio, "start_server", _fake_http_start)
 
@@ -137,6 +149,11 @@ def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
             return _HttpServer()
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(
+            handler,
+            "PERSISTENCE",
+            handler.PersistenceQueue(handler.server_logger),
+        )
         monkeypatch.setattr(handler.websockets, "serve", _fake_ws_serve)
         monkeypatch.setattr(asyncio, "start_server", _fake_http_start)
         monkeypatch.setattr(handler, "create_admin_app", lambda: object())

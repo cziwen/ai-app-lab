@@ -412,10 +412,14 @@ ADMISSION = AdmissionController(MAX_ACTIVE_INTERVIEWS)
 PERSISTENCE = PersistenceQueue(server_logger)
 
 
-def _extract_pcm_audio(raw_audio: bytes, log_fn: Callable[[str], None]) -> bytes:
+def _extract_pcm_audio(
+    raw_audio: bytes, log_fn: Optional[Callable[[str], None]] = None
+) -> bytes:
     """Extract pure PCM bytes from nested length-prefixed audio payloads."""
     if not raw_audio:
         return b""
+    if log_fn is None:
+        log_fn = lambda _msg: None
 
     def _strip_length_prefix(data: bytes) -> bytes:
         if len(data) < 4:
@@ -599,7 +603,13 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
 
     # Create a VoiceBotService instance and initialize it
     service = VoiceBotService(
-        llm_ep_id=RUNTIME_CONFIG.llm_endpoint_id,
+        ark_api_key=RUNTIME_CONFIG.ark_api_key or "",
+        llm1_endpoint_id=RUNTIME_CONFIG.llm1_endpoint_id or "",
+        llm2_endpoint_id=RUNTIME_CONFIG.llm2_endpoint_id or "",
+        llm1_thinking_type=(RUNTIME_CONFIG.llm1_thinking_type or "disabled"),
+        llm2_thinking_type=(RUNTIME_CONFIG.llm2_thinking_type or "disabled"),
+        llm1_reasoning_effort=RUNTIME_CONFIG.llm1_reasoning_effort,
+        llm2_reasoning_effort=RUNTIME_CONFIG.llm2_reasoning_effort,
         tts_app_key=RUNTIME_CONFIG.tts_app_id,
         tts_access_key=RUNTIME_CONFIG.tts_access_token,
         tts_speaker=RUNTIME_CONFIG.tts_speaker or DEFAULT_SPEAKER,

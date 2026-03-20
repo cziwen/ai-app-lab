@@ -37,7 +37,9 @@ class _FakeASRClient:
 def _make_service(fake_asr):
     logs = []
     svc = service.VoiceBotService(
-        llm_ep_id="ep",
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-llm1",
+        llm2_endpoint_id="ep-llm2",
         asr_app_key="asr-app",
         asr_access_key="asr-token",
         tts_app_key="tts-app",

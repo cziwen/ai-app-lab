@@ -8,6 +8,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = ">=3.9,<3.12.0"
 arkitect = ">=0.1.5,<0.2.0"
+volcengine-python-sdk = ">=1.0.123,<2.0.0"
 fastapi = ">=0.116.0,<0.117.0"
 uvicorn = ">=0.29.0,<0.30.0"
 python-multipart = ">=0.0.20,<0.0.21"

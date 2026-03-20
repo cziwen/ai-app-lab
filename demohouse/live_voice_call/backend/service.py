@@ -40,8 +40,9 @@ from interview_flow import (
     InterviewFlow,
 )
 from interview_judge import Decision, InterviewJudge
-from prompt import InterviewerPrompt, VoiceBotPrompt
+from prompt import INTERVIEWER_SYSTEM_PROMPT, VoiceBotPrompt
 from llm_limiter import llm_slot
+from ark_responses_adapter import ArkResponsesAdapter, build_input_messages
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -84,7 +85,13 @@ class ASRInitUnavailableError(RuntimeError):
 class VoiceBotService(BaseModel):
     asr_client: Optional[AsyncASRClient] = None
     tts_client: Optional[AsyncTTSClient] = None
-    llm_ep_id: str
+    ark_api_key: str
+    llm1_endpoint_id: str
+    llm2_endpoint_id: str
+    llm1_thinking_type: str = "disabled"
+    llm2_thinking_type: str = "disabled"
+    llm1_reasoning_effort: Optional[str] = None
+    llm2_reasoning_effort: Optional[str] = None
     state: str = StateIdle
     tts_speaker: str = DEFAULT_SPEAKER  # TTS live_voice_call
 
@@ -106,6 +113,7 @@ class VoiceBotService(BaseModel):
     on_interview_completed: Optional[Callable[[], None]] = None
     log_fn: Optional[Callable[[str], None]] = None
     session_id: str = ""
+    responses_adapter: Optional[Any] = None
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
 
@@ -141,9 +149,14 @@ class VoiceBotService(BaseModel):
 
 
         if self.interview_mode:
+            if not self.responses_adapter:
+                self.responses_adapter = ArkResponsesAdapter(api_key=self.ark_api_key)
             flow_questions = self.interview_questions or DEFAULT_INTERVIEW_QUESTIONS
             self.interview_judge = InterviewJudge(
-                llm_endpoint_id=self.llm_ep_id,
+                llm_endpoint_id=self.llm1_endpoint_id,
+                llm_thinking_type=self.llm1_thinking_type,
+                llm_reasoning_effort=self.llm1_reasoning_effort,
+                responses_adapter=self.responses_adapter,
                 max_followups_per_question=1,
                 coverage_threshold=0.7,
             )
@@ -546,7 +559,7 @@ class VoiceBotService(BaseModel):
         llm = BaseChatLanguageModel(
             template=VoiceBotPrompt(),
             messages=self.history_messages,
-            endpoint_id=self.llm_ep_id,
+            endpoint_id=self.llm2_endpoint_id,
         )
         completion_buffer = ""
 
@@ -605,36 +618,37 @@ class VoiceBotService(BaseModel):
     ) -> AsyncIterable[str]:
         """Stream the main interviewer LLM response (LLM call #2).
 
-        Uses InterviewerPrompt. The interview_context is passed as an
+        Uses Ark Responses API. The interview_context is passed as an
         ephemeral user message but NOT persisted in history_messages.
         The LLM's output IS added to history.
         """
         messages_for_llm = self.history_messages + [
             ArkMessage(**{"role": "user", "content": interview_context})
         ]
-
-        llm = BaseChatLanguageModel(
-            template=InterviewerPrompt(),
-            messages=messages_for_llm,
-            endpoint_id=self.llm_ep_id,
-        )
+        if not self.responses_adapter:
+            self.responses_adapter = ArkResponsesAdapter(api_key=self.ark_api_key)
+        input_messages = build_input_messages(messages_for_llm)
         completion_buffer = ""
         first_token_logged = False
 
         async with llm_slot():
-            async for chunk in llm.astream():
-                if chunk.choices and chunk.choices[0].delta:
-                    delta_text = chunk.choices[0].delta.content
-                    if not delta_text:
-                        continue
-                    if not first_token_logged:
-                        self._log_turn_event(
-                            "interviewer_llm_first_token",
-                            extra={"token_len": len(delta_text)},
-                        )
-                        first_token_logged = True
-                    yield delta_text
-                    completion_buffer += delta_text
+            async for delta_text in self.responses_adapter.stream_text(
+                model=self.llm2_endpoint_id,
+                instructions=INTERVIEWER_SYSTEM_PROMPT,
+                messages=input_messages,
+                thinking_type=self.llm2_thinking_type,
+                reasoning_effort=self.llm2_reasoning_effort,
+            ):
+                if not delta_text:
+                    continue
+                if not first_token_logged:
+                    self._log_turn_event(
+                        "interviewer_llm_first_token",
+                        extra={"token_len": len(delta_text)},
+                    )
+                    first_token_logged = True
+                yield delta_text
+                completion_buffer += delta_text
 
         if completion_buffer:
             self.history_messages.append(

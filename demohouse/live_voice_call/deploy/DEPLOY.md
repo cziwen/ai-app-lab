@@ -23,7 +23,7 @@ cp .env.example .env
 
 - `PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in`
 - `LETSENCRYPT_EMAIL=2377963631@qq.com`（建议填写你常用且可收邮件的邮箱，用于到期提醒）
-- 业务凭据 `ARK_API_KEY`、`LLM_ENDPOINT_ID`、`ASR_*`、`TTS_*`
+- 业务凭据 `ARK_API_KEY`、`LLM1_ENDPOINT_ID`、`LLM2_ENDPOINT_ID`、`ASR_*`、`TTS_*`
 
 ## 第二步：一键初始化 HTTPS
 
