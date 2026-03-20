@@ -3,7 +3,6 @@ import os
 import queue
 import threading
 from logging.handlers import RotatingFileHandler
-from typing import Optional
 
 
 class AsyncRotatingFileHandler(logging.Handler):
@@ -16,12 +15,14 @@ class AsyncRotatingFileHandler(logging.Handler):
         queue_size: int = 10000,
         flush_interval_ms: int = 200,
         drop_policy: str = "drop_oldest",
+        close_timeout_seconds: float = 5.0,
     ) -> None:
         super().__init__(level=logging.INFO)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self.drop_policy = (drop_policy or "drop_oldest").strip().lower()
         if self.drop_policy not in ("drop_oldest", "drop_newest"):
             self.drop_policy = "drop_oldest"
+        self._close_timeout_seconds = max(0.1, float(close_timeout_seconds))
         self._queue: "queue.Queue[logging.LogRecord]" = queue.Queue(
             maxsize=max(1, int(queue_size))
         )
@@ -36,8 +37,10 @@ class AsyncRotatingFileHandler(logging.Handler):
         self._sink.setFormatter(logging.Formatter(log_format))
         self._stop_event = threading.Event()
         self._worker = threading.Thread(target=self._run, daemon=True)
+        self._close_lock = threading.Lock()
+        self._drop_lock = threading.Lock()
+        self._closed = False
         self._dropped = 0
-        self._warn_pending = False
         self._worker.start()
 
     @property
@@ -45,7 +48,7 @@ class AsyncRotatingFileHandler(logging.Handler):
         return self._sink.baseFilename
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self._stop_event.is_set():
+        if self._stop_event.is_set() or self._closed:
             return
         try:
             self._queue.put_nowait(record)
@@ -53,8 +56,7 @@ class AsyncRotatingFileHandler(logging.Handler):
         except queue.Full:
             pass
 
-        self._dropped += 1
-        self._warn_pending = True
+        self._count_dropped(1)
         if self.drop_policy == "drop_newest":
             return
         try:
@@ -64,6 +66,7 @@ class AsyncRotatingFileHandler(logging.Handler):
         try:
             self._queue.put_nowait(record)
         except queue.Full:
+            self._count_dropped(1)
             return
 
     def _run(self) -> None:
@@ -80,11 +83,9 @@ class AsyncRotatingFileHandler(logging.Handler):
         self._sink.flush()
 
     def _flush_drop_warning(self) -> None:
-        if not self._warn_pending or self._dropped <= 0:
+        dropped = self._consume_dropped_count()
+        if dropped <= 0:
             return
-        dropped = self._dropped
-        self._dropped = 0
-        self._warn_pending = False
         warn_record = logging.LogRecord(
             name="async-log",
             level=logging.WARNING,
@@ -96,12 +97,49 @@ class AsyncRotatingFileHandler(logging.Handler):
         )
         self._sink.emit(warn_record)
 
+    def _count_dropped(self, count: int) -> None:
+        if count <= 0:
+            return
+        with self._drop_lock:
+            self._dropped += count
+
+    def _consume_dropped_count(self) -> int:
+        with self._drop_lock:
+            dropped = self._dropped
+            self._dropped = 0
+        return dropped
+
     def close(self) -> None:
-        self._stop_event.set()
-        if self._worker.is_alive():
-            self._worker.join(timeout=2.0)
-        self._sink.close()
-        super().close()
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._stop_event.set()
+            if self._worker.is_alive():
+                self._worker.join(timeout=self._close_timeout_seconds)
+
+            if self._worker.is_alive():
+                remaining = self._queue.qsize()
+                dropped = self._consume_dropped_count()
+                warn_record = logging.LogRecord(
+                    name="async-log",
+                    level=logging.WARNING,
+                    pathname=__file__,
+                    lineno=0,
+                    msg=(
+                        "[AsyncLog] close timeout timeout_s=%s remaining_queue=%s "
+                        "dropped_unreported=%s"
+                    ),
+                    args=(self._close_timeout_seconds, remaining, dropped),
+                    exc_info=None,
+                )
+                self._sink.emit(warn_record)
+            else:
+                self._flush_drop_warning()
+                self._sink.flush()
+
+            self._sink.close()
+            super().close()
 
 
 def build_async_rotating_handler(
@@ -113,6 +151,7 @@ def build_async_rotating_handler(
     queue_size: int,
     flush_interval_ms: int,
     drop_policy: str,
+    close_timeout_seconds: float = 5.0,
 ) -> AsyncRotatingFileHandler:
     return AsyncRotatingFileHandler(
         log_path=log_path,
@@ -122,4 +161,5 @@ def build_async_rotating_handler(
         queue_size=queue_size,
         flush_interval_ms=flush_interval_ms,
         drop_policy=drop_policy,
+        close_timeout_seconds=close_timeout_seconds,
     )

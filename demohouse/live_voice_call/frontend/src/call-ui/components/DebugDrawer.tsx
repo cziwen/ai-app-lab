@@ -47,6 +47,8 @@ export const DebugDrawer = ({
       </div>
       <div className="status-grid">
         <div>连接状态: {state.connected ? '已连接' : '未连接'}</div>
+        <div>音频解锁: {state.audioUnlocked ? '已解锁' : '未解锁'}</div>
+        <div>播放路由: {state.audioRouteMode}</div>
         <div>用户识别: {state.currentUserSentence || '-'}</div>
         <div>模型回复: {state.currentBotSentence || '-'}</div>
       </div>

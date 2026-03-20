@@ -97,6 +97,8 @@ export const useCallController = (): CallController => {
     userSpeaking,
     botAudioPlaying,
     botAudioLevel,
+    audioUnlocked,
+    audioRouteMode,
     userAudioLevel,
     setUserSpeaking,
     setBotAudioLevel,
@@ -320,6 +322,8 @@ export const useCallController = (): CallController => {
     wsUrl,
     connected: isConnected,
     logs,
+    audioUnlocked,
+    audioRouteMode,
     currentUserSentence:
       mode === 'mock' ? mockUserSentence : currentUserSentence,
     currentBotSentence: mode === 'mock' ? mockBotSentence : currentBotSentence,

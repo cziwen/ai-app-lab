@@ -58,6 +58,8 @@ export const useVoiceBotService = () => {
     setBotSpeaking,
     setBotAudioPlaying,
     setBotAudioLevel,
+    setAudioUnlocked,
+    setAudioRouteMode,
     setUserSpeaking,
   } = useAudioChatState();
 
@@ -89,7 +91,7 @@ export const useVoiceBotService = () => {
     });
     log(
       'send | event:' +
-        EventType.UserAudio +
+        EventType.BotUpdateConfig +
         ' payload: ' +
         JSON.stringify({
           speaker: currentSpeaker,
@@ -127,6 +129,8 @@ export const useVoiceBotService = () => {
     setBotSpeaking(false);
     setBotAudioPlaying(false);
     setBotAudioLevel(0);
+    setAudioUnlocked(false);
+    setAudioRouteMode('web-audio-fallback');
     setUserSpeaking(false);
     setCurrentUserSentence('');
     setCurrentBotSentence('');
@@ -153,6 +157,15 @@ export const useVoiceBotService = () => {
       },
       onAudioLevelChange: level => {
         setBotAudioLevel(level);
+      },
+      onAudioUnlockedChange: unlocked => {
+        setAudioUnlocked(unlocked);
+      },
+      onAudioRouteModeChange: mode => {
+        setAudioRouteMode(mode);
+      },
+      onLog: message => {
+        log(message);
       },
       onStopPlayAudio: () => {
         setBotAudioPlaying(false);
@@ -260,7 +273,16 @@ export const useVoiceBotService = () => {
       },
     });
     serviceRef.current = service;
+    const tryUnlockAudio = () => {
+      service.unlockAudio();
+    };
+    document.addEventListener('click', tryUnlockAudio, { passive: true });
+    document.addEventListener('touchstart', tryUnlockAudio, { passive: true });
+    document.addEventListener('keydown', tryUnlockAudio, { passive: true });
     return () => {
+      document.removeEventListener('click', tryUnlockAudio);
+      document.removeEventListener('touchstart', tryUnlockAudio);
+      document.removeEventListener('keydown', tryUnlockAudio);
       service.shutdown();
       if (serviceRef.current === service) {
         serviceRef.current = null;

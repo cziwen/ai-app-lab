@@ -63,6 +63,10 @@
     export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
     export TTS_SPEAKER={YOUR_TTS_SPEAKER}
     ```
+   可选日志稳定性参数（默认可用）：
+   - `ASYNC_LOG_QUEUE_SIZE`、`ASYNC_LOG_FLUSH_INTERVAL_MS`、`ASYNC_LOG_DROP_POLICY`、`ASYNC_LOG_CLOSE_TIMEOUT_SECONDS`
+   - `INTERVIEW_LOGGER_CACHE_MAX`、`INTERVIEW_LOGGER_IDLE_SECONDS`
+   - `FRONTEND_LOG_MAX_BODY_BYTES`、`FRONTEND_LOG_MAX_ENTRIES`、`FRONTEND_LOG_MAX_ENTRY_CHARS`
 
 3. 启动服务端
 
@@ -148,6 +152,10 @@ docker compose ps
 docker compose logs -f gateway
 docker compose logs -f backend
 
+# 查看本次启动后端文件日志（每次启动新文件）
+latest_log=$(ls -t backend/logs/backend-*.log | head -1)
+tail -f "$latest_log"
+
 # 重启服务
 docker compose restart
 
@@ -160,6 +168,7 @@ docker compose down
 - 已挂载宿主机目录：
   - `./backend/data:/app/backend/data`
   - `./backend/logs:/app/backend/logs`
+- 后端主日志按启动生成：`backend/logs/backend-YYYYmmdd-HHMMSS-p<PID>.log`（不再固定为 `backend.log`）。
 - 容器重建后，SQLite 数据与音频/日志文件不会丢失。
 
 ### 常见问题排查

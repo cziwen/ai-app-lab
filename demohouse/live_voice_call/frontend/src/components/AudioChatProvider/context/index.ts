@@ -11,6 +11,7 @@
 
 import { createContext, type Dispatch, type SetStateAction } from 'react';
 import type { IMessage } from '@/types';
+import type { AudioRouteMode } from '@/utils/voice_bot_service';
 
 type AudioChatContextType = {
   wsConnected: boolean;
@@ -21,6 +22,10 @@ type AudioChatContextType = {
   setBotAudioPlaying: Dispatch<SetStateAction<boolean>>;
   botAudioLevel: number;
   setBotAudioLevel: Dispatch<SetStateAction<number>>;
+  audioUnlocked: boolean;
+  setAudioUnlocked: Dispatch<SetStateAction<boolean>>;
+  audioRouteMode: AudioRouteMode;
+  setAudioRouteMode: Dispatch<SetStateAction<AudioRouteMode>>;
   userSpeaking: boolean;
   setUserSpeaking: Dispatch<SetStateAction<boolean>>;
   userAudioLevel: number;

@@ -12,12 +12,16 @@
 import { type FC, type PropsWithChildren, useState } from 'react';
 import { AudioChatContext } from '@/components/AudioChatProvider/context';
 import type { IMessage } from '@/types';
+import type { AudioRouteMode } from '@/utils/voice_bot_service';
 
 export const AudioChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [wsConnected, setWsConnected] = useState(false);
   const [botSpeaking, setBotSpeaking] = useState(false);
   const [botAudioPlaying, setBotAudioPlaying] = useState(false);
   const [botAudioLevel, setBotAudioLevel] = useState(0);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [audioRouteMode, setAudioRouteMode] =
+    useState<AudioRouteMode>('web-audio-fallback');
   const [userSpeaking, setUserSpeaking] = useState(false);
   const [userAudioLevel, setUserAudioLevel] = useState(0);
   const [chatMessages, setChatMessages] = useState<IMessage[]>([]);
@@ -32,6 +36,10 @@ export const AudioChatProvider: FC<PropsWithChildren> = ({ children }) => {
         setBotAudioPlaying,
         botAudioLevel,
         setBotAudioLevel,
+        audioUnlocked,
+        setAudioUnlocked,
+        audioRouteMode,
+        setAudioRouteMode,
         userSpeaking,
         setUserSpeaking,
         userAudioLevel,

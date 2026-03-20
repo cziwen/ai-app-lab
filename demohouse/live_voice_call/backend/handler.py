@@ -19,7 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
-from typing import AsyncIterable, Callable, Deque, Dict, Optional, Tuple
+from typing import Any, AsyncIterable, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import uvicorn
@@ -60,12 +60,20 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(INTERVIEW_LOG_DIR, exist_ok=True)
 
+
+def _build_server_boot_log_path() -> str:
+    boot_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    pid = os.getpid()
+    return os.path.join(LOG_DIR, f"backend-{boot_timestamp}-p{pid}.log")
+
+
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
-SERVER_LOG_PATH = os.path.join(LOG_DIR, "backend.log")
+SERVER_BOOT_LOG_PATH = _build_server_boot_log_path()
 ASYNC_LOG_QUEUE_SIZE = int(os.getenv("ASYNC_LOG_QUEUE_SIZE", "10000"))
 ASYNC_LOG_FLUSH_INTERVAL_MS = int(os.getenv("ASYNC_LOG_FLUSH_INTERVAL_MS", "200"))
 ASYNC_LOG_DROP_POLICY = os.getenv("ASYNC_LOG_DROP_POLICY", "drop_oldest")
+ASYNC_LOG_CLOSE_TIMEOUT_SECONDS = float(os.getenv("ASYNC_LOG_CLOSE_TIMEOUT_SECONDS", "5"))
 
 MAX_ACTIVE_INTERVIEWS = int(os.getenv("MAX_ACTIVE_INTERVIEWS", "5"))
 QUEUE_WAIT_TIMEOUT_SECONDS = int(os.getenv("QUEUE_WAIT_TIMEOUT_SECONDS", "1800"))
@@ -78,8 +86,20 @@ PERSISTENCE_RETRY_BASE_SECONDS = float(
 PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS = float(
     os.getenv("PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS", "5")
 )
+INTERVIEW_LOGGER_CACHE_MAX = max(1, int(os.getenv("INTERVIEW_LOGGER_CACHE_MAX", "1000")))
+INTERVIEW_LOGGER_IDLE_SECONDS = max(
+    60, int(os.getenv("INTERVIEW_LOGGER_IDLE_SECONDS", "900"))
+)
+FRONTEND_LOG_MAX_BODY_BYTES = max(
+    1024, int(os.getenv("FRONTEND_LOG_MAX_BODY_BYTES", "262144"))
+)
+FRONTEND_LOG_MAX_ENTRIES = max(1, int(os.getenv("FRONTEND_LOG_MAX_ENTRIES", "200")))
+FRONTEND_LOG_MAX_ENTRY_CHARS = max(
+    1, int(os.getenv("FRONTEND_LOG_MAX_ENTRY_CHARS", "2000"))
+)
 
 _INTERVIEW_LOGGER_CACHE: Dict[Tuple[str, str], logging.Logger] = {}
+_INTERVIEW_LOGGER_LAST_USED: Dict[Tuple[str, str], float] = {}
 
 
 def _build_file_handler(log_path: str, log_format: str):
@@ -91,22 +111,31 @@ def _build_file_handler(log_path: str, log_format: str):
         queue_size=ASYNC_LOG_QUEUE_SIZE,
         flush_interval_ms=ASYNC_LOG_FLUSH_INTERVAL_MS,
         drop_policy=ASYNC_LOG_DROP_POLICY,
+        close_timeout_seconds=ASYNC_LOG_CLOSE_TIMEOUT_SECONDS,
     )
 
 
 server_logger = logging.getLogger("server")
 server_logger.setLevel(logging.INFO)
 server_logger.propagate = False
-if not any(
-    os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(SERVER_LOG_PATH)
-    for handler in server_logger.handlers
-):
+
+
+def _ensure_server_log_handler() -> None:
+    if any(
+        os.path.abspath(getattr(handler, "baseFilename", ""))
+        == os.path.abspath(SERVER_BOOT_LOG_PATH)
+        for handler in server_logger.handlers
+    ):
+        return
     server_logger.addHandler(
         _build_file_handler(
-            SERVER_LOG_PATH,
+            SERVER_BOOT_LOG_PATH,
             "%(asctime)s - %(levelname)s - %(message)s",
         )
     )
+
+
+_ensure_server_log_handler()
 
 
 def _get_interview_logger(token: str, stream: str) -> logging.Logger:
@@ -116,7 +145,10 @@ def _get_interview_logger(token: str, stream: str) -> logging.Logger:
     cache_key = (token, stream)
     cached = _INTERVIEW_LOGGER_CACHE.get(cache_key)
     if cached:
+        _INTERVIEW_LOGGER_LAST_USED[cache_key] = monotonic()
         return cached
+
+    _prune_interview_logger_cache()
 
     interview_dir = os.path.join(str(INTERVIEW_LOG_DIR), token)
     os.makedirs(interview_dir, exist_ok=True)
@@ -139,7 +171,56 @@ def _get_interview_logger(token: str, stream: str) -> logging.Logger:
         logger.addHandler(_build_file_handler(log_path, fmt))
 
     _INTERVIEW_LOGGER_CACHE[cache_key] = logger
+    _INTERVIEW_LOGGER_LAST_USED[cache_key] = monotonic()
+    _prune_interview_logger_cache()
     return logger
+
+
+def _close_logger_handlers(logger: logging.Logger) -> None:
+    for logger_handler in list(logger.handlers):
+        with contextlib.suppress(Exception):
+            logger_handler.close()
+        logger.removeHandler(logger_handler)
+
+
+def _release_interview_logger(token: str, stream: str) -> bool:
+    cache_key = (token, stream)
+    logger = _INTERVIEW_LOGGER_CACHE.pop(cache_key, None)
+    _INTERVIEW_LOGGER_LAST_USED.pop(cache_key, None)
+    if not logger:
+        return False
+    _close_logger_handlers(logger)
+    return True
+
+
+def _release_interview_loggers_for_token(token: str) -> int:
+    released = 0
+    for stream in ("backend", "frontend"):
+        if _release_interview_logger(token, stream):
+            released += 1
+    return released
+
+
+def _prune_interview_logger_cache() -> None:
+    now = monotonic()
+    stale_keys = [
+        cache_key
+        for cache_key, last_used in _INTERVIEW_LOGGER_LAST_USED.items()
+        if now - last_used >= INTERVIEW_LOGGER_IDLE_SECONDS
+    ]
+    for cache_key in stale_keys:
+        _release_interview_logger(*cache_key)
+
+    if len(_INTERVIEW_LOGGER_CACHE) <= INTERVIEW_LOGGER_CACHE_MAX:
+        return
+
+    ordered = sorted(
+        _INTERVIEW_LOGGER_LAST_USED.items(),
+        key=lambda item: item[1],
+    )
+    overflow_count = len(_INTERVIEW_LOGGER_CACHE) - INTERVIEW_LOGGER_CACHE_MAX
+    for cache_key, _ in ordered[:overflow_count]:
+        _release_interview_logger(*cache_key)
 
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8888"))
@@ -263,7 +344,9 @@ class PersistenceQueue:
         try:
             await asyncio.wait_for(self._worker_task, timeout=max(0.1, timeout_seconds))
         except asyncio.TimeoutError:
-            self.logger.warning("[PersistenceQueue] shutdown timeout, cancelling worker")
+            self.logger.warning(
+                "event=persistence_queue.shutdown_timeout action=cancel_worker"
+            )
             self._worker_task.cancel()
             with contextlib.suppress(Exception):
                 await self._worker_task
@@ -289,7 +372,7 @@ class PersistenceQueue:
                 interviewer_encoded_bytes=task.interviewer_encoded_bytes,
             )
             self.logger.info(
-                "[InterviewPersist] token=%s candidate_bytes=%s interviewer_bytes=%s candidate_dropped_frames=%s",
+                "event=interview_persist.success token=%s candidate_bytes=%s interviewer_bytes=%s candidate_dropped_frames=%s",
                 task.token,
                 len(task.candidate_pcm_bytes),
                 len(task.interviewer_encoded_bytes),
@@ -304,20 +387,22 @@ class PersistenceQueue:
         except Exception as persist_err:
             if task.retries >= PERSISTENCE_MAX_RETRIES:
                 self.logger.error(
-                    "[InterviewPersist] failed token=%s retries=%s error=%s",
+                    "event=interview_persist.failed token=%s retries=%s error=%s",
                     task.token,
                     task.retries,
                     persist_err,
+                    exc_info=True,
                 )
                 return
             task.retries += 1
             delay = PERSISTENCE_RETRY_BASE_SECONDS * (2 ** (task.retries - 1))
             self.logger.warning(
-                "[InterviewPersist] retry token=%s retry=%s delay=%.2fs error=%s",
+                "event=interview_persist.retry token=%s retry=%s delay=%.2fs error=%s",
                 task.token,
                 task.retries,
                 delay,
                 persist_err,
+                exc_info=True,
             )
             await asyncio.sleep(delay)
             await self._queue.put(task)
@@ -377,8 +462,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         await asyncio.to_thread(start_interview_session, token) if token else None
     )
     if not interview_data:
-        server_logger.info(
-            "[Interview] rejected connection remote=%s token=%s",
+        server_logger.warning(
+            "event=interview.rejected reason=invalid_token remote=%s token=%s",
             websocket.remote_address,
             token or "<empty>",
         )
@@ -486,7 +571,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     interview_logger = _get_interview_logger(token, "backend")
     interview_log: Callable[[str], None] = interview_logger.info
     server_logger.info(
-        "[Interview] started token=%s remote=%s",
+        "event=interview.started token=%s remote=%s",
         token,
         websocket.remote_address,
     )
@@ -602,26 +687,80 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             end_status = "completed" if interview_completed else "disconnected"
             interview_log(f"[Session] closed status={end_status}")
             server_logger.info(
-                "[Interview] closed token=%s remote=%s status=%s",
+                "event=interview.closed token=%s remote=%s status=%s",
                 token,
                 websocket.remote_address,
                 end_status,
             )
         except Exception as persist_err:
             interview_log(f"[InterviewPersist] failed token={token} error={persist_err}")
-            server_logger.info(
-                "[Interview] finalize failed token=%s remote=%s error=%s",
+            server_logger.error(
+                "event=interview.finalize_failed token=%s remote=%s error=%s",
                 token,
                 websocket.remote_address,
                 persist_err,
+                exc_info=True,
             )
+        finally:
+            _release_interview_loggers_for_token(token)
 
 
 def _http_response(status_line: bytes, body: bytes, *, cors: bool = False) -> bytes:
-    headers = [status_line, f"Content-Length: {len(body)}".encode()]
+    headers = [
+        status_line,
+        b"Content-Type: text/plain; charset=utf-8",
+        f"Content-Length: {len(body)}".encode(),
+    ]
     if cors:
         headers.append(b"Access-Control-Allow-Origin: *")
     return b"\r\n".join([*headers, b"", body])
+
+
+async def _write_http_response(writer: asyncio.StreamWriter, response: bytes) -> None:
+    writer.write(response)
+    await writer.drain()
+    writer.close()
+    with contextlib.suppress(Exception):
+        await writer.wait_closed()
+
+
+def _parse_request_line(request_line: bytes) -> Tuple[str, str]:
+    line_text = request_line.decode("utf-8", errors="replace").strip()
+    parts = line_text.split()
+    if len(parts) < 2:
+        raise ValueError("invalid_request_line")
+    method = parts[0].upper()
+    raw_path = parts[1]
+    return method, raw_path
+
+
+def _parse_content_length(headers: Dict[str, str]) -> int:
+    raw = headers.get("content-length")
+    if raw is None:
+        raise ValueError("missing_content_length")
+    try:
+        content_length = int(raw)
+    except ValueError as exc:
+        raise ValueError("invalid_content_length") from exc
+    if content_length < 0:
+        raise ValueError("invalid_content_length")
+    if content_length > FRONTEND_LOG_MAX_BODY_BYTES:
+        raise ValueError("body_too_large")
+    return content_length
+
+
+def _normalize_frontend_log_entries(raw_entries: Any) -> List[str]:
+    if not isinstance(raw_entries, list):
+        raise ValueError("payload_not_list")
+    if len(raw_entries) > FRONTEND_LOG_MAX_ENTRIES:
+        raise ValueError("too_many_entries")
+    entries: List[str] = []
+    for idx, item in enumerate(raw_entries):
+        entry = item if isinstance(item, str) else str(item)
+        if len(entry) > FRONTEND_LOG_MAX_ENTRY_CHARS:
+            raise ValueError(f"entry_too_long:{idx}")
+        entries.append(entry)
+    return entries
 
 
 async def handle_frontend_log_request(
@@ -629,15 +768,38 @@ async def handle_frontend_log_request(
 ):
     """Minimal HTTP handler for frontend log ingestion."""
     request_line = await reader.readline()
+    if not request_line:
+        writer.close()
+        return
+
     headers = {}
     while True:
         line = await reader.readline()
         if line in (b"\r\n", b"\n", b""):
             break
-        key, _, value = line.decode().partition(":")
+        key, sep, value = line.decode("utf-8", errors="replace").partition(":")
+        if not sep:
+            continue
         headers[key.strip().lower()] = value.strip()
 
-    method, raw_path, _ = request_line.decode().split(" ", 2)
+    try:
+        method, raw_path = _parse_request_line(request_line)
+    except ValueError as parse_err:
+        server_logger.warning(
+            "event=frontend_log.reject reason=%s request_line=%s",
+            parse_err,
+            request_line.decode("utf-8", errors="replace").strip(),
+        )
+        await _write_http_response(
+            writer,
+            _http_response(
+                b"HTTP/1.1 400 Bad Request",
+                b"Bad Request",
+                cors=True,
+            ),
+        )
+        return
+
     parsed_path = urlparse(raw_path)
     request_path = parsed_path.path
     token = (parse_qs(parsed_path.query).get("token", [None])[0] or "").strip()
@@ -645,32 +807,68 @@ async def handle_frontend_log_request(
     if method == "POST" and request_path == "/api/frontend-logs":
         token_exists = await asyncio.to_thread(interview_exists, token) if token else False
         if not token_exists:
-            response = _http_response(
-                b"HTTP/1.1 400 Bad Request",
-                b"Bad Request",
-                cors=True,
+            server_logger.warning(
+                "event=frontend_log.reject reason=invalid_token token=%s",
+                token or "<empty>",
             )
-            writer.write(response)
-            await writer.drain()
-            writer.close()
+            await _write_http_response(
+                writer,
+                _http_response(
+                    b"HTTP/1.1 400 Bad Request",
+                    b"Bad Request",
+                    cors=True,
+                ),
+            )
             return
 
-        content_length = int(headers.get("content-length", 0))
-        body = await reader.readexactly(content_length)
         try:
-            log_entries = json.loads(body)
-            if not isinstance(log_entries, list):
-                raise ValueError("log payload must be a list")
+            content_length = _parse_content_length(headers)
+            body = await reader.readexactly(content_length)
+            parsed_entries = json.loads(body)
+            log_entries = _normalize_frontend_log_entries(parsed_entries)
 
             frontend_logger = _get_interview_logger(token, "frontend")
             for entry in log_entries:
-                frontend_logger.info(str(entry))
+                frontend_logger.info(entry)
+            server_logger.info(
+                "event=frontend_log.accept token=%s entries=%s body_bytes=%s",
+                token,
+                len(log_entries),
+                len(body),
+            )
             response = _http_response(
                 b"HTTP/1.1 200 OK",
                 b"OK",
                 cors=True,
             )
-        except Exception:
+        except asyncio.IncompleteReadError:
+            server_logger.warning(
+                "event=frontend_log.reject reason=incomplete_body token=%s",
+                token,
+            )
+            response = _http_response(
+                b"HTTP/1.1 400 Bad Request",
+                b"Bad Request",
+                cors=True,
+            )
+        except (ValueError, json.JSONDecodeError) as parse_err:
+            server_logger.warning(
+                "event=frontend_log.reject reason=%s token=%s",
+                parse_err,
+                token,
+            )
+            response = _http_response(
+                b"HTTP/1.1 400 Bad Request",
+                b"Bad Request",
+                cors=True,
+            )
+        except Exception as log_err:
+            server_logger.error(
+                "event=frontend_log.reject reason=unexpected_error token=%s error=%s",
+                token,
+                log_err,
+                exc_info=True,
+            )
             response = _http_response(
                 b"HTTP/1.1 400 Bad Request",
                 b"Bad Request",
@@ -691,43 +889,47 @@ async def handle_frontend_log_request(
             b"Not Found",
         )
 
-    writer.write(response)
-    await writer.drain()
-    writer.close()
+    await _write_http_response(writer, response)
 
 
 async def main():
     """
     Main function to start the WebSocket server and HTTP log server.
     """
+    server_logger.info("event=server.log_file.selected path=%s", SERVER_BOOT_LOG_PATH)
     configure_llm_limit(int(os.getenv("LLM_CONCURRENT_REQUESTS", "5")))
     PERSISTENCE.start()
-    server_logger.info("[Server] startup begin")
+    server_logger.info("event=server.startup.begin")
     server_logger.info(
-        "[Server] config max_active=%s queue_timeout=%ss queue_heartbeat=%ss llm_limit=%s tts_speaker=%s",
+        "event=server.config max_active=%s queue_timeout_seconds=%s queue_heartbeat_seconds=%s llm_limit=%s tts_speaker=%s frontend_log_max_body_bytes=%s frontend_log_max_entries=%s frontend_log_max_entry_chars=%s interview_logger_cache_max=%s interview_logger_idle_seconds=%s",
         MAX_ACTIVE_INTERVIEWS,
         QUEUE_WAIT_TIMEOUT_SECONDS,
         QUEUE_HEARTBEAT_SECONDS,
         get_llm_limit(),
         RUNTIME_CONFIG.tts_speaker or DEFAULT_SPEAKER,
+        FRONTEND_LOG_MAX_BODY_BYTES,
+        FRONTEND_LOG_MAX_ENTRIES,
+        FRONTEND_LOG_MAX_ENTRY_CHARS,
+        INTERVIEW_LOGGER_CACHE_MAX,
+        INTERVIEW_LOGGER_IDLE_SECONDS,
     )
-    server_logger.info("[StartupSelfCheck] running preflight checks")
+    server_logger.info("event=startup_self_check.begin")
     self_check_report = await run_startup_self_check(RUNTIME_CONFIG)
     for line in format_self_check_lines(self_check_report):
         server_logger.info(line)
     if not self_check_report.ok:
-        server_logger.info("[StartupSelfCheck] failed, aborting server startup")
+        server_logger.error("event=startup_self_check.failed action=abort")
         raise SystemExit(1)
 
     # Start the WebSocket server
     ws_server = await websockets.serve(handler, host=WS_HOST, port=WS_PORT)
-    server_logger.info(f"WebSocket server is running on ws://{WS_HOST}:{WS_PORT}")
+    server_logger.info("event=server.ws.ready url=ws://%s:%s", WS_HOST, WS_PORT)
 
     # Start the HTTP log server
     http_server = await asyncio.start_server(
         handle_frontend_log_request, host=LOG_HOST, port=LOG_PORT
     )
-    server_logger.info(f"HTTP log server is running on http://{LOG_HOST}:{LOG_PORT}")
+    server_logger.info("event=server.http_log.ready url=http://%s:%s", LOG_HOST, LOG_PORT)
 
     admin_app = create_admin_app()
     admin_config = uvicorn.Config(
@@ -738,7 +940,11 @@ async def main():
         loop="asyncio",
     )
     admin_server = uvicorn.Server(admin_config)
-    server_logger.info(f"Admin API server is running on http://{ADMIN_API_HOST}:{ADMIN_API_PORT}")
+    server_logger.info(
+        "event=server.admin_api.ready url=http://%s:%s",
+        ADMIN_API_HOST,
+        ADMIN_API_PORT,
+    )
 
     try:
         await asyncio.gather(
@@ -748,7 +954,7 @@ async def main():
         )
     finally:
         await PERSISTENCE.shutdown(PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS)
-        server_logger.info("[Server] shutdown")
+        server_logger.info("event=server.shutdown")
 
 
 if __name__ == "__main__":

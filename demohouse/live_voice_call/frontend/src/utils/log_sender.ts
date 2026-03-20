@@ -15,6 +15,8 @@ const LOG_ENDPOINT = LOG_URL;
 const FLUSH_INTERVAL_MS = 5000;
 const MAX_BATCH_SIZE = 50;
 const MAX_RETRIES = 3;
+const LOG_BUFFER_MAX_ENTRIES = 2000;
+const LOG_DROP_WARN_EVERY = 100;
 
 type BufferedLog = {
   token: string;
@@ -25,6 +27,9 @@ class LogSender {
   private buffer: BufferedLog[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private retryCountByToken = new Map<string, number>();
+  private flushing = false;
+  private pendingFlush = false;
+  private droppedByBufferLimit = 0;
 
   constructor() {
     this.startFlushTimer();
@@ -43,8 +48,9 @@ class LogSender {
       token: normalizedToken,
       message: entry,
     });
+    this.enforceBufferLimit();
     if (this.buffer.length >= MAX_BATCH_SIZE) {
-      this.flush();
+      void this.flush();
     }
   }
 
@@ -69,13 +75,30 @@ class LogSender {
   }
 
   private startFlushTimer(): void {
-    this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    this.flushTimer = setInterval(() => {
+      void this.flush();
+    }, FLUSH_INTERVAL_MS);
   }
 
   async flush(): Promise<void> {
+    if (this.flushing) {
+      this.pendingFlush = true;
+      return;
+    }
+    this.flushing = true;
+    try {
+      do {
+        this.pendingFlush = false;
+        await this.flushOnce();
+      } while (this.pendingFlush || this.buffer.length >= MAX_BATCH_SIZE);
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  private async flushOnce(): Promise<void> {
     if (this.buffer.length === 0) return;
-    const batch = [...this.buffer];
-    this.buffer = [];
+    const batch = this.buffer.splice(0, MAX_BATCH_SIZE);
 
     const grouped = this.groupByToken(batch);
     const failedEntries: BufferedLog[] = [];
@@ -107,17 +130,32 @@ class LogSender {
 
     if (failedEntries.length > 0) {
       this.buffer = [...failedEntries, ...this.buffer];
+      this.enforceBufferLimit();
     }
   }
 
   private flushSync(): void {
     if (this.buffer.length === 0) return;
+    if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') {
+      console.warn('Log sender: sendBeacon unavailable, dropping buffered logs');
+      this.buffer = [];
+      return;
+    }
     const grouped = this.groupByToken(this.buffer);
+    let failedTokenCount = 0;
     for (const [token, entries] of grouped) {
       const blob = new Blob([JSON.stringify(entries)], {
         type: 'application/json',
       });
-      navigator.sendBeacon(this.buildEndpoint(token), blob);
+      const ok = navigator.sendBeacon(this.buildEndpoint(token), blob);
+      if (!ok) {
+        failedTokenCount += 1;
+      }
+    }
+    if (failedTokenCount > 0) {
+      console.warn(
+        `Log sender: sendBeacon failed for ${failedTokenCount} token groups, dropping buffered logs`,
+      );
     }
     this.buffer = [];
   }
@@ -126,7 +164,24 @@ class LogSender {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
     }
-    this.flush();
+    void this.flush();
+  }
+
+  private enforceBufferLimit(): void {
+    const overflow = this.buffer.length - LOG_BUFFER_MAX_ENTRIES;
+    if (overflow <= 0) {
+      return;
+    }
+    this.buffer.splice(0, overflow);
+    this.droppedByBufferLimit += overflow;
+    if (
+      this.droppedByBufferLimit === overflow ||
+      this.droppedByBufferLimit % LOG_DROP_WARN_EVERY === 0
+    ) {
+      console.warn(
+        `Log sender: dropped ${this.droppedByBufferLimit} buffered entries due to buffer limit`,
+      );
+    }
   }
 }
 

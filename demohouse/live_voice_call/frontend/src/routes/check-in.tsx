@@ -3,9 +3,11 @@ import { useLocation, useNavigate } from '@modern-js/runtime/router';
 import { useSessionAuth } from '@/auth/context';
 import { API_URL } from '@/config/endpoints';
 import type { PermissionKey, PermissionState, PermissionStatus } from '@/auth/types';
+import { logSender } from '@/utils/log_sender';
 
 type CheckStep = PermissionKey;
 type ModalType = Extract<CheckStep, 'speaker' | 'mic' | 'camera'> | null;
+type PermissionBootstrapState = 'idle' | 'requesting' | 'granted' | 'failed';
 
 const ORDERED_STEPS: CheckStep[] = ['speaker', 'mic', 'camera', 'screen'];
 const DEFAULT_REQUIRED_STEPS: CheckStep[] = ['speaker', 'mic'];
@@ -59,6 +61,21 @@ const isMobileBrowser = () => {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 };
 
+const isSafariBrowser = () => {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+  const ua = navigator.userAgent;
+  return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS/i.test(ua);
+};
+
+const getPermissionHint = () => {
+  if (isSafariBrowser()) {
+    return '请在 iPhone 设置 -> Safari -> 麦克风/相机 中允许访问，并在地址栏网站设置中允许权限后重试。';
+  }
+  return '请在手机系统设置和浏览器站点权限中允许麦克风/相机访问，然后重新申请权限。';
+};
+
 const getAudioContextClass = () => {
   return (
     window.AudioContext ||
@@ -72,6 +89,13 @@ export const CheckInPage = () => {
   const location = useLocation();
   const { token, setCheckInPassed, permissions, setPermissions, mediaStreamsRef } =
     useSessionAuth();
+  const logCheckin = useCallback(
+    (message: string) => {
+      const entry = `[${new Date().toLocaleTimeString()}]\t[CheckIn] ${message}`;
+      logSender.enqueue(entry, token);
+    },
+    [token],
+  );
 
   const [loadingCheckinConfig, setLoadingCheckinConfig] = useState(true);
   const [requiredSteps, setRequiredSteps] = useState<CheckStep[]>([
@@ -81,6 +105,12 @@ export const CheckInPage = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [checking, setChecking] = useState(false);
   const [modalType, setModalType] = useState<ModalType>(null);
+  const [permissionBootstrapState, setPermissionBootstrapState] =
+    useState<PermissionBootstrapState>('idle');
+  const [permissionBootstrapError, setPermissionBootstrapError] = useState('');
+  const [audioOutputVisibility, setAudioOutputVisibility] = useState<
+    'unknown' | 'visible' | 'likely_hidden_by_platform'
+  >('unknown');
 
   const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
@@ -105,11 +135,13 @@ export const CheckInPage = () => {
   const testAnalyserRef = useRef<AnalyserNode | null>(null);
   const testAudioRef = useRef<HTMLAudioElement | null>(null);
   const testMediaStreamRef = useRef<MediaStream | null>(null);
+  const bootstrapMediaStreamRef = useRef<MediaStream | null>(null);
 
   const canEnter = useMemo(
     () => allGranted(permissions, requiredSteps),
     [permissions, requiredSteps],
   );
+  const bootstrapReady = permissionBootstrapState === 'granted';
   const requiredStepsKey = useMemo(() => requiredSteps.join(','), [requiredSteps]);
 
   const cleanupTestMedia = useCallback(() => {
@@ -138,8 +170,14 @@ export const CheckInPage = () => {
     setMicWaveActive(false);
   }, []);
 
+  const cleanupBootstrapMedia = useCallback(() => {
+    stopStream(bootstrapMediaStreamRef.current);
+    bootstrapMediaStreamRef.current = null;
+  }, []);
+
   const resetAll = () => {
     cleanupTestMedia();
+    cleanupBootstrapMedia();
     stopStream(mediaStreamsRef.current.userMedia);
     stopStream(mediaStreamsRef.current.displayMedia);
     mediaStreamsRef.current.userMedia = null;
@@ -156,6 +194,9 @@ export const CheckInPage = () => {
     setCameraReady(false);
     setErrorMessage('');
     setModalType(null);
+    setPermissionBootstrapState('idle');
+    setPermissionBootstrapError('');
+    setAudioOutputVisibility('unknown');
   };
 
   useEffect(() => {
@@ -217,23 +258,83 @@ export const CheckInPage = () => {
       setSelectedSpeaker(prev => prev || outputs[0]?.deviceId || '');
       setSelectedMic(prev => prev || inputs[0]?.deviceId || '');
       setSelectedCamera(prev => prev || cameras[0]?.deviceId || '');
+      if (outputs.length > 0) {
+        setAudioOutputVisibility('visible');
+      } else if (inputs.length > 0 || cameras.length > 0) {
+        setAudioOutputVisibility('likely_hidden_by_platform');
+      } else {
+        setAudioOutputVisibility('unknown');
+      }
+      logCheckin(
+        `enumerate devices outputs=${outputs.length} inputs=${inputs.length} cameras=${cameras.length}`,
+      );
     } catch (_error) {
+      logCheckin('enumerate devices failed');
       setErrorMessage('无法读取设备列表，请检查浏览器权限。');
     }
-  }, []);
+  }, [logCheckin]);
+
+  const bootstrapPermissions = useCallback(async () => {
+    setPermissionBootstrapState('requesting');
+    setPermissionBootstrapError('');
+    logCheckin(`permission bootstrap start required_steps=${requiredSteps.join(',')}`);
+    cleanupBootstrapMedia();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setPermissionBootstrapState('failed');
+      setPermissionBootstrapError('当前浏览器不支持权限初始化，请更换浏览器。');
+      logCheckin('permission bootstrap failed unsupported getUserMedia');
+      return;
+    }
+
+    const needAudio = requiredSteps.includes('mic');
+    const needVideo = requiredSteps.includes('camera');
+    if (!needAudio && !needVideo) {
+      setPermissionBootstrapState('granted');
+      await loadDevices();
+      logCheckin('permission bootstrap skip media request (no mic/camera required)');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: needAudio,
+        video: needVideo,
+      });
+      bootstrapMediaStreamRef.current = stream;
+      await loadDevices();
+      setPermissionBootstrapState('granted');
+      logCheckin(
+        `permission bootstrap granted audio=${needAudio ? '1' : '0'} video=${needVideo ? '1' : '0'}`,
+      );
+    } catch (_error) {
+      setPermissionBootstrapState('failed');
+      setPermissionBootstrapError(getPermissionHint());
+      logCheckin(
+        `permission bootstrap failed audio=${needAudio ? '1' : '0'} video=${needVideo ? '1' : '0'}`,
+      );
+    }
+  }, [
+    cleanupBootstrapMedia,
+    logCheckin,
+    loadDevices,
+    requiredSteps,
+  ]);
 
   useEffect(() => {
     if (
-      requiredSteps.some(step =>
-        step === 'speaker' || step === 'mic' || step === 'camera',
+      requiredSteps.some(
+        step => step === 'speaker' || step === 'mic' || step === 'camera',
       )
     ) {
-      loadDevices();
+      bootstrapPermissions();
+    } else {
+      setPermissionBootstrapState('granted');
     }
     return () => {
       cleanupTestMedia();
+      cleanupBootstrapMedia();
     };
-  }, [requiredSteps, loadDevices, cleanupTestMedia]);
+  }, [requiredSteps, bootstrapPermissions, cleanupTestMedia, cleanupBootstrapMedia]);
 
   useEffect(() => {
     setCurrentStepIndex(0);
@@ -431,6 +532,14 @@ export const CheckInPage = () => {
   };
 
   const openStepTest = (step: CheckStep) => {
+    if (permissionBootstrapState === 'requesting') {
+      setErrorMessage('正在初始化权限，请稍候。');
+      return;
+    }
+    if (permissionBootstrapState === 'failed') {
+      setErrorMessage('权限初始化失败，请先重新申请权限。');
+      return;
+    }
     if (requiredSteps[currentStepIndex] !== step) {
       return;
     }
@@ -442,16 +551,17 @@ export const CheckInPage = () => {
   };
 
   const validateSpeakerAtEnter = async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) {
-      failStep('speaker', '当前浏览器不支持扬声器设备校验，请更换浏览器。');
-      throw new Error('speaker_failed');
+    let outputs: MediaDeviceInfo[] = [];
+    if (navigator.mediaDevices?.enumerateDevices) {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      outputs = devices.filter(item => item.kind === 'audiooutput');
     }
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const outputs = devices.filter(item => item.kind === 'audiooutput');
     if (
+      outputs.length > 0 &&
       selectedSpeaker &&
       !outputs.find(item => item.deviceId === selectedSpeaker)
     ) {
+      logCheckin('speaker validate failed selected speaker not found in output devices');
       failStep('speaker', '扬声器设备不可用，请重新完成扬声器测试。');
       throw new Error('speaker_failed');
     }
@@ -484,6 +594,7 @@ export const CheckInPage = () => {
     try {
       await testAudio.play();
     } catch (_error) {
+      logCheckin('speaker validate play failed');
       failStep('speaker', '扬声器校验播放失败，请检查系统音量或输出设备。');
       await audioContext.close();
       throw new Error('speaker_failed');
@@ -516,30 +627,41 @@ export const CheckInPage = () => {
       await validateSpeakerAtEnter();
     }
 
+    const bootstrapStream = bootstrapMediaStreamRef.current;
     let audioStream: MediaStream | null = null;
     let videoStream: MediaStream | null = null;
     if (requiredSteps.includes('mic')) {
-      try {
-        audioStream = await navigator.mediaDevices.getUserMedia({
-          audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
-          video: false,
-        });
-      } catch (_error) {
-        failStep('mic', '麦克风状态异常，请重新完成麦克风测试。');
-        throw new Error('mic_failed');
+      const audioTrack = bootstrapStream?.getAudioTracks()[0];
+      if (audioTrack?.readyState === 'live') {
+        audioStream = new MediaStream([audioTrack.clone()]);
+      } else {
+        try {
+          audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+            video: false,
+          });
+        } catch (_error) {
+          failStep('mic', '麦克风状态异常，请重新完成麦克风测试。');
+          throw new Error('mic_failed');
+        }
       }
     }
 
     if (requiredSteps.includes('camera')) {
-      try {
-        videoStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
-        });
-      } catch (_error) {
-        stopStream(audioStream);
-        failStep('camera', '摄像头状态异常，请重新完成摄像头测试。');
-        throw new Error('camera_failed');
+      const videoTrack = bootstrapStream?.getVideoTracks()[0];
+      if (videoTrack?.readyState === 'live') {
+        videoStream = new MediaStream([videoTrack.clone()]);
+      } else {
+        try {
+          videoStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
+          });
+        } catch (_error) {
+          stopStream(audioStream);
+          failStep('camera', '摄像头状态异常，请重新完成摄像头测试。');
+          throw new Error('camera_failed');
+        }
       }
     }
 
@@ -565,6 +687,9 @@ export const CheckInPage = () => {
     setChecking(true);
     setErrorMessage('');
     try {
+      if (!bootstrapReady) {
+        throw new Error('权限尚未初始化完成，请先完成权限初始化。');
+      }
       await validateBeforeEnter();
       setCheckInPassed(true);
       navigate(`/${location.search}`);
@@ -604,6 +729,21 @@ export const CheckInPage = () => {
         )}
         {!loadingCheckinConfig && requiredSteps.length === 0 && (
           <p>本场面试无需设备检查，可直接进入面试。</p>
+        )}
+
+        {!loadingCheckinConfig && requiredSteps.length > 0 && (
+          <>
+            <p className="gate-hint">
+              权限初始化状态：
+              {permissionBootstrapState === 'requesting' && '初始化中...'}
+              {permissionBootstrapState === 'granted' && '已完成'}
+              {permissionBootstrapState === 'failed' && '失败'}
+              {permissionBootstrapState === 'idle' && '未开始'}
+            </p>
+            {permissionBootstrapError && (
+              <p className="gate-error">{permissionBootstrapError}</p>
+            )}
+          </>
         )}
 
         {!loadingCheckinConfig && requiredSteps.length > 0 && (
@@ -648,6 +788,18 @@ export const CheckInPage = () => {
         )}
 
         <div className="gate-actions">
+          {requiredSteps.length > 0 && (
+            <button
+              type="button"
+              className="gate-btn is-secondary"
+              onClick={bootstrapPermissions}
+              disabled={permissionBootstrapState === 'requesting'}
+            >
+              {permissionBootstrapState === 'requesting'
+                ? '权限初始化中...'
+                : '重新申请权限'}
+            </button>
+          )}
           {needPhysicalDevices && (
             <button
               type="button"
@@ -670,11 +822,21 @@ export const CheckInPage = () => {
             type="button"
             className="gate-btn is-enter"
             onClick={handleEnter}
-            disabled={loadingCheckinConfig || checking || !canEnter}
+            disabled={
+              loadingCheckinConfig ||
+              checking ||
+              !canEnter ||
+              permissionBootstrapState !== 'granted'
+            }
           >
             {checking ? '校验中...' : '进入面试'}
           </button>
         </div>
+        {audioOutputVisibility === 'likely_hidden_by_platform' && (
+          <p className="gate-hint">
+            当前浏览器未暴露输出设备列表（常见于 iOS），将使用系统默认扬声器进行测试。
+          </p>
+        )}
       </section>
 
       {modalType && (
@@ -706,6 +868,9 @@ export const CheckInPage = () => {
                     setSpeakerReady(false);
                   }}
                 >
+                  {speakerDevices.length === 0 && (
+                    <option value="">系统默认输出</option>
+                  )}
                   {speakerDevices.map(device => (
                     <option key={device.deviceId} value={device.deviceId}>
                       {device.label || `扬声器 ${device.deviceId.slice(0, 6)}`}

@@ -1,4 +1,6 @@
 import asyncio
+import os
+import re
 
 import handler
 from startup_self_check import CheckResult, SelfCheckReport
@@ -26,6 +28,51 @@ def _fail_report():
         },
         errors={"llm": "missing key"},
     )
+
+
+def test_server_boot_log_path_uses_timestamp_pid_format():
+    base = os.path.basename(handler.SERVER_BOOT_LOG_PATH)
+    assert re.match(r"^backend-\d{8}-\d{6}-p\d+\.log$", base)
+    assert base != "backend.log"
+
+
+def test_server_logger_handler_bound_to_boot_log_path_without_duplicates():
+    handler._ensure_server_log_handler()
+    handler._ensure_server_log_handler()
+    matched = [
+        logger_handler
+        for logger_handler in handler.server_logger.handlers
+        if os.path.abspath(getattr(logger_handler, "baseFilename", ""))
+        == os.path.abspath(handler.SERVER_BOOT_LOG_PATH)
+    ]
+    assert len(matched) == 1
+
+
+def test_handler_main_logs_selected_log_file(monkeypatch):
+    async def _run():
+        messages = []
+
+        async def _fake_self_check(config):
+            return _fail_report()
+
+        def _capture_info(msg, *args, **kwargs):
+            text = msg % args if args else msg
+            messages.append(text)
+
+        monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(handler.server_logger, "info", _capture_info)
+
+        try:
+            await handler.main()
+            assert False, "expected SystemExit"
+        except SystemExit:
+            pass
+
+        assert any(
+            "event=server.log_file.selected path=" in text for text in messages
+        )
+
+    asyncio.run(_run())
 
 
 def test_handler_main_aborts_on_failed_self_check(monkeypatch):

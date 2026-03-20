@@ -24,6 +24,10 @@ export const useAudioChatState = () => {
     setBotAudioPlaying,
     botAudioLevel,
     setBotAudioLevel,
+    audioUnlocked,
+    setAudioUnlocked,
+    audioRouteMode,
+    setAudioRouteMode,
     userAudioLevel,
     setUserAudioLevel,
   } = useContext(AudioChatContext);
@@ -38,6 +42,10 @@ export const useAudioChatState = () => {
     setBotAudioPlaying,
     botAudioLevel,
     setBotAudioLevel,
+    audioUnlocked,
+    setAudioUnlocked,
+    audioRouteMode,
+    setAudioRouteMode,
     userAudioLevel,
     setUserAudioLevel,
   };

@@ -23,6 +23,8 @@ export interface DebugPanelState {
   logs: string[];
   currentUserSentence: string;
   currentBotSentence: string;
+  audioUnlocked: boolean;
+  audioRouteMode: 'media-element' | 'web-audio-fallback';
 }
 
 export interface CallUiState {

@@ -110,7 +110,7 @@ export const Panel = () => {
           id={'log'}
           readOnly
           className={'w-full h-[400px] text-[12px] flex flex-col-reverse'}
-          value={logContent.reverse().join('\n')}
+          value={logContent.slice().reverse().join('\n')}
         />
       </div>
     </div>
