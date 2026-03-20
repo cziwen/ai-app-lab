@@ -595,6 +595,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     def record_bot_audio(chunk: bytes):
         interviewer_audio_encoded.extend(chunk)
 
+    ws_session_id = str(uuid.uuid4())
+
     # Create a VoiceBotService instance and initialize it
     service = VoiceBotService(
         llm_ep_id=RUNTIME_CONFIG.llm_endpoint_id,
@@ -610,12 +612,13 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         on_bot_audio_chunk=record_bot_audio,
         on_interview_completed=on_interview_completed,
         log_fn=interview_log,
+        session_id=ws_session_id,
     )
     await service.init()
     # Send a bot ready message
     await websocket.send(
         convert_web_event_to_binary(
-            WebEvent.from_payload(BotReadyPayload(session=str(uuid.uuid4())))
+            WebEvent.from_payload(BotReadyPayload(session=ws_session_id))
         )
     )
 

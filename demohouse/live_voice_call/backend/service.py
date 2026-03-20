@@ -11,7 +11,11 @@
 
 import asyncio
 import contextlib
+import json
 import os
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
 from arkitect.core.component.asr import ASRFullServerResponse, AsyncASRClient
@@ -101,6 +105,7 @@ class VoiceBotService(BaseModel):
     on_bot_audio_chunk: Optional[Callable[[bytes], None]] = None
     on_interview_completed: Optional[Callable[[], None]] = None
     log_fn: Optional[Callable[[str], None]] = None
+    session_id: str = ""
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
 
@@ -109,6 +114,8 @@ class VoiceBotService(BaseModel):
     asr_last_duration: int = 0  # Last asr recognition duration
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
+    current_turn_id: Optional[str] = None
+    turn_timestamps_ms: Optional[Dict[str, int]] = None
 
     class Config:
         """Configuration for this pydantic object."""
@@ -155,6 +162,89 @@ class VoiceBotService(BaseModel):
             except Exception as log_err:
                 INFO(f"[VoiceBotService] custom log_fn failed: {log_err}")
         INFO(message)
+
+    def _wall_time_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _mono_ms(self) -> int:
+        return int(round(time.monotonic() * 1000))
+
+    def _start_turn(self) -> None:
+        self.current_turn_id = str(uuid.uuid4())
+        self.turn_timestamps_ms = {}
+
+    def _end_turn(self) -> None:
+        self.current_turn_id = None
+        self.turn_timestamps_ms = None
+
+    def _duration_ms(self, start_key: str, end_key: str) -> Optional[int]:
+        if not self.turn_timestamps_ms:
+            return None
+        start_ts = self.turn_timestamps_ms.get(start_key)
+        end_ts = self.turn_timestamps_ms.get(end_key)
+        if start_ts is None or end_ts is None:
+            return None
+        return max(0, end_ts - start_ts)
+
+    def _log_turn_event(
+        self,
+        event: str,
+        extra: Optional[Dict[str, Any]] = None,
+        *,
+        state: Optional[str] = None,
+        store_ts: bool = True,
+    ) -> None:
+        if not self.current_turn_id:
+            return
+        ts_mono_ms = self._mono_ms()
+        if self.turn_timestamps_ms is None:
+            self.turn_timestamps_ms = {}
+        if store_ts and event not in self.turn_timestamps_ms:
+            self.turn_timestamps_ms[event] = ts_mono_ms
+        payload = {
+            "session_id": self.session_id or "unknown",
+            "turn_id": self.current_turn_id,
+            "ts_wall": self._wall_time_iso(),
+            "ts_mono_ms": ts_mono_ms,
+            "event": event,
+            "state": state or self.state,
+            "extra": extra or {},
+        }
+        self._log(f"[TurnTrace] {json.dumps(payload, ensure_ascii=False)}")
+
+    def _log_turn_latency_breakdown(self, *, status: str) -> None:
+        if not self.current_turn_id:
+            return
+        metrics = {
+            "rec_to_judge_end_ms": self._duration_ms("turn_recognized_emitted", "judge_end"),
+            "judge_ms": self._duration_ms("judge_start", "judge_end"),
+            "judge_end_to_llm2_first_token_ms": self._duration_ms(
+                "judge_end", "interviewer_llm_first_token"
+            ),
+            "llm2_ttft_ms": self._duration_ms(
+                "interviewer_llm_start", "interviewer_llm_first_token"
+            ),
+            "llm2_total_ms": self._duration_ms("interviewer_llm_start", "interviewer_llm_end"),
+            "tts_init_ms": self._duration_ms("tts_init_start", "tts_init_end"),
+            "tts_stream_to_first_sentence_ms": self._duration_ms(
+                "tts_stream_start", "tts_first_sentence_start"
+            ),
+            "rec_to_first_sentence_ms": self._duration_ms(
+                "turn_recognized_emitted", "tts_first_sentence_start"
+            ),
+            "rec_to_tts_done_ms": self._duration_ms("turn_recognized_emitted", "tts_done"),
+        }
+        payload = {
+            "session_id": self.session_id or "unknown",
+            "turn_id": self.current_turn_id,
+            "ts_wall": self._wall_time_iso(),
+            "ts_mono_ms": self._mono_ms(),
+            "event": "turn_latency_breakdown",
+            "state": self.state,
+            "status": status,
+            "metrics": metrics,
+        }
+        self._log(f"[TurnTrace] {json.dumps(payload, ensure_ascii=False)}")
 
     def _emit_bot_text(self, text: str) -> None:
         if not text or not self.on_bot_sentence:
@@ -406,27 +496,46 @@ class VoiceBotService(BaseModel):
         buffer = bytearray()
         if not self.tts_client.inited:
             self._log("need recreate tts client")
-            await self.tts_client.init()
-        async for tts_rsp in self.tts_client.tts(
-            source=llm_output, include_transcript=True
-        ):
-            self._log(
-                f"receive tts response: event={tts_rsp.event} transcript={tts_rsp.transcript} \
-                audio len={len(tts_rsp.audio) if tts_rsp.audio else 0}"
-            )
-            if tts_rsp.event == EventTTSSentenceStart:
-                yield TTSSentenceStartPayload(sentence=tts_rsp.transcript)
-            elif tts_rsp.event == EventTTSSentenceEnd:
-                yield TTSSentenceEndPayload(data=buffer)
-                buffer.clear()
-            elif tts_rsp.audio:
-                buffer.extend(tts_rsp.audio)
-                self._emit_bot_audio_chunk(tts_rsp.audio)
+            self._log_turn_event("tts_init_start")
+            try:
+                await self.tts_client.init()
+                self._log_turn_event("tts_init_end")
+            except Exception as e:
+                self._log_turn_event("tts_init_error", extra={"error": str(e)})
+                raise
+        self._log_turn_event("tts_stream_start")
+        first_sentence_logged = False
+        try:
+            async for tts_rsp in self.tts_client.tts(
+                source=llm_output, include_transcript=True
+            ):
+                self._log(
+                    f"receive tts response: event={tts_rsp.event} transcript={tts_rsp.transcript} \
+                    audio len={len(tts_rsp.audio) if tts_rsp.audio else 0}"
+                )
+                if tts_rsp.event == EventTTSSentenceStart:
+                    if not first_sentence_logged:
+                        self._log_turn_event(
+                            "tts_first_sentence_start",
+                            extra={"sentence_len": len(tts_rsp.transcript or "")},
+                        )
+                        first_sentence_logged = True
+                    yield TTSSentenceStartPayload(sentence=tts_rsp.transcript)
+                elif tts_rsp.event == EventTTSSentenceEnd:
+                    yield TTSSentenceEndPayload(data=buffer)
+                    buffer.clear()
+                elif tts_rsp.audio:
+                    buffer.extend(tts_rsp.audio)
+                    self._emit_bot_audio_chunk(tts_rsp.audio)
 
-            if tts_rsp.event == EventSessionFinished:
-                yield TTSDonePayload()
-                await self.tts_client.close()
-                break
+                if tts_rsp.event == EventSessionFinished:
+                    self._log_turn_event("tts_done")
+                    yield TTSDonePayload()
+                    await self.tts_client.close()
+                    break
+        except Exception as e:
+            self._log_turn_event("tts_stream_error", extra={"error": str(e)})
+            raise
 
     async def stream_llm_chat(self, text: str) -> AsyncIterable[str]:
         """
@@ -510,18 +619,32 @@ class VoiceBotService(BaseModel):
             endpoint_id=self.llm_ep_id,
         )
         completion_buffer = ""
+        first_token_logged = False
 
         async with llm_slot():
             async for chunk in llm.astream():
                 if chunk.choices and chunk.choices[0].delta:
-                    yield chunk.choices[0].delta.content
-                    completion_buffer += chunk.choices[0].delta.content
+                    delta_text = chunk.choices[0].delta.content
+                    if not delta_text:
+                        continue
+                    if not first_token_logged:
+                        self._log_turn_event(
+                            "interviewer_llm_first_token",
+                            extra={"token_len": len(delta_text)},
+                        )
+                        first_token_logged = True
+                    yield delta_text
+                    completion_buffer += delta_text
 
         if completion_buffer:
             self.history_messages.append(
                 ArkMessage(**{"role": "assistant", "content": completion_buffer})
             )
             self._emit_bot_text(completion_buffer)
+        self._log_turn_event(
+            "interviewer_llm_end",
+            extra={"output_len": len(completion_buffer)},
+        )
 
     async def _interview_handler_loop(
         self, inputs: AsyncIterable[WebEvent]
@@ -559,6 +682,11 @@ class VoiceBotService(BaseModel):
         try:
             async for asr_recognized in self.handle_asr_response(asr_responses):
                 self.state = StateInProgress
+                self._start_turn()
+                self._log_turn_event(
+                    "turn_recognized_emitted",
+                    extra={"sentence_len": len(asr_recognized.sentence or "")},
+                )
                 yield WebEvent.from_payload(asr_recognized)
                 candidate_text = asr_recognized.sentence
                 self._log(f"[Interview] Candidate answer: '{candidate_text}'")
@@ -571,9 +699,18 @@ class VoiceBotService(BaseModel):
 
                 # LLM call #1: InterviewJudge evaluates the answer
                 self._log("[Interview] Calling InterviewJudge (LLM #1)...")
-                answer_response: FlowResponse = await flow.receive_candidate_answer(
-                    candidate_text
-                )
+                self._log_turn_event("judge_start")
+                try:
+                    answer_response: FlowResponse = await flow.receive_candidate_answer(
+                        candidate_text
+                    )
+                except Exception as e:
+                    self._log_turn_event("judge_error", extra={"error": str(e)})
+                    self._log_turn_event("turn_aborted", extra={"stage": "judge"})
+                    self._log_turn_latency_breakdown(status="aborted")
+                    self._end_turn()
+                    raise
+                self._log_turn_event("judge_end")
                 decision = answer_response.decision
 
                 if decision:
@@ -606,6 +743,8 @@ class VoiceBotService(BaseModel):
                         ):
                             yield event
                     self.state = StateIdle
+                    self._log_turn_latency_breakdown(status="done")
+                    self._end_turn()
                     self._emit_interview_completed()
                     self._log("[Interview] Interview ended")
                     break
@@ -627,6 +766,8 @@ class VoiceBotService(BaseModel):
                         async for event in self._send_scripted_text(next_interviewer_text):
                             yield event
                         self.state = StateIdle
+                        self._log_turn_latency_breakdown(status="done")
+                        self._end_turn()
                         self._emit_interview_completed()
                         self._log("[Interview] Interview ended")
                         break
@@ -638,6 +779,10 @@ class VoiceBotService(BaseModel):
                     flow_state=flow.state,
                 )
                 self._log(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
+                self._log_turn_event(
+                    "interviewer_llm_start",
+                    extra={"context_len": len(interview_context)},
+                )
 
                 try:
                     llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
@@ -645,15 +790,31 @@ class VoiceBotService(BaseModel):
                         yield WebEvent.from_payload(payload)
                     self._log("[Interview] Interviewer LLM response sent via TTS")
                 except Exception as e:
+                    self._log_turn_event("interviewer_llm_error", extra={"error": str(e)})
+                    self._log_turn_event(
+                        "turn_aborted",
+                        extra={"stage": "interviewer_llm_or_tts", "recovered_by": "scripted_fallback"},
+                    )
                     self._log(f"[Interview] Main LLM error: {e}, falling back to scripted text")
                     fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
                     async for event in self._send_scripted_text(fallback_text):
                         yield event
 
                 self.state = StateIdle
+                self._log_turn_latency_breakdown(status="done")
+                self._end_turn()
                 self._log(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")
         except ASRInitUnavailableError as asr_err:
             self.state = StateIdle
             self._log(f"[Interview] ASR init fatal: {asr_err}")
+            self._log_turn_event("turn_aborted", extra={"stage": "asr_init"})
+            self._log_turn_latency_breakdown(status="aborted")
+            self._end_turn()
             yield self._build_asr_unavailable_event()
             return
+        except Exception as e:
+            self.state = StateIdle
+            self._log_turn_event("turn_aborted", extra={"stage": "unhandled_exception", "error": str(e)})
+            self._log_turn_latency_breakdown(status="aborted")
+            self._end_turn()
+            raise

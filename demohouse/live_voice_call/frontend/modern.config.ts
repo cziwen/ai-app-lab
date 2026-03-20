@@ -11,6 +11,9 @@
 
 import { appTools, defineConfig } from '@modern-js/app-tools';
 import { tailwindcssPlugin } from '@modern-js/plugin-tailwindcss';
+
+const adminApiProxyTarget =
+  process.env.ADMIN_API_PROXY_TARGET?.trim() || 'http://127.0.0.1:8890';
 // https://modernjs.dev/en/configure/app/usage
 export default defineConfig({
   runtime: {
@@ -24,7 +27,7 @@ export default defineConfig({
           changeOrigin: true,
         },
         '/api': {
-          target: 'http://127.0.0.1:8890',
+          target: adminApiProxyTarget,
           changeOrigin: true,
         },
         '/ws': {

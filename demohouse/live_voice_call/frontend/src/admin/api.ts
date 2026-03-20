@@ -89,7 +89,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     });
   } catch (error) {
     if (error instanceof TypeError) {
-      throw new Error('无法连接后台服务，请确认 8890 服务已启动并检查跨域配置');
+      throw new Error('无法连接后台服务，请确认 Admin API 服务已启动并检查代理/跨域配置');
     }
     throw error instanceof Error ? error : new Error('请求失败，请稍后重试');
   }

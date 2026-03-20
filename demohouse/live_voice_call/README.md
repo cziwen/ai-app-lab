@@ -97,6 +97,12 @@
     ```
 
    本地开发模式下，前端 `pnpm dev` 已内置代理：`/api/*` 转发到 `8890`、`/api/frontend-logs` 转发到 `8889`、`/ws` 转发到 `8888`。
+   如遇到本机其他程序占用 `127.0.0.1:8890`（例如表现为前端登录 `socket hang up` / `ECONNRESET`），可在启动前设置：
+
+   ```shell
+   export ADMIN_API_PROXY_TARGET=http://<你的本机IP>:8890
+   # 或改成你自定义的 Admin API 端口，例如 http://127.0.0.1:18990
+   ```
 
 5. 访问`http://localhost:8080`即可
 
