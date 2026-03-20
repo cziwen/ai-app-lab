@@ -3,6 +3,62 @@ import { adminApi, type JobDetail, type JobListItem } from '@/admin/api';
 import { AdminLoadingPage, AdminModal, AdminShell } from '@/admin/layout';
 import { useAdminAuth } from '@/admin/use-admin-auth';
 
+const CSV_TEMPLATE_COLUMNS = [
+  '问题',
+  '能力维度',
+  '评分分界线',
+  '最好标准',
+  '中等标准',
+  '最差标准',
+  '输出格式',
+] as const;
+
+const parseHeaderLine = (line: string): string[] => {
+  const cells: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === ',' && !inQuotes) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current.trim());
+  return cells;
+};
+
+const validateCsvHeader = async (file: File): Promise<string | null> => {
+  const text = await file.text();
+  if (!text.trim()) {
+    return 'CSV 文件为空';
+  }
+  const firstLine = text.split(/\r?\n/, 1)[0] || '';
+  const normalizedLine = firstLine.replace(/^\uFEFF/, '');
+  const actualColumns = parseHeaderLine(normalizedLine);
+  const isMatch =
+    actualColumns.length === CSV_TEMPLATE_COLUMNS.length &&
+    CSV_TEMPLATE_COLUMNS.every((column, index) => actualColumns[index] === column);
+  if (isMatch) {
+    return null;
+  }
+
+  return `CSV 表头不匹配。期望: ${CSV_TEMPLATE_COLUMNS.join(',')}；实际: ${
+    actualColumns.join(',') || '(空)'
+  }`;
+};
+
 export const AdminJobsPage = () => {
   const { loadingAuth, username, globalError, setGlobalError, handleLogout } = useAdminAuth();
   const [jobSearch, setJobSearch] = useState('');
@@ -72,6 +128,13 @@ export const AdminJobsPage = () => {
       setGlobalError('请上传题库 CSV');
       return;
     }
+
+    const headerError = await validateCsvHeader(jobFile);
+    if (headerError) {
+      setGlobalError(headerError);
+      return;
+    }
+
     const formData = new FormData();
     formData.append('name', jobName.trim());
     formData.append('duties', jobDuties.trim());
@@ -243,7 +306,12 @@ export const AdminJobsPage = () => {
                       <tr>
                         <th>#</th>
                         <th>题目</th>
-                        <th>参考答案/思路</th>
+                        <th>能力维度</th>
+                        <th>评分分界线</th>
+                        <th>最好标准</th>
+                        <th>中等标准</th>
+                        <th>最差标准</th>
+                        <th>输出格式</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -251,7 +319,12 @@ export const AdminJobsPage = () => {
                         <tr key={item.id}>
                           <td>{index + 1}</td>
                           <td>{item.question}</td>
-                          <td>{item.reference_answer || '无'}</td>
+                          <td>{item.ability_dimension || '无'}</td>
+                          <td>{item.scoring_boundary || '无'}</td>
+                          <td>{item.best_standard || item.reference_answer || '无'}</td>
+                          <td>{item.medium_standard || '无'}</td>
+                          <td>{item.worst_standard || '无'}</td>
+                          <td>{item.output_format || '无'}</td>
                         </tr>
                       ))}
                     </tbody>

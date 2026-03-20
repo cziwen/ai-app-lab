@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 import admin_store
 
@@ -181,6 +182,9 @@ def test_start_interview_session_prepends_fixed_intro_question(monkeypatch, tmp_
     assert session.questions[0]["question_id"] == admin_store.FIXED_INTRO_QUESTION_ID
     assert session.questions[0]["main_question"] == admin_store.FIXED_INTRO_QUESTION_TEXT
     assert session.questions[1]["question_id"] != admin_store.FIXED_INTRO_QUESTION_ID
+    assert "must_cover" in session.questions[1]["evidence"]
+    assert "ability_dimension" in session.questions[1]["evidence"]
+    assert "best_standard" in session.questions[1]["evidence"]
 
 
 def test_delete_interview_removes_audio_and_log_dirs(monkeypatch, tmp_path):
@@ -286,3 +290,78 @@ def test_required_checkins_invalid_value_raises(monkeypatch, tmp_path):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert str(exc) == "invalid_required_checkins"
+
+
+def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="咨询顾问",
+        duties="负责咨询转化",
+        requirements="熟悉医美咨询场景",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[
+            {
+                "question": "你如何处理客户对价格的顾虑？",
+                "ability_dimension": "沟通能力",
+                "scoring_boundary": "是否兼顾客户需求与成交目标",
+                "best_standard": "先共情再给分层方案并引导决策",
+                "medium_standard": "能够解释但缺少场景化引导",
+                "worst_standard": "仅强调价格或直接放弃沟通",
+                "output_format": "评分0-5 + 摘要",
+            }
+        ],
+    )
+
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None
+    assert len(detail["questions"]) == 1
+    question = detail["questions"][0]
+    assert question["ability_dimension"] == "沟通能力"
+    assert question["scoring_boundary"] == "是否兼顾客户需求与成交目标"
+    assert question["best_standard"] == "先共情再给分层方案并引导决策"
+    assert question["medium_standard"] == "能够解释但缺少场景化引导"
+    assert question["worst_standard"] == "仅强调价格或直接放弃沟通"
+    assert question["output_format"] == "评分0-5 + 摘要"
+    assert question["reference_answer"] == question["best_standard"]
+
+
+def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    admin_store.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(admin_store.DB_PATH) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS interviews (
+              token TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS job_questions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_uid TEXT NOT NULL,
+              question TEXT NOT NULL,
+              reference_answer TEXT NOT NULL,
+              sort_order INTEGER NOT NULL
+            );
+            """
+        )
+        conn.commit()
+
+    admin_store.ensure_storage()
+
+    with admin_store.get_conn() as conn:
+        question_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(job_questions)").fetchall()
+        }
+    assert "ability_dimension" in question_columns
+    assert "scoring_boundary" in question_columns
+    assert "best_standard" in question_columns
+    assert "medium_standard" in question_columns
+    assert "worst_standard" in question_columns
+    assert "output_format" in question_columns

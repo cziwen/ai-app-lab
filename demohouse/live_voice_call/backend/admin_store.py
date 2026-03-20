@@ -9,7 +9,7 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from arkitect.telemetry.logger import INFO
 
@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS job_questions (
   job_uid TEXT NOT NULL,
   question TEXT NOT NULL,
   reference_answer TEXT NOT NULL,
+  ability_dimension TEXT NOT NULL DEFAULT '',
+  scoring_boundary TEXT NOT NULL DEFAULT '',
+  best_standard TEXT NOT NULL DEFAULT '',
+  medium_standard TEXT NOT NULL DEFAULT '',
+  worst_standard TEXT NOT NULL DEFAULT '',
+  output_format TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL,
   FOREIGN KEY(job_uid) REFERENCES jobs(job_uid) ON DELETE CASCADE
 );
@@ -140,24 +146,53 @@ def ensure_storage() -> None:
 
 
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
-    columns = {
+    interview_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(interviews)").fetchall()
     }
-    if "interruption_count" not in columns:
+    if "interruption_count" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN interruption_count INTEGER NOT NULL DEFAULT 0"
         )
-    if "reconnect_deadline_at" not in columns:
+    if "reconnect_deadline_at" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN reconnect_deadline_at TEXT"
         )
-    if "required_checkins" not in columns:
+    if "required_checkins" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN required_checkins TEXT NOT NULL DEFAULT 'speaker,mic'"
         )
         conn.execute(
             "UPDATE interviews SET required_checkins = 'speaker,mic' WHERE required_checkins IS NULL"
+        )
+
+    question_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(job_questions)").fetchall()
+    }
+    if "ability_dimension" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN ability_dimension TEXT NOT NULL DEFAULT ''"
+        )
+    if "scoring_boundary" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN scoring_boundary TEXT NOT NULL DEFAULT ''"
+        )
+    if "best_standard" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN best_standard TEXT NOT NULL DEFAULT ''"
+        )
+    if "medium_standard" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN medium_standard TEXT NOT NULL DEFAULT ''"
+        )
+    if "worst_standard" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN worst_standard TEXT NOT NULL DEFAULT ''"
+        )
+    if "output_format" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN output_format TEXT NOT NULL DEFAULT ''"
         )
 
 
@@ -335,9 +370,48 @@ def create_job(
     requirements: str,
     notes: Optional[str],
     csv_filename: Optional[str],
-    questions: Sequence[Tuple[str, str]],
+    questions: Sequence[Union[Tuple[str, str], Dict[str, str]]],
 ) -> Dict[str, object]:
     now = utc_now_iso()
+
+    normalized_questions: List[Dict[str, str]] = []
+    for item in questions:
+        if isinstance(item, dict):
+            question = (item.get("question") or "").strip()
+            best_standard = (item.get("best_standard") or "").strip()
+            normalized_questions.append(
+                {
+                    "question": question,
+                    "reference_answer": best_standard,
+                    "ability_dimension": (item.get("ability_dimension") or "").strip(),
+                    "scoring_boundary": (item.get("scoring_boundary") or "").strip(),
+                    "best_standard": best_standard,
+                    "medium_standard": (item.get("medium_standard") or "").strip(),
+                    "worst_standard": (item.get("worst_standard") or "").strip(),
+                    "output_format": (item.get("output_format") or "").strip(),
+                }
+            )
+            continue
+
+        if isinstance(item, tuple) and len(item) >= 2:
+            question = str(item[0]).strip()
+            reference_answer = str(item[1]).strip()
+            normalized_questions.append(
+                {
+                    "question": question,
+                    "reference_answer": reference_answer,
+                    "ability_dimension": "",
+                    "scoring_boundary": "",
+                    "best_standard": reference_answer,
+                    "medium_standard": "",
+                    "worst_standard": "",
+                    "output_format": "",
+                }
+            )
+            continue
+
+        raise ValueError("invalid_question_payload")
+
     with get_conn() as conn:
         job_uid = _ensure_unique_job_uid(conn)
         conn.execute(
@@ -347,19 +421,33 @@ def create_job(
             """,
             (job_uid, name, duties, requirements, notes, csv_filename, now, now),
         )
-        for idx, (question, reference_answer) in enumerate(questions):
+        for idx, question_payload in enumerate(normalized_questions):
             conn.execute(
                 """
-                INSERT INTO job_questions (job_uid, question, reference_answer, sort_order)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO job_questions (
+                    job_uid, question, reference_answer, ability_dimension, scoring_boundary,
+                    best_standard, medium_standard, worst_standard, output_format, sort_order
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_uid, question, reference_answer, idx),
+                (
+                    job_uid,
+                    question_payload["question"],
+                    question_payload["reference_answer"],
+                    question_payload["ability_dimension"],
+                    question_payload["scoring_boundary"],
+                    question_payload["best_standard"],
+                    question_payload["medium_standard"],
+                    question_payload["worst_standard"],
+                    question_payload["output_format"],
+                    idx,
+                ),
             )
         conn.commit()
     return {
         "job_uid": job_uid,
         "name": name,
-        "question_count": len(questions),
+        "question_count": len(normalized_questions),
         "created_at": now,
     }
 
@@ -417,7 +505,17 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
             return None
         questions = conn.execute(
             """
-            SELECT id, question, reference_answer, sort_order
+            SELECT
+                id,
+                question,
+                reference_answer,
+                ability_dimension,
+                scoring_boundary,
+                best_standard,
+                medium_standard,
+                worst_standard,
+                output_format,
+                sort_order
             FROM job_questions
             WHERE job_uid = ?
             ORDER BY sort_order ASC
@@ -439,6 +537,12 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
                 "id": int(q["id"]),
                 "question": q["question"],
                 "reference_answer": q["reference_answer"],
+                "ability_dimension": q["ability_dimension"],
+                "scoring_boundary": q["scoring_boundary"],
+                "best_standard": q["best_standard"],
+                "medium_standard": q["medium_standard"],
+                "worst_standard": q["worst_standard"],
+                "output_format": q["output_format"],
                 "sort_order": int(q["sort_order"]),
             }
             for q in questions
@@ -479,7 +583,17 @@ def calculate_question_count(duration_minutes: int, bank_count: int) -> int:
 def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT id, question, reference_answer, sort_order
+        SELECT
+            id,
+            question,
+            reference_answer,
+            ability_dimension,
+            scoring_boundary,
+            best_standard,
+            medium_standard,
+            worst_standard,
+            output_format,
+            sort_order
         FROM job_questions
         WHERE job_uid = ?
         ORDER BY sort_order ASC
@@ -862,6 +976,18 @@ def _keywords_from_reference(reference: str) -> List[str]:
     return parts
 
 
+def _build_question_evidence(question_row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "must_cover": _keywords_from_reference(question_row["reference_answer"]),
+        "ability_dimension": question_row["ability_dimension"],
+        "scoring_boundary": question_row["scoring_boundary"],
+        "best_standard": question_row["best_standard"],
+        "medium_standard": question_row["medium_standard"],
+        "worst_standard": question_row["worst_standard"],
+        "output_format": question_row["output_format"],
+    }
+
+
 def start_interview_session(token: str) -> Optional[InterviewSessionData]:
     resolve_interview_timeout(token)
     now = utc_now_iso()
@@ -898,7 +1024,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                 {
                     "question_id": f"q{qid}",
                     "main_question": q["question"],
-                    "evidence": {"must_cover": _keywords_from_reference(q["reference_answer"])},
+                    "evidence": _build_question_evidence(q),
                 }
             )
 
@@ -908,7 +1034,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                     {
                         "question_id": f"q{int(q['id'])}",
                         "main_question": q["question"],
-                        "evidence": {"must_cover": _keywords_from_reference(q["reference_answer"])},
+                        "evidence": _build_question_evidence(q),
                     }
                 )
 

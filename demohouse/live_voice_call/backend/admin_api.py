@@ -28,6 +28,17 @@ from admin_store import (
     verify_admin_credentials,
 )
 
+CSV_TEMPLATE_COLUMNS = [
+    "问题",
+    "能力维度",
+    "评分分界线",
+    "最好标准",
+    "中等标准",
+    "最差标准",
+    "输出格式",
+]
+
+
 def _load_cors_origins() -> List[str]:
     raw = os.getenv("ADMIN_CORS_ORIGINS")
     if raw and raw.strip():
@@ -62,24 +73,46 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
 
     reader = csv.reader(io.StringIO(decoded))
 
-    # The first row is always treated as header and ignored.
     try:
-        next(reader)
+        header = next(reader)
     except StopIteration:
         raise HTTPException(status_code=400, detail="CSV 缺少表头")
+    normalized_header = [str(cell).strip() for cell in header]
+    if normalized_header != CSV_TEMPLATE_COLUMNS:
+        expected = ",".join(CSV_TEMPLATE_COLUMNS)
+        actual = ",".join(normalized_header) if normalized_header else "(空)"
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV 表头不匹配。期望: {expected}；实际: {actual}",
+        )
 
     rows: List[Dict[str, str]] = []
     for row in reader:
         if not row or all(not str(cell).strip() for cell in row):
             continue
 
-        question = (row[0] if len(row) >= 1 else "").strip()
-        answer = (row[1] if len(row) >= 2 else "").strip()
+        normalized_row = [str(cell).strip() for cell in row]
+        if len(normalized_row) < len(CSV_TEMPLATE_COLUMNS):
+            normalized_row.extend([""] * (len(CSV_TEMPLATE_COLUMNS) - len(normalized_row)))
+        elif len(normalized_row) > len(CSV_TEMPLATE_COLUMNS):
+            normalized_row = normalized_row[: len(CSV_TEMPLATE_COLUMNS)]
+
+        question = normalized_row[0]
 
         if not question:
             continue
 
-        rows.append({"question": question, "reference_answer": answer})
+        rows.append(
+            {
+                "question": question,
+                "ability_dimension": normalized_row[1],
+                "scoring_boundary": normalized_row[2],
+                "best_standard": normalized_row[3],
+                "medium_standard": normalized_row[4],
+                "worst_standard": normalized_row[5],
+                "output_format": normalized_row[6],
+            }
+        )
 
     if not rows:
         raise HTTPException(status_code=400, detail="CSV 题库为空")
@@ -179,7 +212,7 @@ def create_admin_app() -> FastAPI:
             requirements=requirements.strip(),
             notes=(notes or "").strip() or None,
             csv_filename=question_bank.filename,
-            questions=[(r["question"], r["reference_answer"]) for r in rows],
+            questions=rows,
         )
         return {"job": result}
 

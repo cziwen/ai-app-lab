@@ -22,6 +22,12 @@ export type JobDetail = {
     id: number;
     question: string;
     reference_answer: string;
+    ability_dimension: string;
+    scoring_boundary: string;
+    best_standard: string;
+    medium_standard: string;
+    worst_standard: string;
+    output_format: string;
     sort_order: number;
   }>;
 };
