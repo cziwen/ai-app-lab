@@ -141,3 +141,93 @@ def test_finalize_resets_state_and_does_not_emit_duplicate(monkeypatch):
         assert svc.asr_last_growth_mono_ms == 0
 
     asyncio.run(_run())
+
+
+def test_handler_loop_restarts_when_asr_stream_unexpectedly_ends(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        calls = {"input": 0, "asr": 0}
+
+        async def _fake_send_greeting(_self):
+            if False:
+                yield None
+
+        async def _fake_handle_input_event(_self, _inputs):
+            calls["input"] += 1
+
+            async def _empty():
+                if False:
+                    yield None
+
+            return _empty()
+
+        async def _fake_handle_asr_response(_self, _responses):
+            calls["asr"] += 1
+            if calls["asr"] == 1:
+                yield service.SentenceRecognizedPayload(sentence="hi")
+                return
+            await asyncio.sleep(5)
+            if False:
+                yield service.SentenceRecognizedPayload(sentence="never")
+
+        async def _fake_stream_llm_chat(_self, _text):
+            yield "ok"
+
+        async def _fake_handle_tts_response(_self, llm_output):
+            async for _ in llm_output:
+                pass
+            yield service.TTSDonePayload()
+
+        monkeypatch.setattr(
+            service.VoiceBotService, "send_greeting", _fake_send_greeting, raising=False
+        )
+        monkeypatch.setattr(
+            service.VoiceBotService,
+            "handle_input_event",
+            _fake_handle_input_event,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            service.VoiceBotService,
+            "handle_asr_response",
+            _fake_handle_asr_response,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            service.VoiceBotService,
+            "stream_llm_chat",
+            _fake_stream_llm_chat,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            service.VoiceBotService,
+            "handle_tts_response",
+            _fake_handle_tts_response,
+            raising=False,
+        )
+
+        async def _inputs():
+            while True:
+                await asyncio.sleep(10)
+                if False:
+                    yield service.WebEvent(event=service.USER_AUDIO)
+
+        out_iter = svc.handler_loop(_inputs()).__aiter__()
+        first = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        second = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+
+        assert first.event == service.SENTENCE_RECOGNIZED
+        assert second.event == service.TTS_DONE
+
+        try:
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.12)
+            assert False, "handler loop should keep waiting instead of terminating"
+        except asyncio.TimeoutError:
+            pass
+
+        assert calls["input"] >= 2
+        assert calls["asr"] >= 2
+        assert any("ASR_STREAM_RESET reason=upstream_closed" in line for line in logs)
+
+    asyncio.run(_run())

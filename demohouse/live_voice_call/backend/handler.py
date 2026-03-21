@@ -411,6 +411,12 @@ ADMISSION = AdmissionController(MAX_ACTIVE_INTERVIEWS)
 PERSISTENCE = PersistenceQueue(server_logger)
 
 
+class ClientWebSocketClosedError(RuntimeError):
+    def __init__(self, original: Exception):
+        self.original = original
+        super().__init__(str(original))
+
+
 def _extract_pcm_audio(
     raw_audio: bytes, log_fn: Optional[Callable[[str], None]] = None
 ) -> bytes:
@@ -580,6 +586,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     interviewer_audio_encoded = bytearray()
     candidate_audio_dropped_frames = 0
     interview_completed = False
+    close_source: Optional[str] = None
+    close_detail = "-"
 
     def record_turn(role: str, text: str):
         if not text:
@@ -671,14 +679,37 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 f"Sending output event= {output_event.event}, \
                 data len:{len(output_event.data) if output_event.data else 0} , payload: {output_event.payload}"
             )
-            await ws.send(convert_web_event_to_binary(output_event))
+            try:
+                await ws.send(convert_web_event_to_binary(output_event))
+            except websockets.exceptions.ConnectionClosed as close_err:
+                raise ClientWebSocketClosedError(close_err) from close_err
 
     try:
         # Start the handler loop and asynchronously fetch output events
         outputs = service.handler_loop(async_gen(websocket))
         await asyncio.create_task(fetch_output(websocket, outputs))
-    except websockets.exceptions.ConnectionClosed as e:
-        interview_log(f"Connection closed: {e}")
+    except ClientWebSocketClosedError as close_err:
+        close_source = "client_ws"
+        close_detail = str(close_err.original)
+        interview_log(f"Connection closed source={close_source} detail={close_detail}")
+    except websockets.exceptions.ConnectionClosed as close_err:
+        close_source = "asr_upstream"
+        close_detail = str(close_err)
+        interview_log(f"Connection closed source={close_source} detail={close_detail}")
+    except Exception as runtime_err:
+        close_source = "internal_error"
+        close_detail = str(runtime_err)
+        interview_log(
+            f"Connection terminated source={close_source} detail={close_detail}"
+        )
+        server_logger.error(
+            "event=interview.runtime_error token=%s remote=%s close_source=%s error=%s",
+            token,
+            websocket.remote_address,
+            close_source,
+            runtime_err,
+            exc_info=True,
+        )
     finally:
         await ADMISSION.release(token)
         try:
@@ -694,12 +725,23 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 )
             )
             end_status = "completed" if interview_completed else "disconnected"
-            interview_log(f"[Session] closed status={end_status}")
+            if not interview_completed and close_source is None:
+                close_source = "client_ws" if websocket.closed else "internal_error"
+                if close_detail == "-":
+                    close_detail = (
+                        "websocket.closed" if websocket.closed else "source_unknown"
+                    )
+            close_source_for_log = close_source or "-"
+            interview_log(
+                f"[Session] closed status={end_status} "
+                f"close_source={close_source_for_log} detail={close_detail}"
+            )
             server_logger.info(
-                "event=interview.closed token=%s remote=%s status=%s",
+                "event=interview.closed token=%s remote=%s status=%s close_source=%s",
                 token,
                 websocket.remote_address,
                 end_status,
+                close_source_for_log,
             )
         except Exception as persist_err:
             interview_log(f"[InterviewPersist] failed token={token} error={persist_err}")

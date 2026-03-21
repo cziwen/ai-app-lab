@@ -1,7 +1,9 @@
+import asyncio
 import gzip
 import json
 import struct
 
+import sauc_asr_client
 from sauc_asr_client import SaucASRClient, SaucProtocolCodec
 
 
@@ -86,3 +88,73 @@ def test_map_payload_to_response_keeps_result_text_utterances_and_duration():
     assert mapped.result.text == "hello"
     assert mapped.result.utterances == [{"text": "hello"}]
     assert mapped.audio.duration == 345
+
+
+def test_send_audio_connection_closed_resets_client_state(monkeypatch):
+    class DummyConnectionClosed(Exception):
+        pass
+
+    class _SendCloseWS:
+        closed = False
+
+        async def send(self, _data):
+            raise DummyConnectionClosed("send closed")
+
+    async def _run():
+        monkeypatch.setattr(sauc_asr_client, "ConnectionClosed", DummyConnectionClosed)
+        client = SaucASRClient(
+            app_key="app",
+            access_key="token",
+            resource_id="volc.bigasr.sauc.duration",
+        )
+        client.inited = True
+        client._session_started = True
+        client._ws = _SendCloseWS()
+
+        await client._send_audio(b"\x00\x01", is_last=False)
+
+        assert client.inited is False
+        assert client._ws is None
+        assert client._session_started is False
+
+    asyncio.run(_run())
+
+
+def test_stream_asr_send_close_is_recoverable(monkeypatch):
+    class DummyConnectionClosed(Exception):
+        pass
+
+    class _SendCloseWS:
+        closed = False
+
+        async def send(self, _data):
+            raise DummyConnectionClosed("send closed")
+
+        async def recv(self):
+            await asyncio.sleep(3600)
+            return b""
+
+    async def _source():
+        yield b"\x00\x01"
+
+    async def _run():
+        monkeypatch.setattr(sauc_asr_client, "ConnectionClosed", DummyConnectionClosed)
+        client = SaucASRClient(
+            app_key="app",
+            access_key="token",
+            resource_id="volc.bigasr.sauc.duration",
+        )
+        client.inited = True
+        client._session_started = True
+        client._ws = _SendCloseWS()
+
+        outputs = []
+        async for item in client.stream_asr(_source()):
+            outputs.append(item)
+
+        assert outputs == []
+        assert client.inited is False
+        assert client._ws is None
+        assert client._session_started is False
+
+    asyncio.run(_run())

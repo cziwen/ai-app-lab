@@ -126,6 +126,9 @@ class VoiceBotService(BaseModel):
     asr_last_duration: int = 0  # Last asr recognition duration
     asr_last_growth_mono_ms: int = 0  # Last monotonic ts when ASR text grew
     asr_silence_tick_count: int = 0  # Tick counter for sampled silence logs
+    asr_last_stream_end_reason: str = ""  # Last observed ASR stream end reason
+    asr_stream_reset_count: int = 0  # Number of ASR stream reset attempts
+    asr_stream_last_reset_mono_ms: int = 0  # Last ASR stream reset monotonic ts
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
     current_turn_id: Optional[str] = None
@@ -198,6 +201,20 @@ class VoiceBotService(BaseModel):
         self.asr_last_duration = 0
         self.asr_last_growth_mono_ms = 0
         self.asr_silence_tick_count = 0
+
+    def _log_asr_stream_reset(self, reason: str) -> None:
+        now_ms = self._mono_ms()
+        since_last_ms = -1
+        if self.asr_stream_last_reset_mono_ms > 0:
+            since_last_ms = max(0, now_ms - self.asr_stream_last_reset_mono_ms)
+        self.asr_stream_last_reset_mono_ms = now_ms
+        self.asr_stream_reset_count += 1
+        self._log(
+            "ASR_STREAM_RESET "
+            f"reason={reason or 'unknown'} "
+            f"reset_count={self.asr_stream_reset_count} "
+            f"since_last_reset_ms={since_last_ms}"
+        )
 
     async def _finalize_asr_turn_if_silent(self) -> Optional[SentenceRecognizedPayload]:
         if self.state != StateIdle:
@@ -417,17 +434,23 @@ class VoiceBotService(BaseModel):
         async for event in self.send_greeting():
             yield event
 
-        asr_responses = await self.handle_input_event(inputs)
         try:
-            async for asr_recognized in self.handle_asr_response(asr_responses):
-                # set state into InProgress
-                self.state = StateInProgress
-                yield WebEvent.from_payload(asr_recognized)
-                llm_stream_rsp = self.stream_llm_chat(asr_recognized.sentence)
-                async for payload in self.handle_tts_response(llm_stream_rsp):
-                    yield WebEvent.from_payload(payload)
-                # recreate the asr and tts client
-                self.state = StateIdle
+            while True:
+                self.asr_last_stream_end_reason = ""
+                asr_responses = await self.handle_input_event(inputs)
+                async for asr_recognized in self.handle_asr_response(asr_responses):
+                    # set state into InProgress
+                    self.state = StateInProgress
+                    yield WebEvent.from_payload(asr_recognized)
+                    llm_stream_rsp = self.stream_llm_chat(asr_recognized.sentence)
+                    async for payload in self.handle_tts_response(llm_stream_rsp):
+                        yield WebEvent.from_payload(payload)
+                    # recreate the asr and tts client
+                    self.state = StateIdle
+                self._log_asr_stream_reset(
+                    self.asr_last_stream_end_reason or "upstream_closed"
+                )
+                await asyncio.sleep(0.05)
         except ASRInitUnavailableError as asr_err:
             self.state = StateIdle
             self._log(f"ASR_INIT_FATAL error={asr_err}")
@@ -505,6 +528,11 @@ class VoiceBotService(BaseModel):
                 try:
                     rsp = next_asr_task.result()
                 except StopAsyncIteration:
+                    self.asr_last_stream_end_reason = (
+                        "upstream_closed"
+                        if (self.asr_client is not None and not self.asr_client.inited)
+                        else "source_exhausted"
+                    )
                     break
                 yield rsp
 
@@ -763,133 +791,151 @@ class VoiceBotService(BaseModel):
                 yield event
         self._log("[Interview] Greeting sent via TTS, waiting for candidate")
 
-        # Phase 2: Main interview loop
-        asr_responses = await self.handle_input_event(inputs)
         try:
-            async for asr_recognized in self.handle_asr_response(asr_responses):
-                self.state = StateInProgress
-                self._start_turn()
-                self._log_turn_event(
-                    "turn_recognized_emitted",
-                    extra={"sentence_len": len(asr_recognized.sentence or "")},
-                )
-                yield WebEvent.from_payload(asr_recognized)
-                candidate_text = asr_recognized.sentence
-                self._log(f"[Interview] Candidate answer: '{candidate_text}'")
-                self._emit_candidate_text(candidate_text)
-
-                # Add candidate answer to conversation history
-                self.history_messages.append(
-                    ArkMessage(**{"role": "user", "content": candidate_text})
-                )
-
-                # LLM call #1: InterviewJudge evaluates the answer
-                self._log("[Interview] Calling InterviewJudge (LLM #1)...")
-                self._log_turn_event("judge_start")
-                try:
-                    answer_response: FlowResponse = await flow.receive_candidate_answer(
-                        candidate_text
+            while True:
+                self.asr_last_stream_end_reason = ""
+                asr_responses = await self.handle_input_event(inputs)
+                async for asr_recognized in self.handle_asr_response(asr_responses):
+                    self.state = StateInProgress
+                    self._start_turn()
+                    self._log_turn_event(
+                        "turn_recognized_emitted",
+                        extra={"sentence_len": len(asr_recognized.sentence or "")},
                     )
-                except Exception as e:
-                    self._log_turn_event("judge_error", extra={"error": str(e)})
-                    self._log_turn_event("turn_aborted", extra={"stage": "judge"})
-                    self._log_turn_latency_breakdown(status="aborted")
-                    self._end_turn()
-                    raise
-                self._log_turn_event("judge_end")
-                decision = answer_response.decision
+                    yield WebEvent.from_payload(asr_recognized)
+                    candidate_text = asr_recognized.sentence
+                    self._log(f"[Interview] Candidate answer: '{candidate_text}'")
+                    self._emit_candidate_text(candidate_text)
 
-                if decision:
-                    self._log(
-                        f"[Interview] Judge result: "
-                        f"{answer_response.state_before}->{answer_response.state_after} "
-                        f"q={answer_response.question_id} "
-                        f"move_forward={decision.move_forward} "
-                        f"need_follow_up={decision.need_follow_up} "
-                        f"coverage={decision.coverage_score:.2f} "
-                        f"reason={decision.reason}"
-                    )
-                else:
-                    self._log(
-                        f"[Interview] Judge result: "
-                        f"{answer_response.state_before}->{answer_response.state_after} "
-                        f"q={answer_response.question_id} decision=None"
-                    )
-                for t in answer_response.transition_trace:
-                    self._log(f"[Interview]   transition: {t}")
-
-                # Check if interview ended (e.g. global turn limit)
-                if flow.is_done:
-                    self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
-                    wrap_response = await flow.produce_interviewer_message()
-                    if wrap_response.interviewer_text:
-                        self._log(f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'")
-                        async for event in self._send_scripted_text(
-                            wrap_response.interviewer_text
-                        ):
-                            yield event
-                    self.state = StateIdle
-                    self._log_turn_latency_breakdown(status="done")
-                    self._end_turn()
-                    self._emit_interview_completed()
-                    self._log("[Interview] Interview ended")
-                    break
-
-                # Get next interviewer message if flow state needs one
-                next_interviewer_text = ""
-                if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
-                    next_response = await flow.produce_interviewer_message()
-                    next_interviewer_text = next_response.interviewer_text
-                    self._log(
-                        f"[Interview] Next action: "
-                        f"{next_response.state_before}->{next_response.state_after} "
-                        f"q={next_response.question_id} "
-                        f"text='{next_interviewer_text}'"
+                    # Add candidate answer to conversation history
+                    self.history_messages.append(
+                        ArkMessage(**{"role": "user", "content": candidate_text})
                     )
 
+                    # LLM call #1: InterviewJudge evaluates the answer
+                    self._log("[Interview] Calling InterviewJudge (LLM #1)...")
+                    self._log_turn_event("judge_start")
+                    try:
+                        answer_response: FlowResponse = await flow.receive_candidate_answer(
+                            candidate_text
+                        )
+                    except Exception as e:
+                        self._log_turn_event("judge_error", extra={"error": str(e)})
+                        self._log_turn_event("turn_aborted", extra={"stage": "judge"})
+                        self._log_turn_latency_breakdown(status="aborted")
+                        self._end_turn()
+                        raise
+                    self._log_turn_event("judge_end")
+                    decision = answer_response.decision
+
+                    if decision:
+                        self._log(
+                            f"[Interview] Judge result: "
+                            f"{answer_response.state_before}->{answer_response.state_after} "
+                            f"q={answer_response.question_id} "
+                            f"move_forward={decision.move_forward} "
+                            f"need_follow_up={decision.need_follow_up} "
+                            f"coverage={decision.coverage_score:.2f} "
+                            f"reason={decision.reason}"
+                        )
+                    else:
+                        self._log(
+                            f"[Interview] Judge result: "
+                            f"{answer_response.state_before}->{answer_response.state_after} "
+                            f"q={answer_response.question_id} decision=None"
+                        )
+                    for t in answer_response.transition_trace:
+                        self._log(f"[Interview]   transition: {t}")
+
+                    # Check if interview ended (e.g. global turn limit)
                     if flow.is_done:
-                        self._log("[Interview] Flow reached DONE after producing message")
-                        async for event in self._send_scripted_text(next_interviewer_text):
-                            yield event
+                        self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
+                        wrap_response = await flow.produce_interviewer_message()
+                        if wrap_response.interviewer_text:
+                            self._log(
+                                f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'"
+                            )
+                            async for event in self._send_scripted_text(
+                                wrap_response.interviewer_text
+                            ):
+                                yield event
                         self.state = StateIdle
                         self._log_turn_latency_breakdown(status="done")
                         self._end_turn()
                         self._emit_interview_completed()
                         self._log("[Interview] Interview ended")
-                        break
+                        return
 
-                # LLM call #2: Generate natural interviewer speech
-                interview_context = self._build_interview_context(
-                    decision=decision,
-                    next_question_or_followup=next_interviewer_text,
-                    flow_state=flow.state,
-                )
-                self._log(f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}")
-                self._log_turn_event(
-                    "interviewer_llm_start",
-                    extra={"context_len": len(interview_context)},
-                )
+                    # Get next interviewer message if flow state needs one
+                    next_interviewer_text = ""
+                    if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
+                        next_response = await flow.produce_interviewer_message()
+                        next_interviewer_text = next_response.interviewer_text
+                        self._log(
+                            f"[Interview] Next action: "
+                            f"{next_response.state_before}->{next_response.state_after} "
+                            f"q={next_response.question_id} "
+                            f"text='{next_interviewer_text}'"
+                        )
 
-                try:
-                    llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
-                    async for payload in self.handle_tts_response(llm_stream_rsp):
-                        yield WebEvent.from_payload(payload)
-                    self._log("[Interview] Interviewer LLM response sent via TTS")
-                except Exception as e:
-                    self._log_turn_event("interviewer_llm_error", extra={"error": str(e)})
-                    self._log_turn_event(
-                        "turn_aborted",
-                        extra={"stage": "interviewer_llm_or_tts", "recovered_by": "scripted_fallback"},
+                        if flow.is_done:
+                            self._log("[Interview] Flow reached DONE after producing message")
+                            async for event in self._send_scripted_text(next_interviewer_text):
+                                yield event
+                            self.state = StateIdle
+                            self._log_turn_latency_breakdown(status="done")
+                            self._end_turn()
+                            self._emit_interview_completed()
+                            self._log("[Interview] Interview ended")
+                            return
+
+                    # LLM call #2: Generate natural interviewer speech
+                    interview_context = self._build_interview_context(
+                        decision=decision,
+                        next_question_or_followup=next_interviewer_text,
+                        flow_state=flow.state,
                     )
-                    self._log(f"[Interview] Main LLM error: {e}, falling back to scripted text")
-                    fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
-                    async for event in self._send_scripted_text(fallback_text):
-                        yield event
+                    self._log(
+                        f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}"
+                    )
+                    self._log_turn_event(
+                        "interviewer_llm_start",
+                        extra={"context_len": len(interview_context)},
+                    )
 
-                self.state = StateIdle
-                self._log_turn_latency_breakdown(status="done")
-                self._end_turn()
-                self._log(f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input")
+                    try:
+                        llm_stream_rsp = self.stream_interview_llm_chat(interview_context)
+                        async for payload in self.handle_tts_response(llm_stream_rsp):
+                            yield WebEvent.from_payload(payload)
+                        self._log("[Interview] Interviewer LLM response sent via TTS")
+                    except Exception as e:
+                        self._log_turn_event(
+                            "interviewer_llm_error", extra={"error": str(e)}
+                        )
+                        self._log_turn_event(
+                            "turn_aborted",
+                            extra={
+                                "stage": "interviewer_llm_or_tts",
+                                "recovered_by": "scripted_fallback",
+                            },
+                        )
+                        self._log(
+                            f"[Interview] Main LLM error: {e}, falling back to scripted text"
+                        )
+                        fallback_text = next_interviewer_text or "好的，我们继续下一个问题。"
+                        async for event in self._send_scripted_text(fallback_text):
+                            yield event
+
+                    self.state = StateIdle
+                    self._log_turn_latency_breakdown(status="done")
+                    self._end_turn()
+                    self._log(
+                        f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input"
+                    )
+                self._log_asr_stream_reset(
+                    self.asr_last_stream_end_reason or "upstream_closed"
+                )
+                await asyncio.sleep(0.05)
         except ASRInitUnavailableError as asr_err:
             self.state = StateIdle
             self._log(f"[Interview] ASR init fatal: {asr_err}")

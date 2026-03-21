@@ -315,6 +315,17 @@ class SaucASRClient:
         self.inited = False
         self._session_started = False
 
+    def _mark_disconnected(self, reason: str) -> None:
+        self.inited = False
+        self._ws = None
+        self._session_started = False
+        self._log(
+            "ASR_WS_DISCONNECTED "
+            f"reason={reason} "
+            f"connect_id={self.connect_id or '-'} "
+            f"logid={self.tt_logid or '-'}"
+        )
+
     async def _ensure_session_started(self) -> None:
         if not self.inited or self._ws is None or self._ws.closed:
             await self.init()
@@ -343,9 +354,14 @@ class SaucASRClient:
         self._log("ASR_WS_FULL_REQUEST_SENT")
 
     async def _send_audio(self, audio_chunk: bytes, *, is_last: bool) -> None:
-        await self._ensure_session_started()
-        req = SaucProtocolCodec.build_audio_only_request(audio_chunk, is_last=is_last)
-        await self._ws.send(req)
+        try:
+            await self._ensure_session_started()
+            if not self.inited or self._ws is None or self._ws.closed:
+                return
+            req = SaucProtocolCodec.build_audio_only_request(audio_chunk, is_last=is_last)
+            await self._ws.send(req)
+        except ConnectionClosed as close_err:
+            self._mark_disconnected(f"send_closed:{close_err}")
 
     def stream_asr(
         self, source: AsyncIterable[bytes]
@@ -388,11 +404,9 @@ class SaucASRClient:
                     if recv_task is not None and recv_task in done:
                         try:
                             raw = recv_task.result()
-                        except ConnectionClosed:
+                        except ConnectionClosed as close_err:
                             recv_task = None
-                            self.inited = False
-                            self._ws = None
-                            self._session_started = False
+                            self._mark_disconnected(f"recv_closed:{close_err}")
                         else:
                             recv_task = None
                             if isinstance(raw, str):
