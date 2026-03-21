@@ -14,6 +14,8 @@ def _make_config(ark_api_key="k"):
         llm2_reasoning_effort=None,
         asr_app_id="asr-app",
         asr_access_token="asr-token",
+        asr_resource_id="volc.bigasr.sauc.duration",
+        asr_ws_url="wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
         tts_app_id="tts-app",
         tts_access_token="tts-token",
         tts_speaker="spk",
@@ -43,6 +45,8 @@ def test_check_llm1_requires_valid_endpoint():
             llm2_reasoning_effort=config.llm2_reasoning_effort,
             asr_app_id=config.asr_app_id,
             asr_access_token=config.asr_access_token,
+            asr_resource_id=config.asr_resource_id,
+            asr_ws_url=config.asr_ws_url,
             tts_app_id=config.tts_app_id,
             tts_access_token=config.tts_access_token,
             tts_speaker=config.tts_speaker,
@@ -68,6 +72,8 @@ def test_check_llm1_rejects_invalid_thinking_type():
             llm2_reasoning_effort=config.llm2_reasoning_effort,
             asr_app_id=config.asr_app_id,
             asr_access_token=config.asr_access_token,
+            asr_resource_id=config.asr_resource_id,
+            asr_ws_url=config.asr_ws_url,
             tts_app_id=config.tts_app_id,
             tts_access_token=config.tts_access_token,
             tts_speaker=config.tts_speaker,
@@ -75,6 +81,32 @@ def test_check_llm1_rejects_invalid_thinking_type():
         result = await ssc.check_llm1(config)
         assert result.ok is False
         assert "invalid LLM1_THINKING_TYPE" in (result.error or "")
+
+    asyncio.run(_run())
+
+
+def test_check_asr_requires_resource_id():
+    async def _run():
+        config = _make_config()
+        config = ssc.RuntimeConfig(
+            ark_api_key=config.ark_api_key,
+            llm1_endpoint_id=config.llm1_endpoint_id,
+            llm2_endpoint_id=config.llm2_endpoint_id,
+            llm1_thinking_type=config.llm1_thinking_type,
+            llm2_thinking_type=config.llm2_thinking_type,
+            llm1_reasoning_effort=config.llm1_reasoning_effort,
+            llm2_reasoning_effort=config.llm2_reasoning_effort,
+            asr_app_id=config.asr_app_id,
+            asr_access_token=config.asr_access_token,
+            asr_resource_id=None,
+            asr_ws_url=config.asr_ws_url,
+            tts_app_id=config.tts_app_id,
+            tts_access_token=config.tts_access_token,
+            tts_speaker=config.tts_speaker,
+        )
+        result = await ssc.check_asr(config)
+        assert result.ok is False
+        assert result.error == "missing ASR_RESOURCE_ID"
 
     asyncio.run(_run())
 

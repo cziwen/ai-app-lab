@@ -18,7 +18,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
-from arkitect.core.component.asr import ASRFullServerResponse, AsyncASRClient
 from arkitect.core.component.llm import BaseChatLanguageModel
 from arkitect.core.component.llm.model import ArkMessage
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
@@ -43,6 +42,7 @@ from interview_judge import Decision, InterviewJudge
 from prompt import INTERVIEWER_SYSTEM_PROMPT, VoiceBotPrompt
 from llm_limiter import llm_slot
 from ark_responses_adapter import ArkResponsesAdapter, build_input_messages
+from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient, SaucASRFullServerResponse
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -83,7 +83,7 @@ class ASRInitUnavailableError(RuntimeError):
 
 
 class VoiceBotService(BaseModel):
-    asr_client: Optional[AsyncASRClient] = None
+    asr_client: Optional[Any] = None
     tts_client: Optional[AsyncTTSClient] = None
     ark_api_key: str
     llm1_endpoint_id: str
@@ -100,6 +100,8 @@ class VoiceBotService(BaseModel):
     """
     asr_app_key: str
     asr_access_key: str
+    asr_resource_id: str = (os.getenv("ASR_RESOURCE_ID") or "").strip()
+    asr_ws_url: str = (os.getenv("ASR_WS_URL") or "").strip() or DEFAULT_ASR_WS_URL
     tts_app_key: str
     tts_access_key: str
 
@@ -141,8 +143,12 @@ class VoiceBotService(BaseModel):
                 speaker=self.tts_speaker, audio_params=AudioParams()
             ),
         )
-        self.asr_client = AsyncASRClient(
-            app_key=self.asr_app_key, access_key=self.asr_access_key
+        self.asr_client = SaucASRClient(
+            app_key=self.asr_app_key,
+            access_key=self.asr_access_key,
+            resource_id=self.asr_resource_id,
+            ws_url=self.asr_ws_url,
+            log_fn=self._log,
         )
         # await self.tts_client.init() # 这里也不需要，因为 lazy init 会按需建立连接。
         # await self.asr_client.init() # 这里有问题，需要comment 掉才可以正常使用。因为是 AI 先说话，这时初始化 client 会导致 server 挂起。
@@ -393,7 +399,7 @@ class VoiceBotService(BaseModel):
 
     async def handle_input_event(
         self, inputs: AsyncIterable[WebEvent]
-    ) -> AsyncIterable[ASRFullServerResponse]:
+    ) -> AsyncIterable[SaucASRFullServerResponse]:
         """
         Handle input events and generate ASR responses.
         """
@@ -442,7 +448,7 @@ class VoiceBotService(BaseModel):
 
         asr_stream = self.asr_client.stream_asr(async_gen())
 
-        async def merged_stream() -> AsyncIterable[ASRFullServerResponse]:
+        async def merged_stream() -> AsyncIterable[SaucASRFullServerResponse]:
             asr_iter = asr_stream.__aiter__()
             while True:
                 next_asr_task = asyncio.create_task(asr_iter.__anext__())
@@ -468,7 +474,7 @@ class VoiceBotService(BaseModel):
         return merged_stream()
 
     async def handle_asr_response(
-        self, asr_responses: AsyncIterable[ASRFullServerResponse]
+        self, asr_responses: AsyncIterable[SaucASRFullServerResponse]
     ) -> AsyncIterable[SentenceRecognizedPayload]:
         """
         Handle ASR responses and generate recognized sentences.

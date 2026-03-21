@@ -33,35 +33,6 @@ export function pack(req: WebRequest): Blob {
 }
 
 /**
- * 将音频Blob数据加上头部信息
- * @param requestData
- */
-export const encodeAudioOnlyRequest = (requestData: Blob) => {
-  const audio_only_request_header = generateHeader(
-    CONST.CLIENT_AUDIO_ONLY_REQUEST,
-  );
-  audio_only_request_header.setUint32(4, requestData.size, false);
-  return new Blob([audio_only_request_header, requestData]);
-};
-
-/**
- * 生成消息头
- * @param message_type
- */
-const generateHeader = (message_type = CONST.CLIENT_FULL_REQUEST) => {
-  const buffer = new ArrayBuffer(8);
-  const dataView = new DataView(buffer);
-  dataView.setUint8(
-    0,
-    (CONST.PROTOCOL_VERSION << 4) | CONST.DEFAULT_HEADER_SIZE,
-  );
-  dataView.setUint8(1, (message_type << 4) | CONST.NO_SEQUENCE);
-  dataView.setUint8(2, (CONST.JSON << 4) | CONST.NO_COMPRESSION);
-  dataView.setUint8(3, 0x00);
-  return dataView;
-};
-
-/**
  * 生成 WebSocket 消息头
  * @param msgType 消息类型
  * @description 将消息类型设置为指定的 msgType

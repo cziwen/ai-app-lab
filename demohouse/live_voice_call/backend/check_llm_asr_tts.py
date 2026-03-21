@@ -13,6 +13,8 @@
   LLM2_REASONING_EFFORT - minimal|low|medium|high（仅 thinking=enabled 生效）
   ASR_APP_ID           - ASR 应用 ID
   ASR_ACCESS_TOKEN     - ASR Access Token
+  ASR_RESOURCE_ID      - ASR 资源 ID（例如 volc.bigasr.sauc.duration）
+  ASR_WS_URL           - ASR WebSocket 地址（可选，默认 bigmodel_async）
   TTS_APP_ID           - TTS 应用 ID
   TTS_ACCESS_TOKEN     - TTS Access Token
 """

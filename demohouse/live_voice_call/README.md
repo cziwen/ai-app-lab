@@ -66,6 +66,9 @@
     # export LLM2_REASONING_EFFORT=minimal  # minimal|low|medium|high
     export ASR_APP_ID={YOUR_ASR_APP_ID}
     export ASR_ACCESS_TOKEN={YOUR_ASR_ACCESS_TOKEN}
+    export ASR_RESOURCE_ID={YOUR_ASR_RESOURCE_ID}  # 例如 volc.bigasr.sauc.duration
+    # 可选，不配置则默认使用官方推荐链路 bigmodel_async
+    # export ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
     export TTS_APP_ID={YOUR_TTS_APP_ID}
     export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
     export TTS_SPEAKER={YOUR_TTS_SPEAKER}
@@ -96,6 +99,7 @@
 
    后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
+   ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
    若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：
    - 面试 WebSocket：`ws://0.0.0.0:8888`
@@ -458,7 +462,7 @@ Web端和服务端通过二进制协议进行交互，协议格式如下：
 
 ## 附录
 
-### 获取 TTS_APP_ID、TTS_ACCESS_TOKEN、ASR_APP_ID、ASR_ACCESS_TOKEN？
+### 获取 TTS_APP_ID、TTS_ACCESS_TOKEN、ASR_APP_ID、ASR_ACCESS_TOKEN、ASR_RESOURCE_ID？
 
 1. [完成企业认证](https://console.volcengine.com/user/authentication/detail/)
 
@@ -477,5 +481,5 @@ Web端和服务端通过二进制协议进行交互，协议格式如下：
 6. 获取TTS_APP_ID 和TTS_ACCESS_TOKEN
    ![alt text](assets/faq5.png)
 
-7. 获取ASR_APP_ID、ASR_ACCESS_TOKEN
+7. 获取ASR_APP_ID、ASR_ACCESS_TOKEN，并确认可用的 ASR_RESOURCE_ID（如 `volc.bigasr.sauc.duration`）
    ![alt text](assets/faq6.png)

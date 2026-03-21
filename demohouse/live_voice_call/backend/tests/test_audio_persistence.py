@@ -14,9 +14,8 @@ def _audio_header(payload_size: int) -> bytes:
     return bytes(header)
 
 
-def _wrap_twice_with_length_prefix(pcm: bytes) -> bytes:
-    inner = _audio_header(len(pcm)) + pcm
-    return len(inner).to_bytes(4, "big", signed=False) + inner
+def _legacy_nested_audio_payload(pcm: bytes) -> bytes:
+    return _audio_header(len(pcm)) + pcm
 
 
 def _setup_tmp_store(monkeypatch, tmp_path: Path):
@@ -30,16 +29,15 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
 
 
-def test_extract_pcm_audio_unwraps_nested_payload():
+def test_extract_pcm_audio_accepts_raw_pcm():
     pcm = (b"\x01\x00\x02\x00") * 40
-    raw_audio = _wrap_twice_with_length_prefix(pcm)
-    extracted = handler._extract_pcm_audio(raw_audio)
+    extracted = handler._extract_pcm_audio(pcm)
     assert extracted == pcm
 
 
-def test_extract_pcm_audio_drops_invalid_payload():
-    assert handler._extract_pcm_audio(b"\x00\x00\x00") == b""
-    assert handler._extract_pcm_audio(b"\x00\x00\x00\x08bad") == b""
+def test_extract_pcm_audio_drops_invalid_or_legacy_payload():
+    assert handler._extract_pcm_audio(b"\x01") == b""
+    assert handler._extract_pcm_audio(_legacy_nested_audio_payload(b"\x00\x00")) == b""
 
 
 def test_persist_interview_audio_saves_mp3_and_raw(monkeypatch, tmp_path):

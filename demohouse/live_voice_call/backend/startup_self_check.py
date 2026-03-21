@@ -1,8 +1,8 @@
+import asyncio
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from arkitect.core.component.asr import AsyncASRClient
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
 from arkitect.core.component.tts.constants import EventSessionFinished
 
@@ -11,6 +11,7 @@ from ark_responses_adapter import (
     detect_responses_capability,
     normalize_stage_config,
 )
+from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -23,6 +24,8 @@ class RuntimeConfig:
     llm2_reasoning_effort: Optional[str]
     asr_app_id: Optional[str]
     asr_access_token: Optional[str]
+    asr_resource_id: Optional[str]
+    asr_ws_url: Optional[str]
     tts_app_id: Optional[str]
     tts_access_token: Optional[str]
     tts_speaker: Optional[str]
@@ -61,6 +64,8 @@ def load_runtime_config() -> RuntimeConfig:
         llm2_reasoning_effort=_env("LLM2_REASONING_EFFORT"),
         asr_app_id=_env("ASR_APP_ID"),
         asr_access_token=_env("ASR_ACCESS_TOKEN"),
+        asr_resource_id=_env("ASR_RESOURCE_ID"),
+        asr_ws_url=_env("ASR_WS_URL"),
         tts_app_id=_env("TTS_APP_ID"),
         tts_access_token=_env("TTS_ACCESS_TOKEN"),
         tts_speaker=_env("TTS_SPEAKER"),
@@ -165,20 +170,41 @@ async def check_asr(config: RuntimeConfig) -> CheckResult:
             detail="ASR_ACCESS_TOKEN missing",
             error="missing ASR_ACCESS_TOKEN",
         )
+    if not config.asr_resource_id:
+        return CheckResult(
+            ok=False,
+            detail="ASR_RESOURCE_ID missing",
+            error="missing ASR_RESOURCE_ID",
+        )
 
-    client = AsyncASRClient(
+    client = SaucASRClient(
         app_key=config.asr_app_id,
         access_key=config.asr_access_token,
+        resource_id=config.asr_resource_id,
+        ws_url=config.asr_ws_url or DEFAULT_ASR_WS_URL,
     )
     try:
         await client.init()
 
-        async def empty_audio():
-            yield b""
+        async def probe_audio():
+            # 100ms silence @16k/16bit/mono to probe stream path.
+            yield b"\x00" * 3200
 
-        async for _ in client.stream_asr(empty_audio()):
-            break
+        async def _probe_stream() -> bool:
+            async for _ in client.stream_asr(probe_audio()):
+                return True
+            return False
+
+        got_response = await asyncio.wait_for(_probe_stream(), timeout=8)
+        if not got_response:
+            return CheckResult(
+                ok=False,
+                detail="ASR failed",
+                error="ASR probe no response",
+            )
         return CheckResult(ok=True, detail="ASR ok")
+    except asyncio.TimeoutError:
+        return CheckResult(ok=False, detail="ASR failed", error="ASR probe timeout")
     except Exception as e:
         return CheckResult(ok=False, detail="ASR failed", error=str(e))
     finally:

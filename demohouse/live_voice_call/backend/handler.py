@@ -25,7 +25,6 @@ from urllib.parse import parse_qs, urlparse
 import uvicorn
 import websockets
 
-from arkitect.utils.binary_protocol import parse_request
 from arkitect.utils.event_loop import get_event_loop
 from admin_api import create_admin_app
 from admin_store import (
@@ -415,41 +414,36 @@ PERSISTENCE = PersistenceQueue(server_logger)
 def _extract_pcm_audio(
     raw_audio: bytes, log_fn: Optional[Callable[[str], None]] = None
 ) -> bytes:
-    """Extract pure PCM bytes from nested length-prefixed audio payloads."""
+    """Accept raw PCM payloads and reject legacy nested protocol payloads."""
     if not raw_audio:
         return b""
     if log_fn is None:
         log_fn = lambda _msg: None
 
-    def _strip_length_prefix(data: bytes) -> bytes:
-        if len(data) < 4:
+    # Old clients nested an extra audio-only frame here. This path is intentionally
+    # unsupported after the protocol migration.
+    if (
+        len(raw_audio) >= 8
+        and raw_audio[0] == 0x11
+        and raw_audio[1] == 0x20
+        and raw_audio[2] == 0x10
+        and raw_audio[3] == 0x00
+    ):
+        payload_size = int.from_bytes(raw_audio[4:8], "big", signed=False)
+        if payload_size == len(raw_audio) - 8:
+            log_fn(
+                "[InterviewPersist] drop candidate audio frame: "
+                "legacy nested UserAudio payload is unsupported"
+            )
             return b""
-        payload_size = int.from_bytes(data[:4], "big", signed=False)
-        if payload_size <= 0 or payload_size > len(data) - 4:
-            return b""
-        return data[4 : 4 + payload_size]
 
-    outer_payload = _strip_length_prefix(raw_audio)
-    if not outer_payload:
-        log_fn("[InterviewPersist] drop candidate audio frame: invalid outer payload")
-        return b""
-
-    try:
-        parsed = parse_request(outer_payload)
-        if isinstance(parsed, (bytes, bytearray)):
-            inner_payload = bytes(parsed)
-            pcm_payload = _strip_length_prefix(inner_payload)
-            if pcm_payload:
-                return pcm_payload
-            log_fn("[InterviewPersist] drop candidate audio frame: invalid inner payload")
-            return b""
-    except Exception as parse_err:
+    if len(raw_audio) % 2 != 0:
         log_fn(
-            f"[InterviewPersist] drop candidate audio frame: parse error={parse_err}"
+            "[InterviewPersist] drop candidate audio frame: invalid pcm payload size"
         )
         return b""
-    log_fn("[InterviewPersist] drop candidate audio frame: unsupported payload")
-    return b""
+
+    return raw_audio
 
 
 async def handler(websocket: websockets.WebSocketCommonProtocol, path):
@@ -615,6 +609,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         tts_speaker=RUNTIME_CONFIG.tts_speaker or DEFAULT_SPEAKER,
         asr_app_key=RUNTIME_CONFIG.asr_app_id,
         asr_access_key=RUNTIME_CONFIG.asr_access_token,
+        asr_resource_id=RUNTIME_CONFIG.asr_resource_id or "",
+        asr_ws_url=RUNTIME_CONFIG.asr_ws_url or "",
         interview_mode=True,
         interview_questions=interview_data.questions,
         on_candidate_sentence=lambda text: record_turn("candidate", text),

@@ -13,7 +13,6 @@ import { useContext } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
 import Recorder from 'recorder-core';
 import { BIT_RATE, FRAME_SIZE, SAMPLE_RATE } from '@/constant';
-import { encodeAudioOnlyRequest } from '@/utils';
 import { EventType } from '@/types';
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
@@ -43,11 +42,10 @@ export const useAudioRecorder = () => {
     sendLastFrameRef.current = pcmFrame;
 
     const blob = new Blob([pcmFrame.buffer], { type: 'audio/pcm' }); //这是裸pcm，无前44字节wav头字节wav头
-    const data = encodeAudioOnlyRequest(blob);
 
     serviceRef.current?.sendMessage({
       event: EventType.UserAudio,
-      data,
+      data: blob,
     });
     log('send | event:' + EventType.UserAudio + ' payload: ...');
   };
