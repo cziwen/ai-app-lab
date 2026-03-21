@@ -48,6 +48,8 @@ StateInProgress = "InProgress"
 StateIdle = "Idle"
 # asr continuous detection no input duration, empirical value
 ASRInterval = 2000
+ASR_POLL_INTERVAL_SECONDS = 0.2
+ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
 ASR_INIT_MAX_ATTEMPTS = 2
 ASR_INIT_RETRY_BACKOFF_SECONDS = 0.2
@@ -122,6 +124,8 @@ class VoiceBotService(BaseModel):
     asr_buffer: str = ""  # Reservoir asr recognition result
     asr_no_input_duration: int = 0  # Cumulated no live_voice_call recognition duration
     asr_last_duration: int = 0  # Last asr recognition duration
+    asr_last_growth_mono_ms: int = 0  # Last monotonic ts when ASR text grew
+    asr_silence_tick_count: int = 0  # Tick counter for sampled silence logs
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
     current_turn_id: Optional[str] = None
@@ -187,6 +191,39 @@ class VoiceBotService(BaseModel):
 
     def _mono_ms(self) -> int:
         return int(round(time.monotonic() * 1000))
+
+    def _reset_asr_buffer_state(self) -> None:
+        self.asr_buffer = ""
+        self.asr_no_input_duration = 0
+        self.asr_last_duration = 0
+        self.asr_last_growth_mono_ms = 0
+        self.asr_silence_tick_count = 0
+
+    async def _finalize_asr_turn_if_silent(self) -> Optional[SentenceRecognizedPayload]:
+        if self.state != StateIdle:
+            return None
+        if not self.asr_buffer or self.asr_last_growth_mono_ms <= 0:
+            return None
+
+        silence_ms = max(0, self._mono_ms() - self.asr_last_growth_mono_ms)
+        self.asr_no_input_duration = silence_ms
+        self.asr_silence_tick_count += 1
+        if self.asr_silence_tick_count % ASR_SILENCE_LOG_EVERY_TICKS == 0:
+            self._log(
+                f"ASR_SILENCE_TICK silence_ms={silence_ms} text_len={len(self.asr_buffer)}"
+            )
+
+        if silence_ms <= ASRInterval:
+            return None
+
+        sentence = self.asr_buffer
+        self._log(
+            f"ASR_TURN_END reason=silence_timeout silence_ms={silence_ms} text_len={len(sentence)}"
+        )
+        self._reset_asr_buffer_state()
+        if self.asr_client:
+            await self.asr_client.close()
+        return SentenceRecognizedPayload(sentence=sentence)
 
     def _start_turn(self) -> None:
         self.current_turn_id = str(uuid.uuid4())
@@ -479,30 +516,59 @@ class VoiceBotService(BaseModel):
         """
         Handle ASR responses and generate recognized sentences.
         """
-        async for response in asr_responses:
-            if self.state == StateIdle:
-                if self.asr_buffer and self.asr_no_input_duration > ASRInterval:
-                    yield SentenceRecognizedPayload(sentence=self.asr_buffer)
-                    self.asr_buffer = ""
-                    self.asr_no_input_duration = 0
-                    self.asr_last_duration = 0
-                    await self.asr_client.close()
-                elif response.result and response.result.text:
-                    # buffering
-                    increment_len = len(response.result.text) - len(self.asr_buffer)
-                    self.asr_buffer = response.result.text
-                    if increment_len > 0:
-                        self.asr_last_duration = response.audio.duration
-                    else:
-                        self.asr_no_input_duration = (
-                            response.audio.duration - self.asr_last_duration
-                        )
-                    self._log(
-                        f"asr buffer incremented: {increment_len}, utterances: {response.result.utterances}"
-                    )
+        asr_iter = asr_responses.__aiter__()
+        next_asr_task: Optional[asyncio.Task] = None
+        while True:
+            pending_finalized = await self._finalize_asr_turn_if_silent()
+            if pending_finalized is not None:
+                yield pending_finalized
+                continue
+
+            if next_asr_task is None:
+                next_asr_task = asyncio.create_task(asr_iter.__anext__())
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(next_asr_task),
+                    timeout=ASR_POLL_INTERVAL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                continue
+            except StopAsyncIteration:
+                next_asr_task = None
+                last_finalized = await self._finalize_asr_turn_if_silent()
+                if last_finalized is not None:
+                    yield last_finalized
+                break
             else:
+                next_asr_task = None
+
+            if self.state != StateIdle:
                 self._log("service is InProgress, will ignore the newer asr response")
                 continue
+            if not response.result or not response.result.text:
+                continue
+
+            increment_len = len(response.result.text) - len(self.asr_buffer)
+            self.asr_buffer = response.result.text
+            if increment_len > 0:
+                self.asr_last_growth_mono_ms = self._mono_ms()
+                self.asr_no_input_duration = 0
+                self.asr_silence_tick_count = 0
+                if response.audio:
+                    self.asr_last_duration = response.audio.duration
+            elif self.asr_last_growth_mono_ms > 0:
+                self.asr_no_input_duration = max(
+                    0, self._mono_ms() - self.asr_last_growth_mono_ms
+                )
+
+            self._log(
+                f"asr buffer incremented: {increment_len}, utterances: {response.result.utterances}"
+            )
+
+        if next_asr_task is not None:
+            next_asr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await next_asr_task
 
     async def handle_tts_response(
         self, llm_output: AsyncIterable[str]
