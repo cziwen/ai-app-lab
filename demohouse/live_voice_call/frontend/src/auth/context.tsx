@@ -23,6 +23,8 @@ type SessionAuthContextType = {
   tokenPresent: boolean;
   checkInPassed: boolean;
   setCheckInPassed: Dispatch<SetStateAction<boolean>>;
+  selectedMicId: string;
+  setSelectedMicId: Dispatch<SetStateAction<string>>;
   permissions: PermissionState;
   setPermissions: Dispatch<SetStateAction<PermissionState>>;
   mediaStreamsRef: MutableRefObject<MediaState>;
@@ -45,6 +47,7 @@ export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
   const [permissions, setPermissions] = useState<PermissionState>({
     ...DEFAULT_PERMISSIONS,
   });
+  const [selectedMicId, setSelectedMicId] = useState('');
   const [token, setToken] = useState<string | null>(null);
   const mediaStreamsRef = useRef<MediaState>({
     userMedia: null,
@@ -57,6 +60,7 @@ export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
     const normalizedToken = nextToken?.trim() ? nextToken.trim() : null;
     if (normalizedToken !== token) {
       setCheckInPassed(false);
+      setSelectedMicId('');
       setPermissions({ ...DEFAULT_PERMISSIONS });
       mediaStreamsRef.current = {
         userMedia: null,
@@ -72,11 +76,13 @@ export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
       tokenPresent: !!token,
       checkInPassed,
       setCheckInPassed,
+      selectedMicId,
+      setSelectedMicId,
       permissions,
       setPermissions,
       mediaStreamsRef,
     }),
-    [token, checkInPassed, permissions],
+    [token, checkInPassed, selectedMicId, permissions],
   );
 
   return (

@@ -87,8 +87,14 @@ const getAudioContextClass = () => {
 export const CheckInPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { token, setCheckInPassed, permissions, setPermissions, mediaStreamsRef } =
-    useSessionAuth();
+  const {
+    token,
+    setCheckInPassed,
+    setSelectedMicId,
+    permissions,
+    setPermissions,
+    mediaStreamsRef,
+  } = useSessionAuth();
   const logCheckin = useCallback(
     (message: string) => {
       const entry = `[${new Date().toLocaleTimeString()}]\t[CheckIn] ${message}`;
@@ -691,6 +697,10 @@ export const CheckInPage = () => {
         throw new Error('权限尚未初始化完成，请先完成权限初始化。');
       }
       await validateBeforeEnter();
+      setSelectedMicId(selectedMic.trim());
+      stopStream(mediaStreamsRef.current.userMedia);
+      mediaStreamsRef.current.userMedia = null;
+      logCheckin('release precheck userMedia before enter');
       setCheckInPassed(true);
       navigate(`/${location.search}`);
     } catch (error) {

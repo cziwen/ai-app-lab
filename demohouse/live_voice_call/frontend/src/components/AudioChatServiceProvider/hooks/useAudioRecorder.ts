@@ -16,6 +16,7 @@ import { BIT_RATE, FRAME_SIZE, SAMPLE_RATE } from '@/constant';
 import { EventType } from '@/types';
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
+import { useSessionAuth } from '@/auth/context';
 
 const AUDIO_TRACK_SET = {
   autoGainControl: true,
@@ -31,6 +32,7 @@ export const useAudioRecorder = () => {
     sendChunkRef,
     sendPcmBufferRef,
   } = useContext(AudioChatServiceContext);
+  const { selectedMicId } = useSessionAuth();
   const { log } = useLogContent();
   const { setUserSpeaking, setUserAudioLevel } = useAudioChatState();
   const handleReset = () => {
@@ -111,53 +113,83 @@ export const useAudioRecorder = () => {
       recorderRef.current.close();
     }
 
-    let clearBufferIdx = 0;
-
-    const recorder = Recorder({
-      type: 'unknown',
-      audioTrackSet: AUDIO_TRACK_SET,
-      onProcess: (
-        buffers: (Int16Array | null)[],
-        powerLevel: unknown,
-        bufferDuration: unknown,
-        bufferSampleRate: number,
-        newBufferIdx: number,
-        // asyncEnd
-      ) => {
-        const buffer = buffers[buffers.length - 1];
-        const numericPower =
-          typeof powerLevel === 'number' && Number.isFinite(powerLevel)
-            ? powerLevel
-            : 0;
-        const normalizedLevel = Math.max(
-          0,
-          Math.min(1, (numericPower - 0.02) / 0.28),
-        );
-        setUserAudioLevel(normalizedLevel);
-        for (let i = clearBufferIdx; i < newBufferIdx; i++) {
-          buffers[i] = null;
-        }
-        clearBufferIdx = newBufferIdx;
-
-        handleProcess(buffers, bufferSampleRate, false);
-      },
-    });
-
-    recorder.open(
-      () => {
-        recorder.start();
-        setUserSpeaking(true);
-      },
-      (msg: string, isUserNotAllow: boolean) => {
-        setUserAudioLevel(0);
-        console.error(
-          (isUserNotAllow ? 'UserNotAllow，' : '') + '无法录音:' + msg,
-        );
-      },
-    );
-
     handleReset();
-    recorderRef.current = recorder;
+    let clearBufferIdx = 0;
+    const normalizedSelectedMicId = selectedMicId.trim();
+
+    const buildRecorder = (
+      audioTrackSet:
+        | typeof AUDIO_TRACK_SET
+        | (typeof AUDIO_TRACK_SET & { deviceId: { exact: string } }),
+    ) =>
+      Recorder({
+        type: 'unknown',
+        audioTrackSet,
+        onProcess: (
+          buffers: (Int16Array | null)[],
+          powerLevel: unknown,
+          bufferDuration: unknown,
+          bufferSampleRate: number,
+          newBufferIdx: number,
+          // asyncEnd
+        ) => {
+          const numericPower =
+            typeof powerLevel === 'number' && Number.isFinite(powerLevel)
+              ? powerLevel
+              : 0;
+          const normalizedLevel = Math.max(
+            0,
+            Math.min(1, (numericPower - 0.02) / 0.28),
+          );
+          setUserAudioLevel(normalizedLevel);
+          for (let i = clearBufferIdx; i < newBufferIdx; i++) {
+            buffers[i] = null;
+          }
+          clearBufferIdx = newBufferIdx;
+
+          handleProcess(buffers, bufferSampleRate, false);
+        },
+      });
+
+    const openRecorder = (preferSelectedMic: boolean) => {
+      const shouldUseSelectedMic = preferSelectedMic && !!normalizedSelectedMicId;
+      const audioTrackSet = shouldUseSelectedMic
+        ? {
+            ...AUDIO_TRACK_SET,
+            deviceId: { exact: normalizedSelectedMicId },
+          }
+        : AUDIO_TRACK_SET;
+
+      if (shouldUseSelectedMic) {
+        log(`mic inherit apply device=${normalizedSelectedMicId}`);
+      }
+
+      const recorder = buildRecorder(audioTrackSet);
+      recorderRef.current = recorder;
+      recorder.open(
+        () => {
+          recorder.start();
+          setUserSpeaking(true);
+        },
+        (msg: string, isUserNotAllow: boolean) => {
+          if (shouldUseSelectedMic) {
+            log('mic inherit fallback default');
+            recorder.close();
+            if (recorderRef.current === recorder) {
+              recorderRef.current = null;
+            }
+            openRecorder(false);
+            return;
+          }
+          setUserAudioLevel(0);
+          console.error(
+            (isUserNotAllow ? 'UserNotAllow，' : '') + '无法录音:' + msg,
+          );
+        },
+      );
+    };
+
+    openRecorder(true);
   };
 
   const recStop = () => {
