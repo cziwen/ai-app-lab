@@ -170,13 +170,11 @@ class VoiceBotService(BaseModel):
                 llm_thinking_type=self.llm1_thinking_type,
                 llm_reasoning_effort=self.llm1_reasoning_effort,
                 responses_adapter=self.responses_adapter,
-                max_followups_per_question=1,
                 coverage_threshold=0.7,
             )
             self.interview_flow = InterviewFlow(
                 questions=flow_questions,
                 judge=self.interview_judge,
-                max_followups_per_question=1,
                 global_turn_limit=20,
             )
 

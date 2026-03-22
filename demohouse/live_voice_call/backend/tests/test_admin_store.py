@@ -18,11 +18,13 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
 
 
-def test_calculate_question_count():
-    assert admin_store.calculate_question_count(30, 10) == 5
-    assert admin_store.calculate_question_count(31, 10) == 5
-    assert admin_store.calculate_question_count(5, 10) == 1
-    assert admin_store.calculate_question_count(15, 1) == 1
+def _followups_for_job(job_uid: str, *, max_followups: int = 0):
+    detail = admin_store.get_job_detail(job_uid)
+    assert detail is not None
+    return [
+        {"question_id": int(question["id"]), "max_followups": max_followups}
+        for question in detail["questions"]
+    ]
 
 
 def test_create_job_and_interview(monkeypatch, tmp_path):
@@ -51,8 +53,8 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     interview = admin_store.create_interview(
         candidate_name="张三",
         job_uid=job["job_uid"],
-        duration_minutes=30,
         notes="重点看项目经验",
+        question_followups=_followups_for_job(job["job_uid"]),
     )
     assert interview["question_count"] == 2
     assert interview["required_checkins"] == ["speaker", "mic"]
@@ -69,6 +71,7 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     assert all(
         "question" in item and item["question"] for item in interview_detail["selected_questions"]
     )
+    assert all("max_followups" in item for item in interview_detail["selected_questions"])
 
 
 def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp_path):
@@ -91,8 +94,8 @@ def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp
     interview = admin_store.create_interview(
         candidate_name="李四",
         job_uid=job["job_uid"],
-        duration_minutes=20,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
     )
     token = interview["token"]
 
@@ -137,8 +140,8 @@ def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch,
     interview = admin_store.create_interview(
         candidate_name="王五",
         job_uid=job["job_uid"],
-        duration_minutes=10,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
     )
     token = interview["token"]
 
@@ -152,7 +155,7 @@ def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch,
     assert detail["reconnect_deadline_at"] is None
 
 
-def test_start_interview_session_prepends_fixed_intro_question(monkeypatch, tmp_path):
+def test_start_interview_session_uses_selected_questions_only(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "password123")
@@ -172,20 +175,16 @@ def test_start_interview_session_prepends_fixed_intro_question(monkeypatch, tmp_
     interview = admin_store.create_interview(
         candidate_name="赵六",
         job_uid=job["job_uid"],
-        duration_minutes=30,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
     )
 
     session = admin_store.start_interview_session(interview["token"])
     assert session is not None
-    assert session.questions
-    assert session.questions[0]["question_id"] == admin_store.FIXED_INTRO_QUESTION_ID
-    assert session.questions[0]["main_question"] == admin_store.FIXED_INTRO_QUESTION_TEXT
-    assert session.questions[1]["question_id"] != admin_store.FIXED_INTRO_QUESTION_ID
-    assert "must_cover" in session.questions[1]["evidence"]
-    assert "scoring_boundary" in session.questions[1]["evidence"]
-    assert "ability_dimension" in session.questions[1]["evidence"]
-    assert "best_standard" in session.questions[1]["evidence"]
+    assert len(session.questions) == 2
+    assert all(item["question_id"] != "intro_fixed" for item in session.questions)
+    assert all("max_followups" in item for item in session.questions)
+    assert all("must_cover" in item["evidence"] for item in session.questions)
 
 
 def test_delete_interview_removes_audio_and_log_dirs(monkeypatch, tmp_path):
@@ -205,8 +204,8 @@ def test_delete_interview_removes_audio_and_log_dirs(monkeypatch, tmp_path):
     interview = admin_store.create_interview(
         candidate_name="孙七",
         job_uid=job["job_uid"],
-        duration_minutes=15,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
     )
     token = interview["token"]
 
@@ -241,8 +240,8 @@ def test_required_checkins_custom_and_empty(monkeypatch, tmp_path):
     interview = admin_store.create_interview(
         candidate_name="钱八",
         job_uid=job["job_uid"],
-        duration_minutes=15,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"], max_followups=2),
         required_checkins=["screen", "speaker", "screen"],
     )
     assert interview["required_checkins"] == ["speaker", "screen"]
@@ -258,8 +257,8 @@ def test_required_checkins_custom_and_empty(monkeypatch, tmp_path):
     empty_interview = admin_store.create_interview(
         candidate_name="周九",
         job_uid=job["job_uid"],
-        duration_minutes=15,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
         required_checkins=[],
     )
     assert empty_interview["required_checkins"] == []
@@ -284,13 +283,69 @@ def test_required_checkins_invalid_value_raises(monkeypatch, tmp_path):
         admin_store.create_interview(
             candidate_name="吴十",
             job_uid=job["job_uid"],
-            duration_minutes=15,
             notes=None,
+            question_followups=_followups_for_job(job["job_uid"]),
             required_checkins=["mic", "foo"],
         )
         assert False, "expected ValueError"
     except ValueError as exc:
         assert str(exc) == "invalid_required_checkins"
+
+
+def test_question_followups_must_cover_all_job_questions(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目1", "答案1"), ("题目2", "答案2")],
+    )
+    followups = _followups_for_job(job["job_uid"])
+    try:
+        admin_store.create_interview(
+            candidate_name="候选人",
+            job_uid=job["job_uid"],
+            notes=None,
+            question_followups=followups[:1],
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "invalid_question_followups"
+
+
+def test_question_followups_out_of_range_raises(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目1", "答案1")],
+    )
+
+    followups = _followups_for_job(job["job_uid"])
+    followups[0]["max_followups"] = 4
+    try:
+        admin_store.create_interview(
+            candidate_name="候选人",
+            job_uid=job["job_uid"],
+            notes=None,
+            question_followups=followups,
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "invalid_question_followups"
 
 
 def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkeypatch, tmp_path):
@@ -360,9 +415,13 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
         question_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(job_questions)").fetchall()
         }
+        interview_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(interviews)").fetchall()
+        }
     assert "ability_dimension" in question_columns
     assert "scoring_boundary" in question_columns
     assert "best_standard" in question_columns
     assert "medium_standard" in question_columns
     assert "worst_standard" in question_columns
     assert "output_format" in question_columns
+    assert "question_followup_limits" in interview_columns

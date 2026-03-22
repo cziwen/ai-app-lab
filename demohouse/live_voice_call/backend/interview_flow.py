@@ -19,6 +19,7 @@ class QuestionContext:
     question_id: str
     main_question: str
     evidence: Dict[str, Any] = field(default_factory=dict)
+    max_followups: int = 0
     follow_up_count: int = 0
     coverage_score: float = 0.0
     turns: List[Dict[str, str]] = field(default_factory=list)
@@ -40,14 +41,12 @@ class InterviewFlow:
         self,
         questions: List[Dict[str, Any]],
         judge: InterviewJudge,
-        max_followups_per_question: int = 2,
         global_turn_limit: int = 20,
     ):
         if not questions:
             raise ValueError("questions must not be empty")
 
         self.judge = judge
-        self.max_followups_per_question = max_followups_per_question
         self.global_turn_limit = global_turn_limit
 
         self.questions: List[QuestionContext] = [
@@ -55,6 +54,7 @@ class InterviewFlow:
                 question_id=str(item["question_id"]),
                 main_question=str(item["main_question"]),
                 evidence=dict(item.get("evidence") or {}),
+                max_followups=max(0, int(item.get("max_followups", 0))),
             )
             for item in questions
         ]
@@ -180,12 +180,21 @@ class InterviewFlow:
                 transition_trace=trace,
             )
 
-        decision = await self.judge.decide(
-            question=q.main_question,
-            candidate_answer=answer,
-            follow_up_count=q.follow_up_count,
-            evidence=q.evidence,
-        )
+        if q.follow_up_count >= q.max_followups:
+            decision = Decision(
+                move_forward=True,
+                need_follow_up=False,
+                follow_up_question="",
+                reason="follow_up_limit_reached",
+                coverage_score=q.coverage_score,
+            )
+        else:
+            decision = await self.judge.decide(
+                question=q.main_question,
+                candidate_answer=answer,
+                follow_up_count=q.follow_up_count,
+                evidence=q.evidence,
+            )
         q.coverage_score = decision.coverage_score
 
         if decision.need_follow_up and not decision.move_forward:

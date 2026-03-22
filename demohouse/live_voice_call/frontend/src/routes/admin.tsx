@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from '@modern-js/runtime/router';
 import { API_URL } from '@/config/endpoints';
 import {
@@ -42,22 +42,8 @@ export const AdminPage = () => {
 
   const [candidateName, setCandidateName] = useState('');
   const [selectedJobUid, setSelectedJobUid] = useState('');
-  const [durationMinutes, setDurationMinutes] = useState(30);
   const [interviewNotes, setInterviewNotes] = useState('');
   const [creatingInterview, setCreatingInterview] = useState(false);
-
-  const selectedJobQuestionCount = useMemo(() => {
-    const matched = jobs.find(item => item.job_uid === selectedJobUid);
-    return matched ? matched.question_count : 0;
-  }, [jobs, selectedJobUid]);
-
-  const estimatedQuestionCount = useMemo(() => {
-    if (!selectedJobQuestionCount) {
-      return 0;
-    }
-    const planned = Math.max(1, Math.floor((durationMinutes - 5) / 5));
-    return Math.min(selectedJobQuestionCount, planned);
-  }, [durationMinutes, selectedJobQuestionCount]);
 
   const loadJobs = async (query = jobSearch) => {
     setLoadingJobs(true);
@@ -142,16 +128,20 @@ export const AdminPage = () => {
     setGlobalError('');
     setCreatingInterview(true);
     try {
+      const jobDetailResp = await adminApi.getJob(selectedJobUid);
+      const question_followups = (jobDetailResp.job.questions || []).map(item => ({
+        question_id: item.id,
+        max_followups: 0,
+      }));
       await adminApi.createInterview({
         candidate_name: candidateName.trim(),
         job_uid: selectedJobUid,
-        duration_minutes: durationMinutes,
+        question_followups,
         notes: interviewNotes.trim(),
       });
       setShowCreateInterview(false);
       setCandidateName('');
       setInterviewNotes('');
-      setDurationMinutes(30);
       await loadInterviews('');
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : '创建面试失败');
@@ -393,8 +383,7 @@ export const AdminPage = () => {
                 岗位：{interviewDetail.job.name}（{interviewDetail.job.job_uid}）
               </p>
               <p>
-                时长：{interviewDetail.duration_minutes} 分钟 | 题目数：
-                {interviewDetail.question_count}
+                题目数：{interviewDetail.question_count}
               </p>
               <p>状态：{interviewDetail.status}</p>
               <p>备注：{interviewDetail.notes || '无'}</p>
@@ -533,19 +522,6 @@ export const AdminPage = () => {
                   </option>
                 ))}
               </select>
-
-              <label htmlFor="interview-duration">面试时长（分钟）</label>
-              <input
-                id="interview-duration"
-                type="number"
-                min={5}
-                max={180}
-                value={durationMinutes}
-                onChange={event => setDurationMinutes(Number(event.target.value) || 5)}
-                required
-              />
-
-              <p className="admin-hint">预计提问数：{estimatedQuestionCount}（包含 5 分钟 intro 预留）</p>
 
               <label htmlFor="interview-notes">备注（可选）</label>
               <textarea

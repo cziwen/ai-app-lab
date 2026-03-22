@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { API_URL } from '@/config/endpoints';
 import {
   adminApi,
@@ -9,14 +9,6 @@ import {
 } from '@/admin/api';
 import { AdminLoadingPage, AdminModal, AdminShell } from '@/admin/layout';
 import { useAdminAuth } from '@/admin/use-admin-auth';
-
-const normalizeDurationMinutes = (value: string): number => {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
-    return 5;
-  }
-  return Math.max(5, parsed);
-};
 
 const CHECKIN_OPTIONS: Array<{ key: CheckInKey; label: string }> = [
   { key: 'speaker', label: '扬声器' },
@@ -45,7 +37,10 @@ export const AdminInterviewsPage = () => {
 
   const [candidateName, setCandidateName] = useState('');
   const [selectedJobUid, setSelectedJobUid] = useState('');
-  const [durationMinutesInput, setDurationMinutesInput] = useState('10');
+  const [selectedJobQuestions, setSelectedJobQuestions] = useState<Array<{ id: number; question: string }>>(
+    [],
+  );
+  const [questionFollowupInputs, setQuestionFollowupInputs] = useState<Record<number, string>>({});
   const [interviewNotes, setInterviewNotes] = useState('');
   const [requiredCheckins, setRequiredCheckins] = useState<CheckInKey[]>([
     'speaker',
@@ -85,19 +80,32 @@ export const AdminInterviewsPage = () => {
     Promise.all([loadJobs(), loadInterviews('')]);
   }, [loadingAuth]);
 
-  const selectedJobQuestionCount = useMemo(() => {
-    const matched = jobs.find(item => item.job_uid === selectedJobUid);
-    return matched ? matched.question_count : 0;
-  }, [jobs, selectedJobUid]);
-
-  const estimatedQuestionCount = useMemo(() => {
-    if (!selectedJobQuestionCount) {
-      return 0;
-    }
-    const durationMinutes = normalizeDurationMinutes(durationMinutesInput);
-    const planned = Math.max(1, Math.floor((durationMinutes - 5) / 5));
-    return Math.min(selectedJobQuestionCount, planned);
-  }, [durationMinutesInput, selectedJobQuestionCount]);
+  useEffect(() => {
+    const loadSelectedJobQuestions = async () => {
+      if (!selectedJobUid) {
+        setSelectedJobQuestions([]);
+        setQuestionFollowupInputs({});
+        return;
+      }
+      try {
+        const data = await adminApi.getJob(selectedJobUid);
+        const questions = (data.job.questions || []).map(item => ({
+          id: item.id,
+          question: item.question,
+        }));
+        setSelectedJobQuestions(questions);
+        setQuestionFollowupInputs(
+          questions.reduce<Record<number, string>>((acc, question) => {
+            acc[question.id] = '0';
+            return acc;
+          }, {}),
+        );
+      } catch (e) {
+        setGlobalError(e instanceof Error ? e.message : '加载岗位题目失败');
+      }
+    };
+    loadSelectedJobQuestions();
+  }, [selectedJobUid]);
 
   const openInterviewDetail = async (token: string) => {
     setDetailLoading(true);
@@ -129,19 +137,28 @@ export const AdminInterviewsPage = () => {
     event.preventDefault();
     setGlobalError('');
     setCreatingInterview(true);
-    const durationMinutes = normalizeDurationMinutes(durationMinutesInput);
     try {
+      const question_followups = selectedJobQuestions.map(question => {
+        const raw = questionFollowupInputs[question.id] ?? '0';
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isFinite(parsed) || Number.isNaN(parsed) || parsed < 0 || parsed > 3) {
+          throw new Error(`题目「${question.question}」的追问次数必须是 0-3 的整数`);
+        }
+        return {
+          question_id: question.id,
+          max_followups: parsed,
+        };
+      });
       await adminApi.createInterview({
         candidate_name: candidateName.trim(),
         job_uid: selectedJobUid,
-        duration_minutes: durationMinutes,
+        question_followups,
         notes: interviewNotes.trim(),
         required_checkins: requiredCheckins,
       });
       setShowCreateInterview(false);
       setCandidateName('');
       setInterviewNotes('');
-      setDurationMinutesInput('10');
       setRequiredCheckins(['speaker', 'mic']);
       await loadInterviews('');
     } catch (e) {
@@ -232,17 +249,28 @@ export const AdminInterviewsPage = () => {
               ))}
             </select>
 
-            <label htmlFor="interview-duration">面试时长（分钟）</label>
-            <input
-              id="interview-duration"
-              type="number"
-              value={durationMinutesInput}
-              onChange={event => setDurationMinutesInput(event.target.value)}
-              onBlur={() => setDurationMinutesInput(String(normalizeDurationMinutes(durationMinutesInput)))}
-              required
-            />
-
-            <p className="admin-hint">预计提问数：{estimatedQuestionCount}（包含 5 分钟 intro 预留）</p>
+            <label>逐题追问次数（0-3）</label>
+            <div className="admin-qa-list">
+              {selectedJobQuestions.map(item => (
+                <div key={item.id} className="admin-followup-row">
+                  <p>{item.question}</p>
+                  <input
+                    type="number"
+                    min={0}
+                    max={3}
+                    value={questionFollowupInputs[item.id] ?? '0'}
+                    onChange={event =>
+                      setQuestionFollowupInputs(prev => ({
+                        ...prev,
+                        [item.id]: event.target.value,
+                      }))
+                    }
+                    required
+                  />
+                </div>
+              ))}
+              {!selectedJobQuestions.length && <p>当前岗位题库为空，无法创建面试。</p>}
+            </div>
 
             <label>必检项配置</label>
             <div className="admin-checkin-grid">
@@ -285,7 +313,12 @@ export const AdminInterviewsPage = () => {
               </button>
               <button
                 type="submit"
-                disabled={creatingInterview || !candidateName.trim() || !selectedJobUid}
+                disabled={
+                  creatingInterview ||
+                  !candidateName.trim() ||
+                  !selectedJobUid ||
+                  selectedJobQuestions.length === 0
+                }
               >
                 {creatingInterview ? '创建中...' : '提交创建'}
               </button>
@@ -307,7 +340,6 @@ export const AdminInterviewsPage = () => {
               <section className="admin-detail-grid">
                 <p>岗位：{interviewDetail.job.name}</p>
                 <p>岗位 UID：{interviewDetail.job.job_uid}</p>
-                <p>时长：{interviewDetail.duration_minutes} 分钟</p>
                 <p>题目数：{interviewDetail.question_count}</p>
                 <p>创建时间：{interviewDetail.created_at}</p>
                 <p>完成时间：{interviewDetail.completed_at || '未完成'}</p>
@@ -342,7 +374,7 @@ export const AdminInterviewsPage = () => {
                   <ol className="admin-qa-list">
                     {interviewDetail.selected_questions.map(item => (
                       <li key={`${item.sort_order}-${item.question}`}>
-                        {item.question}
+                        {item.question}（追问上限: {item.max_followups}）
                       </li>
                     ))}
                   </ol>

@@ -15,16 +15,19 @@ QUESTIONS: List[Dict[str, Any]] = [
         "question_id": "q1",
         "main_question": "请用1分钟做自我介绍，重点说与你申请岗位相关的经历。",
         "evidence": {"scoring_boundary": "是否清晰说明岗位相关经历，并体现与岗位匹配度"},
+        "max_followups": 2,
     },
     {
         "question_id": "q2",
         "main_question": "请介绍一个你主导的项目，说明目标、你的动作和结果。",
         "evidence": {"scoring_boundary": "是否完整覆盖项目目标、个人关键动作和可验证结果"},
+        "max_followups": 2,
     },
     {
         "question_id": "q3",
         "main_question": "当你遇到复杂问题时，通常如何拆解并推动解决？",
         "evidence": {"scoring_boundary": "是否体现问题拆解方法、推进机制和复盘意识"},
+        "max_followups": 2,
     },
 ]
 
@@ -52,13 +55,11 @@ async def main() -> int:
         llm_endpoint_id=endpoint_id,
         llm_thinking_type=thinking_type,
         llm_reasoning_effort=reasoning_effort,
-        max_followups_per_question=2,
         coverage_threshold=0.7,
     )
     flow = InterviewFlow(
         questions=QUESTIONS,
         judge=judge,
-        max_followups_per_question=2,
         global_turn_limit=20,
     )
 

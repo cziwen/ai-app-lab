@@ -40,11 +40,14 @@ def _create_interview_fixture() -> str:
         csv_filename="questions.csv",
         questions=[("介绍一个项目", "背景 职责 结果")],
     )
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None and detail["questions"]
+    first_question_id = int(detail["questions"][0]["id"])
     interview = admin_store.create_interview(
         candidate_name="测试候选人",
         job_uid=job["job_uid"],
-        duration_minutes=20,
         notes=None,
+        question_followups=[{"question_id": first_question_id, "max_followups": 0}],
     )
     return interview["token"]
 

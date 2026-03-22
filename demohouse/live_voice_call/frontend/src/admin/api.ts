@@ -35,7 +35,6 @@ export type JobDetail = {
 export type InterviewListItem = {
   token: string;
   candidate_name: string;
-  duration_minutes: number;
   question_count: number;
   notes?: string | null;
   status: string;
@@ -50,7 +49,6 @@ export type InterviewListItem = {
 export type InterviewDetail = {
   token: string;
   candidate_name: string;
-  duration_minutes: number;
   question_count: number;
   notes?: string | null;
   status: string;
@@ -62,7 +60,9 @@ export type InterviewDetail = {
   };
   selected_questions?: Array<{
     sort_order: number;
+    question_id: number;
     question: string;
+    max_followups: number;
   }>;
   required_checkins: CheckInKey[];
   interview_link: string;
@@ -150,7 +150,7 @@ export const adminApi = {
   createInterview: (payload: {
     candidate_name: string;
     job_uid: string;
-    duration_minutes: number;
+    question_followups: Array<{ question_id: number; max_followups: number }>;
     notes?: string;
     required_checkins?: CheckInKey[];
   }) =>

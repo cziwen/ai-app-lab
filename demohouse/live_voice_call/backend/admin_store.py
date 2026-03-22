@@ -1,6 +1,6 @@
 import hashlib
+import json
 import os
-import random
 import secrets
 import shutil
 import sqlite3
@@ -28,10 +28,11 @@ INTERVIEW_STATUS_COMPLETED = "completed"
 INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
 MAX_INTERRUPTION_COUNT = 3
-FIXED_INTRO_QUESTION_ID = "intro_fixed"
-FIXED_INTRO_QUESTION_TEXT = "请先做一个简短的自我介绍，包括你的学历和与岗位相关的经验。"
 CHECKIN_ORDER = ("speaker", "mic", "camera", "screen")
 DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
+FOLLOWUP_MIN = 0
+FOLLOWUP_MAX = 3
+DEFAULT_QUESTION_MAX_FOLLOWUPS = 0
 
 
 @dataclass
@@ -93,10 +94,11 @@ CREATE TABLE IF NOT EXISTS interviews (
   token TEXT PRIMARY KEY,
   candidate_name TEXT NOT NULL,
   job_uid TEXT NOT NULL,
-  duration_minutes INTEGER NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 0,
   question_count INTEGER NOT NULL,
   required_checkins TEXT NOT NULL DEFAULT 'speaker,mic',
   selected_question_ids TEXT NOT NULL,
+  question_followup_limits TEXT NOT NULL DEFAULT '',
   notes TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -165,6 +167,13 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE interviews SET required_checkins = 'speaker,mic' WHERE required_checkins IS NULL"
         )
+    if "question_followup_limits" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN question_followup_limits TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "UPDATE interviews SET question_followup_limits = '' WHERE question_followup_limits IS NULL"
+        )
 
     question_columns = {
         row["name"]
@@ -224,6 +233,69 @@ def parse_required_checkins(raw: Optional[str]) -> List[str]:
         return list(DEFAULT_REQUIRED_CHECKINS)
     values = {item.strip() for item in raw.split(",") if item.strip()}
     return [step for step in CHECKIN_ORDER if step in values]
+
+
+def _normalize_question_followups(
+    question_followups: Optional[Sequence[Dict[str, Any]]],
+    question_ids: Sequence[int],
+) -> Dict[int, int]:
+    expected_ids = list(question_ids)
+    expected_set = set(expected_ids)
+    if question_followups is None:
+        return {qid: DEFAULT_QUESTION_MAX_FOLLOWUPS for qid in expected_ids}
+    if isinstance(question_followups, str):
+        raise ValueError("invalid_question_followups")
+
+    parsed: Dict[int, int] = {}
+    for item in question_followups:
+        if not isinstance(item, dict):
+            raise ValueError("invalid_question_followups")
+        raw_qid = item.get("question_id")
+        raw_limit = item.get("max_followups")
+        if not isinstance(raw_qid, int) or raw_qid <= 0:
+            raise ValueError("invalid_question_followups")
+        if not isinstance(raw_limit, int):
+            raise ValueError("invalid_question_followups")
+        if raw_limit < FOLLOWUP_MIN or raw_limit > FOLLOWUP_MAX:
+            raise ValueError("invalid_question_followups")
+        if raw_qid in parsed:
+            raise ValueError("invalid_question_followups")
+        parsed[raw_qid] = raw_limit
+
+    if set(parsed.keys()) != expected_set:
+        raise ValueError("invalid_question_followups")
+    return parsed
+
+
+def _serialize_question_followups(question_followups: Dict[int, int]) -> str:
+    payload = {str(qid): max_followups for qid, max_followups in sorted(question_followups.items())}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _parse_question_followups(raw: Optional[str], question_ids: Sequence[int]) -> Dict[int, int]:
+    defaults = {qid: DEFAULT_QUESTION_MAX_FOLLOWUPS for qid in question_ids}
+    if not raw:
+        return defaults
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return defaults
+    if not isinstance(payload, dict):
+        return defaults
+
+    parsed: Dict[int, int] = {}
+    for key, value in payload.items():
+        try:
+            qid = int(str(key).strip())
+            max_followups = int(value)
+        except (TypeError, ValueError):
+            continue
+        if qid not in defaults:
+            continue
+        if max_followups < FOLLOWUP_MIN or max_followups > FOLLOWUP_MAX:
+            continue
+        parsed[qid] = max_followups
+    return {qid: parsed.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS) for qid in question_ids}
 
 
 def get_conn() -> sqlite3.Connection:
@@ -574,12 +646,6 @@ def delete_job_cascade(job_uid: str) -> bool:
     return True
 
 
-def calculate_question_count(duration_minutes: int, bank_count: int) -> int:
-    usable = max(duration_minutes - 5, 0)
-    planned = max(1, usable // 5)
-    return min(bank_count, planned)
-
-
 def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.Row]:
     return conn.execute(
         """
@@ -699,8 +765,8 @@ def resolve_all_interview_timeouts(
 def create_interview(
     candidate_name: str,
     job_uid: str,
-    duration_minutes: int,
     notes: Optional[str],
+    question_followups: Optional[Sequence[Dict[str, Any]]],
     required_checkins: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     now = utc_now_iso()
@@ -718,30 +784,32 @@ def create_interview(
         if not bank:
             raise ValueError("job_question_bank_empty")
 
-        question_count = calculate_question_count(duration_minutes, len(bank))
-        bank_ids = [int(item["id"]) for item in bank]
-        if question_count >= len(bank_ids):
-            selected_ids = bank_ids
-        else:
-            selected_ids = random.SystemRandom().sample(bank_ids, question_count)
+        selected_ids = [int(item["id"]) for item in bank]
+        question_count = len(selected_ids)
+        normalized_question_followups = _normalize_question_followups(
+            question_followups=question_followups,
+            question_ids=selected_ids,
+        )
+        serialized_question_followups = _serialize_question_followups(normalized_question_followups)
 
         token = _ensure_unique_interview_token(conn)
         conn.execute(
             """
             INSERT INTO interviews (
                 token, candidate_name, job_uid, duration_minutes, question_count, required_checkins,
-                selected_question_ids, notes, status, created_at, updated_at
+                selected_question_ids, question_followup_limits, notes, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
                 candidate_name,
                 job_uid,
-                duration_minutes,
+                0,
                 question_count,
                 serialized_checkins,
                 ",".join(str(i) for i in selected_ids),
+                serialized_question_followups,
                 notes,
                 INTERVIEW_STATUS_PENDING,
                 now,
@@ -755,9 +823,12 @@ def create_interview(
         "candidate_name": candidate_name,
         "job_uid": job_uid,
         "job_name": job["name"],
-        "duration_minutes": duration_minutes,
         "question_count": question_count,
         "required_checkins": normalized_checkins,
+        "question_followups": [
+            {"question_id": qid, "max_followups": normalized_question_followups[qid]}
+            for qid in selected_ids
+        ],
         "notes": notes,
         "status": INTERVIEW_STATUS_PENDING,
         "created_at": now,
@@ -786,7 +857,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
         ).fetchone()["c"]
         rows = conn.execute(
             f"""
-            SELECT i.token, i.candidate_name, i.duration_minutes, i.question_count,
+            SELECT i.token, i.candidate_name, i.question_count,
                    i.notes, i.status, i.created_at, i.completed_at, i.interruption_count,
                    j.job_uid, j.name AS job_name
             FROM interviews i
@@ -802,7 +873,6 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
         {
             "token": row["token"],
             "candidate_name": row["candidate_name"],
-            "duration_minutes": int(row["duration_minutes"]),
             "question_count": int(row["question_count"]),
             "notes": row["notes"],
             "status": row["status"],
@@ -854,6 +924,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             for chunk in (row["selected_question_ids"] or "").split(",")
             if chunk.strip().isdigit()
         ]
+        followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
         question_rows = _load_job_questions(conn, row["job_uid"])
         by_id = {int(item["id"]): item for item in question_rows}
         selected_questions = []
@@ -864,14 +935,15 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             selected_questions.append(
                 {
                     "sort_order": index + 1,
+                    "question_id": qid,
                     "question": question["question"],
+                    "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
                 }
             )
 
     return {
         "token": row["token"],
         "candidate_name": row["candidate_name"],
-        "duration_minutes": int(row["duration_minutes"]),
         "question_count": int(row["question_count"]),
         "notes": row["notes"],
         "status": row["status"],
@@ -920,7 +992,7 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
     with get_conn() as conn:
         row = conn.execute(
             """
-            SELECT i.token, i.candidate_name, i.duration_minutes, i.status, i.interruption_count,
+            SELECT i.token, i.candidate_name, i.status, i.interruption_count,
                    i.required_checkins,
                    j.job_uid, j.name AS job_name
             FROM interviews i
@@ -936,7 +1008,6 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
         return {
             "token": row["token"],
             "candidate_name": row["candidate_name"],
-            "duration_minutes": int(row["duration_minutes"]),
             "status": row["status"],
             "interruption_count": int(row["interruption_count"] or 0),
             "required_checkins": parse_required_checkins(row["required_checkins"]),
@@ -995,7 +1066,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.job_uid, i.status, i.selected_question_ids,
-                   i.reconnect_deadline_at, j.name AS job_name
+                   i.question_followup_limits, i.reconnect_deadline_at, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
             WHERE i.token = ?
@@ -1012,6 +1083,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             for chunk in (row["selected_question_ids"] or "").split(",")
             if chunk.strip().isdigit()
         ]
+        followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
         questions = _load_job_questions(conn, row["job_uid"])
         by_id = {int(item["id"]): item for item in questions}
 
@@ -1025,6 +1097,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                     "question_id": f"q{qid}",
                     "main_question": q["question"],
                     "evidence": _build_question_evidence(q),
+                    "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
                 }
             )
 
@@ -1035,17 +1108,11 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                         "question_id": f"q{int(q['id'])}",
                         "main_question": q["question"],
                         "evidence": _build_question_evidence(q),
+                        "max_followups": followup_limits.get(
+                            int(q["id"]), DEFAULT_QUESTION_MAX_FOLLOWUPS
+                        ),
                     }
                 )
-
-        selected_questions.insert(
-            0,
-            {
-                "question_id": FIXED_INTRO_QUESTION_ID,
-                "main_question": FIXED_INTRO_QUESTION_TEXT,
-                "evidence": {"must_cover": ["学历", "岗位相关经验"]},
-            },
-        )
 
         if row["status"] == INTERVIEW_STATUS_PENDING or row["reconnect_deadline_at"]:
             conn.execute(

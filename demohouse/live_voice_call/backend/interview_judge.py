@@ -32,7 +32,6 @@ class InterviewJudge:
     def __init__(
         self,
         coverage_threshold: float = 0.7,
-        max_followups_per_question: int = 1,
         llm_endpoint_id: Optional[str] = None,
         llm_thinking_type: str = "disabled",
         llm_reasoning_effort: Optional[str] = None,
@@ -42,7 +41,6 @@ class InterviewJudge:
         ] = None,
     ):
         self.coverage_threshold = coverage_threshold
-        self.max_followups_per_question = max_followups_per_question
         self.llm_endpoint_id = llm_endpoint_id
         self.llm_thinking_type = llm_thinking_type
         self.llm_reasoning_effort = llm_reasoning_effort
@@ -58,17 +56,7 @@ class InterviewJudge:
     ) -> Decision:
         answer = (candidate_answer or "").strip()
 
-        # Guard 1: follow-up upper bound -> force move forward.
-        if follow_up_count >= self.max_followups_per_question:
-            return Decision(
-                move_forward=True,
-                need_follow_up=False,
-                follow_up_question="",
-                reason="follow_up_limit_reached",
-                coverage_score=1.0,
-            )
-
-        # Guard 2: empty/too short answer -> prefer follow-up.
+        # Guard: empty/too short answer -> prefer follow-up.
         if len(answer) < 6:
             return Decision(
                 move_forward=False,

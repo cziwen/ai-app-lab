@@ -10,13 +10,13 @@ from interview_flow import (
     WRAP_UP,
     InterviewFlow,
 )
-from interview_judge import Decision, InterviewJudge
+from interview_judge import Decision
 
 
 QUESTIONS = [
-    {"question_id": "q1", "main_question": "请做一个简短自我介绍。"},
-    {"question_id": "q2", "main_question": "介绍一个你主导的项目。"},
-    {"question_id": "q3", "main_question": "讲讲你如何处理复杂问题。"},
+    {"question_id": "q1", "main_question": "请做一个简短自我介绍。", "max_followups": 2},
+    {"question_id": "q2", "main_question": "介绍一个你主导的项目。", "max_followups": 2},
+    {"question_id": "q3", "main_question": "讲讲你如何处理复杂问题。", "max_followups": 2},
 ]
 
 
@@ -88,21 +88,16 @@ def test_followup_loop_then_move_forward():
 
 def test_max_followups_forces_move_forward():
     async def _run():
-        async def _always_followup(*args, **kwargs):
-            return (
-                '{"move_forward": false, "need_follow_up": true, '
-                '"follow_up_question": "再具体一点", "reason": "mock", "coverage_score": 0.1}'
-            )
-
-        judge = InterviewJudge(
-            llm_decider=_always_followup,
-            max_followups_per_question=2,
+        judge = SequenceJudge(
+            decisions=[
+                Decision(False, True, "再具体一点", "mock", 0.1),
+                Decision(False, True, "还是不够具体", "mock", 0.1),
+                Decision(False, True, "请补充结果", "mock", 0.1),
+                Decision(True, False, "", "ok", 0.9),
+                Decision(True, False, "", "ok", 0.9),
+            ]
         )
-        flow = InterviewFlow(
-            questions=QUESTIONS,
-            judge=judge,
-            max_followups_per_question=2,
-        )
+        flow = InterviewFlow(questions=QUESTIONS, judge=judge)
 
         await _bootstrap_to_wait(flow)
         r1 = await flow.receive_candidate_answer("回答一：有点泛")
@@ -162,7 +157,9 @@ def test_intro_mentions_dynamic_question_count():
         judge = SequenceJudge(
             decisions=[Decision(True, False, "", "ok", 0.9)]
         )
-        one_question = [{"question_id": "q1", "main_question": "请做一个简短自我介绍。"}]
+        one_question = [
+            {"question_id": "q1", "main_question": "请做一个简短自我介绍。", "max_followups": 0}
+        ]
         flow = InterviewFlow(questions=one_question, judge=judge)
 
         intro = await flow.produce_interviewer_message()

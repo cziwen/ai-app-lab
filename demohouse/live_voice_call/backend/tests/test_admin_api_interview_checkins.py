@@ -33,6 +33,15 @@ def _client_with_login(monkeypatch, tmp_path: Path) -> TestClient:
     return client
 
 
+def _followups_for_job(job_uid: str):
+    detail = admin_store.get_job_detail(job_uid)
+    assert detail is not None
+    return [
+        {"question_id": int(question["id"]), "max_followups": 0}
+        for question in detail["questions"]
+    ]
+
+
 def test_create_interview_invalid_required_checkins_returns_400(monkeypatch, tmp_path):
     client = _client_with_login(monkeypatch, tmp_path)
     job = admin_store.create_job(
@@ -49,7 +58,7 @@ def test_create_interview_invalid_required_checkins_returns_400(monkeypatch, tmp
         json={
             "candidate_name": "张三",
             "job_uid": job["job_uid"],
-            "duration_minutes": 30,
+            "question_followups": _followups_for_job(job["job_uid"]),
             "required_checkins": ["speaker", "foo"],
         },
     )
@@ -70,8 +79,8 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
     interview = admin_store.create_interview(
         candidate_name="李四",
         job_uid=job["job_uid"],
-        duration_minutes=20,
         notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
         required_checkins=["speaker", "screen"],
     )
 
@@ -90,3 +99,27 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
         "speaker",
         "screen",
     ]
+
+
+def test_create_interview_invalid_question_followups_returns_400(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A"), ("题目B", "答案B")],
+    )
+    followups = _followups_for_job(job["job_uid"])
+    response = client.post(
+        "/api/admin/interviews",
+        json={
+            "candidate_name": "张三",
+            "job_uid": job["job_uid"],
+            "question_followups": followups[:1],
+            "required_checkins": ["speaker", "mic"],
+        },
+    )
+    assert response.status_code == 400
+    assert "question_followups" in response.json().get("detail", "")

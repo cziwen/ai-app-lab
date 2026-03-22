@@ -135,10 +135,15 @@ class LoginBody(BaseModel):
     password: str = Field(min_length=1)
 
 
+class QuestionFollowupBody(BaseModel):
+    question_id: int = Field(ge=1)
+    max_followups: int = Field(ge=0, le=3)
+
+
 class CreateInterviewBody(BaseModel):
     candidate_name: str = Field(min_length=1, max_length=100)
     job_uid: str = Field(min_length=1)
-    duration_minutes: int = Field(ge=5, le=180)
+    question_followups: List[QuestionFollowupBody] = Field(min_items=1)
     notes: Optional[str] = Field(default=None, max_length=1000)
     required_checkins: Optional[List[str]] = Field(default=None)
 
@@ -245,8 +250,8 @@ def create_admin_app() -> FastAPI:
             interview = create_interview(
                 candidate_name=body.candidate_name.strip(),
                 job_uid=body.job_uid.strip(),
-                duration_minutes=body.duration_minutes,
                 notes=(body.notes or "").strip() or None,
+                question_followups=[item.model_dump() for item in body.question_followups],
                 required_checkins=body.required_checkins,
             )
         except ValueError as e:
@@ -258,6 +263,11 @@ def create_admin_app() -> FastAPI:
                 raise HTTPException(
                     status_code=400,
                     detail="required_checkins 仅支持 speaker/mic/camera/screen",
+                )
+            if str(e) == "invalid_question_followups":
+                raise HTTPException(
+                    status_code=400,
+                    detail="question_followups 必须完整覆盖岗位题目，且 max_followups 取值范围为 0-3",
                 )
             raise
         interview["interview_link"] = build_interview_link(interview["token"])
@@ -274,7 +284,6 @@ def create_admin_app() -> FastAPI:
             "interview": {
                 "token": detail["token"],
                 "candidate_name": detail["candidate_name"],
-                "duration_minutes": detail["duration_minutes"],
                 "question_count": detail["question_count"],
                 "notes": detail["notes"],
                 "status": detail["status"],

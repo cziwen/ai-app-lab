@@ -21,22 +21,6 @@ async def _conflicting_json(*args, **kwargs):
     )
 
 
-def test_guard_overrides_llm():
-    async def _run():
-        judge = InterviewJudge(
-            llm_decider=_always_followup,
-            max_followups_per_question=2,
-        )
-        decision = await judge.decide(
-            question="介绍一个项目", candidate_answer="我做过很多", follow_up_count=2
-        )
-        assert decision.move_forward is True
-        assert decision.need_follow_up is False
-        assert decision.reason == "follow_up_limit_reached"
-
-    asyncio.run(_run())
-
-
 def test_empty_answer_prefers_followup():
     async def _run():
         judge = InterviewJudge(llm_decider=_always_followup)
