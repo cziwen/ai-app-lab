@@ -33,10 +33,17 @@ cp .env.example .env
 
 这一步会自动完成：
 
-- 构建并启动 `gateway/backend`
+- 低内存模式串行构建并启动 `backend -> gateway`（适配 2C2G）
+- 自动确保系统开启 swap（默认 `/swapfile`，大小 `2G`）
+- 前端构建默认注入 `NODE_OPTIONS=--max-old-space-size=640`，避免 OOM
 - 优先复用已有 Let’s Encrypt 证书（不存在时才申请）
 - 自动切换活动证书软链 `deploy/letsencrypt/live/__active__`
 - 校验并重载 Nginx
+
+可选参数（环境变量）：
+
+- `SWAPFILE_SIZE_GB=2`：swap 大小（单位 GB）
+- `FRONTEND_NODE_OPTIONS=--max-old-space-size=640`：前端构建 Node 堆上限
 
 若你刚升级了后端依赖（例如 `volcengine-python-sdk`），必须重建 backend 镜像：
 

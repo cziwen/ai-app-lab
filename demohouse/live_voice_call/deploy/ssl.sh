@@ -14,6 +14,9 @@ ENV_FILE="$PROJECT_DIR/.env"
 LE_LIVE_DIR="$PROJECT_DIR/deploy/letsencrypt/live"
 ACME_WEBROOT="/var/www/certbot"
 CRON_MARKER="# live-voice-ssl-renew"
+SWAPFILE_PATH="${SWAPFILE_PATH:-/swapfile}"
+SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-2}"
+FRONTEND_NODE_OPTIONS="${FRONTEND_NODE_OPTIONS:---max-old-space-size=640}"
 
 DOMAIN_OVERRIDE=""
 EMAIL_OVERRIDE=""
@@ -79,6 +82,51 @@ compose() {
   docker compose "$@"
 }
 
+compose_build_serial() {
+  if compose build --help 2>/dev/null | grep -q -- "--no-parallel"; then
+    compose build --no-parallel "$@"
+  else
+    echo "[ssl] docker compose build does not support --no-parallel, using COMPOSE_PARALLEL_LIMIT=1"
+    COMPOSE_PARALLEL_LIMIT=1 compose build "$@"
+  fi
+}
+
+ensure_swap() {
+  local current_swap
+  current_swap="$(swapon --show --bytes --noheadings 2>/dev/null || true)"
+  if [[ -n "$current_swap" ]]; then
+    echo "[ssl] Swap already enabled, skip creating swapfile"
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[ssl] Swap is disabled and current user is not root. Please enable swap manually." >&2
+    return 1
+  fi
+
+  local target_bytes
+  target_bytes=$((SWAPFILE_SIZE_GB * 1024 * 1024 * 1024))
+
+  if [[ ! -f "$SWAPFILE_PATH" ]]; then
+    echo "[ssl] Creating ${SWAPFILE_SIZE_GB}G swapfile at $SWAPFILE_PATH"
+    if command -v fallocate >/dev/null 2>&1; then
+      fallocate -l "$target_bytes" "$SWAPFILE_PATH"
+    else
+      dd if=/dev/zero of="$SWAPFILE_PATH" bs=1M count=$((SWAPFILE_SIZE_GB * 1024))
+    fi
+    chmod 600 "$SWAPFILE_PATH"
+    mkswap "$SWAPFILE_PATH"
+  fi
+
+  echo "[ssl] Enabling swapfile $SWAPFILE_PATH"
+  swapon "$SWAPFILE_PATH"
+
+  if ! grep -qE "^[^#]*[[:space:]]$SWAPFILE_PATH[[:space:]]" /etc/fstab 2>/dev/null; then
+    echo "$SWAPFILE_PATH none swap sw 0 0" >> /etc/fstab
+    echo "[ssl] Added swapfile to /etc/fstab"
+  fi
+}
+
 pick_latest_cert_dir() {
   local domain="$1"
   local candidates=()
@@ -136,8 +184,18 @@ run_init() {
   domain="$(resolve_domain)"
   email="$(resolve_email)"
 
-  echo "[ssl] Starting gateway/backend"
-  compose up -d --build gateway backend
+  echo "[ssl] Ensuring swap for low-memory deployment"
+  ensure_swap
+
+  echo "[ssl] Building backend (serial)"
+  compose_build_serial backend
+  echo "[ssl] Starting backend"
+  compose up -d backend
+
+  echo "[ssl] Building gateway (serial, FRONTEND_NODE_OPTIONS=$FRONTEND_NODE_OPTIONS)"
+  compose_build_serial --build-arg FRONTEND_NODE_OPTIONS="$FRONTEND_NODE_OPTIONS" gateway
+  echo "[ssl] Starting gateway"
+  compose up -d gateway
 
   local existing_cert
   existing_cert="$(pick_latest_cert_dir "$domain" || true)"
