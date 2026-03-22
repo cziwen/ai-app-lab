@@ -5,7 +5,7 @@ WORKDIR /app/frontend
 RUN corepack enable
 
 # Keep frontend build memory bounded on low-memory servers.
-ARG FRONTEND_NODE_OPTIONS="--max-old-space-size=640"
+ARG FRONTEND_NODE_OPTIONS="--max-old-space-size=512"
 ENV NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}"
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./

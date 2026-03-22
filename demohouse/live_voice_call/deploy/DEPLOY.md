@@ -35,7 +35,8 @@ cp .env.example .env
 
 - 低内存模式串行构建并启动 `backend -> gateway`（适配 2C2G）
 - 自动确保系统开启 swap（默认 `/swapfile`，大小 `2G`）
-- 前端构建默认注入 `NODE_OPTIONS=--max-old-space-size=640`，避免 OOM
+- 部署前先停本项目容器；默认额外停非本项目运行中的容器，优先腾内存
+- 前端构建默认注入 `NODE_OPTIONS=--max-old-space-size=512`，避免 OOM
 - 优先复用已有 Let’s Encrypt 证书（不存在时才申请）
 - 自动切换活动证书软链 `deploy/letsencrypt/live/__active__`
 - 校验并重载 Nginx
@@ -43,7 +44,14 @@ cp .env.example .env
 可选参数（环境变量）：
 
 - `SWAPFILE_SIZE_GB=2`：swap 大小（单位 GB）
-- `FRONTEND_NODE_OPTIONS=--max-old-space-size=640`：前端构建 Node 堆上限
+- `FRONTEND_NODE_OPTIONS=--max-old-space-size=512`：前端构建 Node 堆上限
+- `STOP_NONESSENTIAL_CONTAINERS_DEFAULT=1`：`init` 时默认停非本项目容器
+- `STOP_EXTRA_PROCESSES_DEFAULT=0`：是否默认停额外宿主进程（例如 `vscode-server`）
+
+可选参数（命令行）：
+
+- `--no-stop-nonessential`：保留其它容器，不执行自动清场
+- `--stop-extra-processes`：按 `EXTRA_STOP_PATTERNS` 临时停止额外宿主进程
 
 若你刚升级了后端依赖（例如 `volcengine-python-sdk`），必须重建 backend 镜像：
 

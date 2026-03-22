@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-}"
 if [[ -z "$MODE" ]]; then
-  echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+  echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [extra renew args]"
   exit 1
 fi
 shift || true
@@ -16,11 +16,16 @@ ACME_WEBROOT="/var/www/certbot"
 CRON_MARKER="# live-voice-ssl-renew"
 SWAPFILE_PATH="${SWAPFILE_PATH:-/swapfile}"
 SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-2}"
-FRONTEND_NODE_OPTIONS="${FRONTEND_NODE_OPTIONS:---max-old-space-size=640}"
+FRONTEND_NODE_OPTIONS="${FRONTEND_NODE_OPTIONS:---max-old-space-size=512}"
+STOP_NONESSENTIAL_CONTAINERS_DEFAULT="${STOP_NONESSENTIAL_CONTAINERS_DEFAULT:-1}"
+STOP_EXTRA_PROCESSES_DEFAULT="${STOP_EXTRA_PROCESSES_DEFAULT:-0}"
+EXTRA_STOP_PATTERNS="${EXTRA_STOP_PATTERNS:-code-server|vscode-server|AliYunDunMonito|aegis_cli}"
 
 DOMAIN_OVERRIDE=""
 EMAIL_OVERRIDE=""
 EXTRA_ARGS=()
+STOP_NONESSENTIAL_CONTAINERS="$STOP_NONESSENTIAL_CONTAINERS_DEFAULT"
+STOP_EXTRA_PROCESSES="$STOP_EXTRA_PROCESSES_DEFAULT"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +36,22 @@ while [[ $# -gt 0 ]]; do
     --email)
       EMAIL_OVERRIDE="${2:-}"
       shift 2
+      ;;
+    --stop-nonessential)
+      STOP_NONESSENTIAL_CONTAINERS="1"
+      shift
+      ;;
+    --no-stop-nonessential)
+      STOP_NONESSENTIAL_CONTAINERS="0"
+      shift
+      ;;
+    --stop-extra-processes)
+      STOP_EXTRA_PROCESSES="1"
+      shift
+      ;;
+    --no-stop-extra-processes)
+      STOP_EXTRA_PROCESSES="0"
+      shift
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -82,6 +103,16 @@ compose() {
   docker compose "$@"
 }
 
+print_precheck() {
+  echo "[ssl] ===== Precheck ====="
+  free -h || true
+  echo "[ssl] ----- swap -----"
+  swapon --show || true
+  echo "[ssl] ----- running containers -----"
+  docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' || true
+  echo "[ssl] ===================="
+}
+
 compose_build_serial() {
   if compose build --help 2>/dev/null | grep -q -- "--no-parallel"; then
     compose build --no-parallel "$@"
@@ -89,6 +120,56 @@ compose_build_serial() {
     echo "[ssl] docker compose build does not support --no-parallel, using COMPOSE_PARALLEL_LIMIT=1"
     COMPOSE_PARALLEL_LIMIT=1 compose build "$@"
   fi
+}
+
+stop_project_containers() {
+  echo "[ssl] Stopping current project containers (gateway/backend/certbot) to free memory"
+  compose stop gateway backend certbot || true
+}
+
+stop_nonessential_containers() {
+  if [[ "$STOP_NONESSENTIAL_CONTAINERS" != "1" ]]; then
+    echo "[ssl] Skip stopping nonessential containers (STOP_NONESSENTIAL_CONTAINERS=0)"
+    return 0
+  fi
+
+  local keep_regex='^(live-voice-backend|live-voice-gateway|live-voice-certbot)$'
+  local names=()
+  local ids=()
+  local line
+  while IFS='|' read -r line; do
+    [[ -z "$line" ]] && continue
+    local id="${line%%|*}"
+    local name="${line#*|}"
+    if [[ "$name" =~ $keep_regex ]]; then
+      continue
+    fi
+    names+=("$name")
+    ids+=("$id")
+  done < <(docker ps --format '{{.ID}}|{{.Names}}')
+
+  if [[ ${#ids[@]} -eq 0 ]]; then
+    echo "[ssl] No nonessential running containers"
+    return 0
+  fi
+
+  echo "[ssl] Stopping nonessential containers: ${names[*]}"
+  docker stop "${ids[@]}" || true
+}
+
+stop_extra_processes() {
+  if [[ "$STOP_EXTRA_PROCESSES" != "1" ]]; then
+    echo "[ssl] Skip stopping extra host processes (STOP_EXTRA_PROCESSES=0)"
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[ssl] Cannot stop extra processes without root, skipping"
+    return 0
+  fi
+
+  echo "[ssl] Stopping extra host processes by pattern: $EXTRA_STOP_PATTERNS"
+  pkill -f "$EXTRA_STOP_PATTERNS" || true
 }
 
 ensure_swap() {
@@ -184,6 +265,11 @@ run_init() {
   domain="$(resolve_domain)"
   email="$(resolve_email)"
 
+  print_precheck
+  stop_project_containers
+  stop_nonessential_containers
+  stop_extra_processes
+
   echo "[ssl] Ensuring swap for low-memory deployment"
   ensure_swap
 
@@ -265,7 +351,7 @@ case "$MODE" in
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [extra renew args]"
+    echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [extra renew args]"
     exit 1
     ;;
 esac
