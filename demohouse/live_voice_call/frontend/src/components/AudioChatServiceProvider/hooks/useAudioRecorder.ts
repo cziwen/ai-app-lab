@@ -17,6 +17,12 @@ import { EventType } from '@/types';
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
 
+const AUDIO_TRACK_SET = {
+  autoGainControl: true,
+  echoCancellation: true,
+  noiseSuppression: true,
+};
+
 export const useAudioRecorder = () => {
   const {
     serviceRef,
@@ -109,6 +115,7 @@ export const useAudioRecorder = () => {
 
     const recorder = Recorder({
       type: 'unknown',
+      audioTrackSet: AUDIO_TRACK_SET,
       onProcess: (
         buffers: (Int16Array | null)[],
         powerLevel: unknown,
