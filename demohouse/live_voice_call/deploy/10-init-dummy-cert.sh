@@ -17,5 +17,11 @@ if [ ! -f "$FULLCHAIN" ] || [ ! -f "$PRIVKEY" ]; then
     -subj "/CN=bootstrap.invalid"
 fi
 
+# Do not override a valid active certificate selected by ssl.sh activate/init.
+if [ -f "$ACTIVE_LINK/fullchain.pem" ] && [ -f "$ACTIVE_LINK/privkey.pem" ]; then
+  echo "[init-cert] Existing active certificate detected, keep current link: $ACTIVE_LINK"
+  exit 0
+fi
+
 ln -sfn "$BOOT_DIR" "$ACTIVE_LINK"
-echo "[init-cert] Active certificate link prepared: $ACTIVE_LINK -> $BOOT_DIR"
+echo "[init-cert] Active certificate link prepared (fallback): $ACTIVE_LINK -> $BOOT_DIR"
