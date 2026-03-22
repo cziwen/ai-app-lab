@@ -9,7 +9,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. 
 
-import { useContext, useEffect } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
 import { Message } from '@arco-design/web-react';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
@@ -65,8 +65,37 @@ export const useVoiceBotService = () => {
 
   const { wsUrl } = useWsUrl();
   const { token } = useSessionAuth();
+  const ttsDoneRef = useRef(false);
+  const playbackStoppedRef = useRef(false);
+  const botTurnStartedRef = useRef(false);
 
   const { log } = useLogContent();
+  const clearRecorderGate = () => {
+    ttsDoneRef.current = false;
+    playbackStoppedRef.current = false;
+    botTurnStartedRef.current = false;
+  };
+
+  const resetRecorderGateForBotTurn = () => {
+    ttsDoneRef.current = false;
+    playbackStoppedRef.current = false;
+    botTurnStartedRef.current = true;
+  };
+
+  const maybeStartRecorder = () => {
+    if (!wsReadyRef.current) {
+      return;
+    }
+    if (!ttsDoneRef.current || !playbackStoppedRef.current) {
+      return;
+    }
+    setCurrentUserSentence('');
+    setCurrentBotSentence('');
+    recStart();
+    log('gate: recorder started');
+    clearRecorderGate();
+  };
+
   const parseBotError = (payload?: Record<string, any> | BotErrorPayload) => {
     const error = (payload as BotErrorPayload | undefined)?.error;
     const message =
@@ -121,11 +150,13 @@ export const useVoiceBotService = () => {
 
   const resetWsState = () => {
     wsReadyRef.current = false;
+    clearRecorderGate();
     setWsConnected(false);
     setUserSpeaking(false);
   };
 
   const resetMediaState = () => {
+    clearRecorderGate();
     setBotSpeaking(false);
     setBotAudioPlaying(false);
     setBotAudioLevel(0);
@@ -173,9 +204,9 @@ export const useVoiceBotService = () => {
         if (!wsReadyRef.current) {
           return;
         }
-        setCurrentUserSentence('');
-        setCurrentBotSentence('');
-        recStart();
+        playbackStoppedRef.current = true;
+        log('gate: playback stopped');
+        maybeStartRecorder();
       },
       onClose: () => {
         log('ws closed');
@@ -205,6 +236,9 @@ export const useVoiceBotService = () => {
             ]);
             break;
           case EventType.TTSSentenceStart:
+            if (!botTurnStartedRef.current) {
+              resetRecorderGateForBotTurn();
+            }
             const sentence =
               (payload as { sentence?: string } | undefined)?.sentence || '';
             setCurrentBotSentence(prevSentence => prevSentence + sentence);
@@ -265,6 +299,9 @@ export const useVoiceBotService = () => {
           }
           case EventType.TTSDone:
             setBotSpeaking(false);
+            ttsDoneRef.current = true;
+            log('gate: tts done');
+            maybeStartRecorder();
             if (configNeedUpdateRef.current) {
               handleBotUpdateConfig();
               configNeedUpdateRef.current = false;
