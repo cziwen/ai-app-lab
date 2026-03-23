@@ -29,6 +29,7 @@ const DEFAULT_SCRIPT: MockCallScript[] = [
   },
 ];
 const AUTO_REDIRECT_SECONDS = 15;
+const SPEAKING_LEVEL_THRESHOLD = 0.18;
 type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
 const formatDuration = (seconds: number) => {
@@ -65,6 +66,9 @@ const isDebugAllowed = (search: string): boolean => {
   const params = new URLSearchParams(search);
   return params.get('token') === 'DEBUG';
 };
+
+const meetsLevel = (level?: number): boolean =>
+  (level ?? 0) >= SPEAKING_LEVEL_THRESHOLD;
 
 export const useCallController = (): CallController => {
   const navigate = useNavigate();
@@ -306,14 +310,15 @@ export const useCallController = (): CallController => {
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
   const isInCall = mode === 'mock' ? mockInCall : realInCall;
+  const interviewerActive = botSpeaking || botAudioPlaying;
   const interviewerSpeaking =
     mode === 'mock'
       ? mockBotSentence.length > 0
-      : botSpeaking || botAudioPlaying;
+      : interviewerActive && meetsLevel(botAudioLevel);
   const candidateSpeaking =
     mode === 'mock'
       ? mockUserSentence.length > 0 && mockBotSentence.length === 0
-      : userSpeaking;
+      : userSpeaking && meetsLevel(userAudioLevel);
   const micOn = mode === 'mock' ? mockMicOn : userSpeaking;
   const transcripts =
     mode === 'mock' ? mockMessages : toTranscriptItems(chatMessages);

@@ -123,6 +123,9 @@ export interface CallParticipantCardProps {
   participant: CallParticipant;
   speaking?: boolean;
   audioLevel?: number;
+  variant?: 'main' | 'pip';
+  mirrored?: boolean;
+  onClick?: () => void;
 }
 
 export interface CallControlBarProps {
