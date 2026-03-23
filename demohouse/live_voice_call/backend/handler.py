@@ -251,8 +251,7 @@ class AdmissionController:
     ) -> Tuple[bool, Optional[QueueWaiter], bool]:
         async with self._lock:
             if token in self.active_tokens:
-                self.active_counts[token] = self.active_counts.get(token, 0) + 1
-                return True, None, False
+                return False, None, True
             if len(self.active_tokens) < self.max_active:
                 self.active_tokens.add(token)
                 self.active_counts[token] = 1
@@ -485,7 +484,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         duplicate_waiting_payload = BotErrorPayload(
             error=ErrorEvent(
                 code="TOKEN_ALREADY_WAITING",
-                message="该面试链接已在排队中，请不要重复打开多个页面。",
+                message="该面试链接已在其他页面打开，请勿重复打开多个页面。",
             )
         )
         await websocket.send(

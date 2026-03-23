@@ -425,3 +425,41 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "worst_standard" in question_columns
     assert "output_format" in question_columns
     assert "question_followup_limits" in interview_columns
+    assert "expires_at" in interview_columns
+
+
+def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with admin_store.get_conn() as conn:
+        conn.execute(
+            "UPDATE interviews SET expires_at = ? WHERE token = ?",
+            (expired, token),
+        )
+        conn.commit()
+
+    assert admin_store.get_public_access(token) is None
+    assert admin_store.start_interview_session(token) is None
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["status"] == admin_store.INTERVIEW_STATUS_FAILED

@@ -179,3 +179,24 @@ def test_handler_close_source_asr_upstream(monkeypatch):
         )
 
     asyncio.run(_run())
+
+
+def test_admission_controller_rejects_same_token_concurrent():
+    async def _run():
+        admission = handler.AdmissionController(max_active=5)
+        admitted_first, waiter_first, duplicated_first = await admission.acquire_or_enqueue(
+            "INT-SAME-TOKEN"
+        )
+        admitted_second, waiter_second, duplicated_second = await admission.acquire_or_enqueue(
+            "INT-SAME-TOKEN"
+        )
+
+        assert admitted_first is True
+        assert waiter_first is None
+        assert duplicated_first is False
+
+        assert admitted_second is False
+        assert waiter_second is None
+        assert duplicated_second is True
+
+    asyncio.run(_run())

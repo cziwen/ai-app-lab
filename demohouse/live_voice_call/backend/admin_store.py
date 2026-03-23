@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from arkitect.telemetry.logger import INFO
+from interview_cache import CACHE_MISS, InterviewTokenCache
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -33,6 +34,9 @@ DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
 FOLLOWUP_MIN = 0
 FOLLOWUP_MAX = 3
 DEFAULT_QUESTION_MAX_FOLLOWUPS = 0
+INTERVIEW_TOKEN_TTL_HOURS = 24
+
+INTERVIEW_CACHE = InterviewTokenCache()
 
 
 @dataclass
@@ -103,6 +107,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
   completed_at TEXT,
   interruption_count INTEGER NOT NULL DEFAULT 0,
   reconnect_deadline_at TEXT,
@@ -125,6 +130,23 @@ CREATE TABLE IF NOT EXISTS interview_turns (
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _compute_interview_expires_at(created_at_iso: str) -> str:
+    created_at = parse_iso_or_none(created_at_iso) or datetime.now(timezone.utc)
+    return (created_at + timedelta(hours=INTERVIEW_TOKEN_TTL_HOURS)).isoformat()
+
+
+def _is_interview_expired(expires_at: Optional[str], now: datetime) -> bool:
+    parsed = parse_iso_or_none(expires_at)
+    if not parsed:
+        return False
+    return now >= parsed
+
+
+def _invalidate_interview_cache(token: str) -> None:
+    if token:
+        INTERVIEW_CACHE.invalidate(token)
 
 
 def parse_iso_or_none(value: Optional[str]) -> Optional[datetime]:
@@ -173,6 +195,18 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             "UPDATE interviews SET question_followup_limits = '' WHERE question_followup_limits IS NULL"
+        )
+    if "expires_at" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN expires_at TEXT"
+        )
+    expires_rows = conn.execute(
+        "SELECT token, created_at FROM interviews WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
+    ).fetchall()
+    for row in expires_rows:
+        conn.execute(
+            "UPDATE interviews SET expires_at = ? WHERE token = ?",
+            (_compute_interview_expires_at(row["created_at"]), row["token"]),
         )
 
     question_columns = {
@@ -642,6 +676,7 @@ def delete_job_cascade(job_uid: str) -> bool:
         conn.commit()
 
     for interview in interview_rows:
+        _invalidate_interview_cache(interview["token"])
         _delete_interview_assets(interview["token"])
     return True
 
@@ -688,7 +723,7 @@ def _resolve_interview_timeout_in_conn(
 ) -> Optional[sqlite3.Row]:
     row = conn.execute(
         """
-        SELECT token, status, interruption_count, reconnect_deadline_at
+        SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
         FROM interviews
         WHERE token = ?
         """,
@@ -698,6 +733,25 @@ def _resolve_interview_timeout_in_conn(
         return None
 
     status = row["status"]
+    if _is_interview_active(status) and _is_interview_expired(row["expires_at"], now):
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_STATUS_FAILED, None, now.isoformat(), token),
+        )
+        _invalidate_interview_cache(token)
+        return conn.execute(
+            """
+            SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
+            FROM interviews
+            WHERE token = ?
+            """,
+            (token,),
+        ).fetchone()
+
     if _is_interview_terminal(status):
         return row
 
@@ -718,9 +772,10 @@ def _resolve_interview_timeout_in_conn(
         """,
         (next_count, None, next_status, now.isoformat(), token),
     )
+    _invalidate_interview_cache(token)
     return conn.execute(
         """
-        SELECT token, status, interruption_count, reconnect_deadline_at
+        SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
         FROM interviews
         WHERE token = ?
         """,
@@ -747,8 +802,7 @@ def resolve_all_interview_timeouts(
             """
             SELECT token
             FROM interviews
-            WHERE reconnect_deadline_at IS NOT NULL
-              AND status IN (?, ?)
+            WHERE status IN (?, ?)
             """,
             (INTERVIEW_STATUS_PENDING, INTERVIEW_STATUS_IN_PROGRESS),
         ).fetchall()
@@ -770,6 +824,7 @@ def create_interview(
     required_checkins: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     now = utc_now_iso()
+    expires_at = _compute_interview_expires_at(now)
     normalized_checkins = normalize_required_checkins(required_checkins)
     serialized_checkins = serialize_required_checkins(normalized_checkins)
     with get_conn() as conn:
@@ -797,9 +852,10 @@ def create_interview(
             """
             INSERT INTO interviews (
                 token, candidate_name, job_uid, duration_minutes, question_count, required_checkins,
-                selected_question_ids, question_followup_limits, notes, status, created_at, updated_at
+                selected_question_ids, question_followup_limits, notes, status, created_at, updated_at,
+                expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -814,9 +870,11 @@ def create_interview(
                 INTERVIEW_STATUS_PENDING,
                 now,
                 now,
+                expires_at,
             ),
         )
         conn.commit()
+    _invalidate_interview_cache(token)
 
     return {
         "token": token,
@@ -832,6 +890,7 @@ def create_interview(
         "notes": notes,
         "status": INTERVIEW_STATUS_PENDING,
         "created_at": now,
+        "expires_at": expires_at,
     }
 
 
@@ -859,6 +918,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             f"""
             SELECT i.token, i.candidate_name, i.question_count,
                    i.notes, i.status, i.created_at, i.completed_at, i.interruption_count,
+                   i.expires_at,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -879,6 +939,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             "interruption_count": int(row["interruption_count"] or 0),
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
+            "expires_at": row["expires_at"],
             "job": {
                 "job_uid": row["job_uid"],
                 "name": row["job_name"],
@@ -950,6 +1011,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "interruption_count": int(row["interruption_count"] or 0),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "expires_at": row["expires_at"],
         "completed_at": row["completed_at"],
         "reconnect_deadline_at": row["reconnect_deadline_at"],
         "candidate_audio_path": row["candidate_audio_path"],
@@ -982,17 +1044,23 @@ def delete_interview(token: str) -> bool:
             return False
         conn.execute("DELETE FROM interviews WHERE token = ?", (token,))
         conn.commit()
+    _invalidate_interview_cache(token)
 
     _delete_interview_assets(token)
     return True
 
 
 def get_public_access(token: str) -> Optional[Dict[str, object]]:
+    cached = INTERVIEW_CACHE.get_public_access(token)
+    if cached is not CACHE_MISS:
+        return cached
+
     resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.status, i.interruption_count,
+                   i.expires_at,
                    i.required_checkins,
                    j.job_uid, j.name AS job_name
             FROM interviews i
@@ -1002,10 +1070,15 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
             (token,),
         ).fetchone()
         if not row:
+            INTERVIEW_CACHE.set_public_access(token, None, expires_at=None)
             return None
         if not _is_interview_active(row["status"]):
+            INTERVIEW_CACHE.set_public_access(token, None, expires_at=row["expires_at"])
             return None
-        return {
+        if _is_interview_expired(row["expires_at"], datetime.now(timezone.utc)):
+            INTERVIEW_CACHE.set_public_access(token, None, expires_at=row["expires_at"])
+            return None
+        payload = {
             "token": row["token"],
             "candidate_name": row["candidate_name"],
             "status": row["status"],
@@ -1016,17 +1089,32 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
                 "name": row["job_name"],
             },
         }
+        INTERVIEW_CACHE.set_public_access(token, payload, expires_at=row["expires_at"])
+        return payload
 
 
 def interview_exists(token: str) -> bool:
     if not token:
         return False
+    cached = INTERVIEW_CACHE.get_exists(token)
+    if cached is not None:
+        return cached
+
+    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT token FROM interviews WHERE token = ?",
+            "SELECT token, expires_at FROM interviews WHERE token = ?",
             (token,),
         ).fetchone()
-    return bool(row)
+    exists = bool(
+        row
+        and not _is_interview_expired(
+            row["expires_at"],
+            datetime.now(timezone.utc),
+        )
+    )
+    INTERVIEW_CACHE.set_exists(token, exists, expires_at=row["expires_at"] if row else None)
+    return exists
 
 
 def _keywords_from_reference(reference: str) -> List[str]:
@@ -1066,7 +1154,8 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.job_uid, i.status, i.selected_question_ids,
-                   i.question_followup_limits, i.reconnect_deadline_at, j.name AS job_name
+                   i.question_followup_limits, i.reconnect_deadline_at, i.expires_at,
+                   j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
             WHERE i.token = ?
@@ -1076,6 +1165,8 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         if not row:
             return None
         if not _is_interview_active(row["status"]):
+            return None
+        if _is_interview_expired(row["expires_at"], datetime.now(timezone.utc)):
             return None
 
         selected_ids = [
@@ -1124,6 +1215,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                 (INTERVIEW_STATUS_IN_PROGRESS, None, now, token),
             )
             conn.commit()
+            _invalidate_interview_cache(token)
 
     return InterviewSessionData(
         token=row["token"],
@@ -1233,6 +1325,7 @@ def mark_interview_completed(token: str) -> None:
             (INTERVIEW_STATUS_COMPLETED, now, None, now, token),
         )
         conn.commit()
+    _invalidate_interview_cache(token)
 
 
 def mark_interview_disconnected(token: str, grace_seconds: int = 30) -> bool:
@@ -1256,6 +1349,7 @@ def mark_interview_disconnected(token: str, grace_seconds: int = 30) -> bool:
             (INTERVIEW_STATUS_IN_PROGRESS, deadline, now.isoformat(), token),
         )
         conn.commit()
+    _invalidate_interview_cache(token)
     return True
 
 

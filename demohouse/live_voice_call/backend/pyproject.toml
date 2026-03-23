@@ -12,6 +12,7 @@ volcengine-python-sdk = "==5.0.19"
 fastapi = ">=0.116.0,<0.117.0"
 uvicorn = ">=0.29.0,<0.30.0"
 python-multipart = ">=0.0.20,<0.0.21"
+redis = ">=5.0.0,<6.0.0"
 
 
 

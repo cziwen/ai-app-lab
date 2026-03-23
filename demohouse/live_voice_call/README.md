@@ -98,6 +98,10 @@
     export TTS_APP_ID={YOUR_TTS_APP_ID}
     export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
     export TTS_SPEAKER={YOUR_TTS_SPEAKER}  # 音色配置
+
+    # Redis（必填，后端启动自检强依赖）
+    # 本机直跑后端：
+    export REDIS_URL=redis://127.0.0.1:6379/0
     ```
 
     **深度思考配置（可选）**：
@@ -150,6 +154,27 @@
 
 3. 启动服务端
 
+    先确保本机 Redis 已启动并满足配置要求：
+
+    ```shell
+    # 安装（仅首次）
+    brew install redis
+
+    # 后台启动 Redis
+    brew services start redis
+
+    # 后台关闭 Redis
+    # brew services stop redis
+
+    # 限制内存并设置淘汰策略（启动自检会校验）
+    redis-cli CONFIG SET maxmemory 268435456
+    redis-cli CONFIG SET maxmemory-policy allkeys-lru
+    redis-cli CONFIG REWRITE
+
+    # 健康检查
+    redis-cli -h 127.0.0.1 -p 6379 ping
+    ```
+
     ```shell
     cd demohouse/live_voice_call/backend
 
@@ -167,9 +192,10 @@
    docker compose up -d --build backend
    ```
 
-   后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS` 开机自检。
+   后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS + Redis` 开机自检。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
+   Redis 也是强依赖：`REDIS_URL` 缺失、Redis 未启动、或 Redis 配置不满足（`maxmemory=256MB` 且 `maxmemory-policy=allkeys-lru`）都会启动失败。
    若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：
    - 面试 WebSocket：`ws://0.0.0.0:8888`
@@ -208,6 +234,14 @@
     # 编辑 .env，填入真实凭据与参数
     ```
 
+   Redis 必填配置：
+
+   ```shell
+   REDIS_URL=redis://redis:6379/0
+   ```
+
+   说明：在 Docker Compose 网络内，`redis` 是服务名；不要写 `127.0.0.1`。
+
 3. 启动服务
 
     ```shell
@@ -235,6 +269,10 @@
   - WebSocket：`8888`（通过 `/ws` 代理）
   - 前端日志：`8889`（通过 `/api/frontend-logs` 代理）
   - Admin API：`8890`（通过 `/api/*` 代理）
+- `redis` 仅在容器网络内提供缓存服务：
+  - 服务端口：`6379`
+  - 固定内存上限：`256MB`
+  - 淘汰策略：`allkeys-lru`
 
 ### 常用运维命令
 

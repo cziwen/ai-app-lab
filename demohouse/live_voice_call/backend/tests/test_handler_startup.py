@@ -14,6 +14,7 @@ def _ok_report():
             "llm2": CheckResult(ok=True, detail="LLM2 ok"),
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
+            "redis": CheckResult(ok=True, detail="Redis ok"),
         },
         errors={},
     )
@@ -27,6 +28,7 @@ def _fail_report():
             "llm2": CheckResult(ok=True, detail="LLM2 ok"),
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
+            "redis": CheckResult(ok=True, detail="Redis ok"),
         },
         errors={"llm1": "missing key"},
     )

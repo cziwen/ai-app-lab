@@ -24,6 +24,13 @@ cp .env.example .env
 - `PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in`
 - `LETSENCRYPT_EMAIL=2377963631@qq.com`（建议填写你常用且可收邮件的邮箱，用于到期提醒）
 - 业务凭据 `ARK_API_KEY`、`LLM1_ENDPOINT_ID`、`LLM2_ENDPOINT_ID`、`ASR_*`、`TTS_*`
+- Redis 配置 `REDIS_URL=redis://redis:6379/0`（必填）
+
+说明：
+- 本项目后端启动前会执行 `LLM1 + LLM2 + ASR + TTS + Redis` 自检，任一失败即退出。
+- Redis 是强依赖，且会校验容器内 Redis 配置：
+  - `maxmemory = 268435456`（256MB）
+  - `maxmemory-policy = allkeys-lru`
 
 ## 第二步：一键初始化 HTTPS
 
@@ -110,7 +117,14 @@ openssl s_client -connect smartinterview.cn:443 -servername smartinterview.cn </
 
 3. 后端未启动
 - 查看：`docker compose logs -f backend`
-- 先修复 `.env` 中 LLM/ASR/TTS 凭据
+- 先修复 `.env` 中 LLM/ASR/TTS/REDIS 凭据
+- 若日志出现 `redis ... Connection refused`：
+  - 执行：`docker compose ps redis`
+  - 执行：`docker compose logs -f redis`
+- 若日志出现 `Redis config invalid`：
+  - 执行：`docker compose exec redis redis-cli CONFIG GET maxmemory`
+  - 执行：`docker compose exec redis redis-cli CONFIG GET maxmemory-policy`
+  - 预期分别为 `268435456` 与 `allkeys-lru`
 
 4. 出现 `AsyncArk ... no attribute responses`
 - 说明 backend 容器仍在使用旧版 SDK（镜像未重建或 lock 未生效）
