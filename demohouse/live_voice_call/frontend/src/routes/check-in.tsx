@@ -672,8 +672,8 @@ export const CheckInPage = () => {
     }
 
     const tracks = [
-      ...(audioStream?.getAudioTracks() || []),
-      ...(videoStream?.getVideoTracks() || []),
+      ...(audioStream?.getAudioTracks().map(track => track.clone()) || []),
+      ...(videoStream?.getVideoTracks().map(track => track.clone()) || []),
     ];
     if (tracks.length > 0) {
       const mergedStream = new MediaStream(tracks);
@@ -698,9 +698,7 @@ export const CheckInPage = () => {
       }
       await validateBeforeEnter();
       setSelectedMicId(selectedMic.trim());
-      stopStream(mediaStreamsRef.current.userMedia);
-      mediaStreamsRef.current.userMedia = null;
-      logCheckin('release precheck userMedia before enter');
+      logCheckin('keep precheck userMedia for interview page preview');
       setCheckInPassed(true);
       navigate(`/${location.search}`);
     } catch (error) {
