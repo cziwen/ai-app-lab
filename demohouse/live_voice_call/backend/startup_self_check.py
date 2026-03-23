@@ -11,6 +11,8 @@ from ark_responses_adapter import (
     detect_responses_capability,
     normalize_stage_config,
 )
+from redis import Redis
+from redis.exceptions import RedisError
 from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient
 
 @dataclass(frozen=True)
@@ -29,6 +31,7 @@ class RuntimeConfig:
     tts_app_id: Optional[str]
     tts_access_token: Optional[str]
     tts_speaker: Optional[str]
+    redis_url: Optional[str]
 
 
 @dataclass
@@ -69,6 +72,7 @@ def load_runtime_config() -> RuntimeConfig:
         tts_app_id=_env("TTS_APP_ID"),
         tts_access_token=_env("TTS_ACCESS_TOKEN"),
         tts_speaker=_env("TTS_SPEAKER"),
+        redis_url=_env("REDIS_URL"),
     )
 
 
@@ -270,6 +274,49 @@ async def check_tts(config: RuntimeConfig) -> CheckResult:
             pass
 
 
+async def check_redis(config: RuntimeConfig) -> CheckResult:
+    if not config.redis_url:
+        return CheckResult(
+            ok=False,
+            detail="REDIS_URL missing",
+            error="missing REDIS_URL",
+        )
+
+    client = Redis.from_url(
+        config.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+    try:
+        if not client.ping():
+            return CheckResult(ok=False, detail="Redis failed", error="redis ping failed")
+
+        maxmemory = client.config_get("maxmemory").get("maxmemory", "0")
+        maxmemory_policy = client.config_get("maxmemory-policy").get("maxmemory-policy", "")
+        expected_maxmemory = str(256 * 1024 * 1024)
+        if str(maxmemory) != expected_maxmemory:
+            return CheckResult(
+                ok=False,
+                detail="Redis config invalid",
+                error=f"maxmemory should be {expected_maxmemory}, got {maxmemory}",
+            )
+        if (maxmemory_policy or "").strip().lower() != "allkeys-lru":
+            return CheckResult(
+                ok=False,
+                detail="Redis config invalid",
+                error=f"maxmemory-policy should be allkeys-lru, got {maxmemory_policy}",
+            )
+        return CheckResult(ok=True, detail="Redis ok")
+    except RedisError as e:
+        return CheckResult(ok=False, detail="Redis failed", error=str(e))
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 async def run_startup_self_check(
     config: Optional[RuntimeConfig] = None,
 ) -> SelfCheckReport:
@@ -280,6 +327,7 @@ async def run_startup_self_check(
     checks["llm2"] = await check_llm2(runtime)
     checks["asr"] = await check_asr(runtime)
     checks["tts"] = await check_tts(runtime)
+    checks["redis"] = await check_redis(runtime)
 
     errors = {
         name: result.error
@@ -293,7 +341,7 @@ async def run_startup_self_check(
 def format_self_check_lines(report: SelfCheckReport) -> List[str]:
     status = "PASS" if report.ok else "FAIL"
     lines = [f"[StartupSelfCheck] summary status={status}"]
-    for name in ("llm1", "llm2", "asr", "tts"):
+    for name in ("llm1", "llm2", "asr", "tts", "redis"):
         result = report.checks.get(name)
         if not result:
             lines.append(f"[StartupSelfCheck] {name} status=FAIL detail=missing_result")
