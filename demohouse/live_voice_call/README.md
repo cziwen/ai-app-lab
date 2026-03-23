@@ -20,9 +20,35 @@
 - WebSocket 方案：易于实现和部署，通用性强跨平台兼容性好，高效利用资源，开发灵活性高，成本低。
 
 ### 相关模型
-- Doubao-pro-32k：深入还原角色的性格、背景和知识体系，以高度拟人化的方式回应用户提问，提供沉浸式的对话体验。
-- Doubao-语音合成：根据用户偏好的音色定制生成拟人化、逼真的角色语音输出。
-- Doubao-流式语音识别：将用户的语音提问转写为文本，以便于大模型对用户问题的理解与回复。
+
+本项目采用双 LLM 架构设计：
+- **Doubao-pro-32k (LLM #1 - Judge)**：评判候选人回答质量，决定是否需要追问
+- **Doubao-pro-32k (LLM #2 - Interviewer)**：生成自然流畅的面试官对话内容
+- **Doubao-语音合成 (TTS)**：根据用户偏好的音色定制生成拟人化、逼真的角色语音输出
+- **Doubao-流式语音识别 (ASR)**：基于 SAUC 协议的大模型语音识别，实时转写用户语音
+
+### 系统架构
+
+#### 核心组件
+
+1. **双 LLM 架构**
+   - **Judge LLM (LLM #1)**：基于评分标准评判回答质量，决定追问策略
+   - **Interviewer LLM (LLM #2)**：生成自然对话内容，保持面试流畅性
+
+2. **面试流程控制**
+   - **状态机设计**：INTRO → ASK_QUESTION → WAIT_ANSWER → EVAL_ANSWER → DECIDE → (循环/结束)
+   - **智能决策**：根据覆盖度评分自动决定是否追问（阈值 0.7）
+   - **追问限制**：每题最多 2 次追问，全局最多 20 轮对话
+
+3. **并发与队列系统**
+   - **准入控制**：限制同时进行的面试数量（默认 5 个）
+   - **排队机制**：超出限制自动进入队列，支持超时和取消
+   - **队列事件**：实时通知队列状态（QueueEntered、QueueUpdate、QueueAdmitted）
+
+4. **性能监控**
+   - **Turn Trace**：详细记录每轮对话的性能指标
+   - **关键指标**：judge_ms、llm2_ttft_ms、rec_to_first_sentence_ms
+   - **延迟优化**：ASR 静默检测 2 秒、流式 TTS 合成
 
 ### 流程架构
 
@@ -54,29 +80,73 @@
 
 2. 修改配置（环境变量）
 
+    **核心配置（必填）**：
     ```shell
+    # 火山方舟 API 密钥
     export ARK_API_KEY={YOUR_API_KEY}
-    export LLM1_ENDPOINT_ID={YOUR_ARK_LLM1_ENDPOINT_ID}
-    export LLM2_ENDPOINT_ID={YOUR_ARK_LLM2_ENDPOINT_ID}
-    # 可选：深度思考配置（默认 disabled）
-    export LLM1_THINKING_TYPE=disabled   # enabled|disabled|auto
-    export LLM2_THINKING_TYPE=disabled   # enabled|disabled|auto
-    # 仅在 THINKING_TYPE=enabled 时生效；未设置默认 minimal
-    # export LLM1_REASONING_EFFORT=minimal  # minimal|low|medium|high
-    # export LLM2_REASONING_EFFORT=minimal  # minimal|low|medium|high
+
+    # LLM 端点配置（双 LLM 架构）
+    export LLM1_ENDPOINT_ID={YOUR_ARK_LLM1_ENDPOINT_ID}  # Judge LLM - 评判回答
+    export LLM2_ENDPOINT_ID={YOUR_ARK_LLM2_ENDPOINT_ID}  # Interviewer LLM - 生成对话
+
+    # ASR 配置（SAUC 协议）
     export ASR_APP_ID={YOUR_ASR_APP_ID}
     export ASR_ACCESS_TOKEN={YOUR_ASR_ACCESS_TOKEN}
-    export ASR_RESOURCE_ID={YOUR_ASR_RESOURCE_ID}  # 例如 volc.bigasr.sauc.duration
-    # 可选，不配置则默认使用官方推荐链路 bigmodel_async
-    # export ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+    export ASR_RESOURCE_ID={YOUR_ASR_RESOURCE_ID}  # 必填，如 volc.bigasr.sauc.duration
+
+    # TTS 配置
     export TTS_APP_ID={YOUR_TTS_APP_ID}
     export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
-    export TTS_SPEAKER={YOUR_TTS_SPEAKER}
+    export TTS_SPEAKER={YOUR_TTS_SPEAKER}  # 音色配置
     ```
-   可选日志稳定性参数（默认可用）：
-   - `ASYNC_LOG_QUEUE_SIZE`、`ASYNC_LOG_FLUSH_INTERVAL_MS`、`ASYNC_LOG_DROP_POLICY`、`ASYNC_LOG_CLOSE_TIMEOUT_SECONDS`
-   - `INTERVIEW_LOGGER_CACHE_MAX`、`INTERVIEW_LOGGER_IDLE_SECONDS`
-   - `FRONTEND_LOG_MAX_BODY_BYTES`、`FRONTEND_LOG_MAX_ENTRIES`、`FRONTEND_LOG_MAX_ENTRY_CHARS`
+
+    **深度思考配置（可选）**：
+    ```shell
+    # 控制 LLM 的推理模式（默认 disabled）
+    export LLM1_THINKING_TYPE=disabled   # enabled|disabled|auto
+    export LLM2_THINKING_TYPE=disabled   # enabled|disabled|auto
+
+    # 推理努力程度（仅在 THINKING_TYPE=enabled 时生效）
+    export LLM1_REASONING_EFFORT=minimal  # minimal|low|medium|high
+    export LLM2_REASONING_EFFORT=minimal  # minimal|low|medium|high
+    ```
+
+    **高级配置（可选）**：
+    ```shell
+    # ASR WebSocket URL（默认使用官方推荐链路）
+    export ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+
+    # 并发控制
+    export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数
+    export QUEUE_WAIT_TIMEOUT_SECONDS=1800  # 队列等待超时（秒）
+    export LLM_CONCURRENT_REQUESTS=5      # LLM 并发请求数
+
+    # 管理后台配置
+    export ADMIN_USERNAME=admin           # 管理员用户名
+    export ADMIN_PASSWORD=admin123456     # 管理员密码
+    export ADMIN_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+
+    # 公共访问配置
+    export PUBLIC_INTERVIEW_BASE_URL=http://localhost:8080/check-in
+    ```
+
+    **日志配置（可选）**：
+    ```shell
+    # 异步日志队列
+    export ASYNC_LOG_QUEUE_SIZE=10000           # 队列大小
+    export ASYNC_LOG_FLUSH_INTERVAL_MS=200      # 刷新间隔
+    export ASYNC_LOG_DROP_POLICY=drop_oldest    # 丢弃策略
+    export ASYNC_LOG_CLOSE_TIMEOUT_SECONDS=5    # 关闭超时
+
+    # 面试日志缓存
+    export INTERVIEW_LOGGER_CACHE_MAX=100       # 最大缓存数
+    export INTERVIEW_LOGGER_IDLE_SECONDS=1800   # 空闲超时
+
+    # 前端日志限制
+    export FRONTEND_LOG_MAX_BODY_BYTES=1048576  # 最大请求体
+    export FRONTEND_LOG_MAX_ENTRIES=100         # 最大条目数
+    export FRONTEND_LOG_MAX_ENTRY_CHARS=10000   # 单条最大长度
+    ```
 
 3. 启动服务端
 
