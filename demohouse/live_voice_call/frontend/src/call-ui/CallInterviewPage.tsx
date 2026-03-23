@@ -1,5 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSessionAuth } from '@/auth/context';
 import { CallControlBar } from '@/call-ui/components/CallControlBar';
 import { CallParticipantCard } from '@/call-ui/components/CallParticipantCard';
 import { DebugDrawer } from '@/call-ui/components/DebugDrawer';
@@ -80,6 +81,7 @@ const snapPipToHorizontalEdge = (
 export const CallInterviewPage = () => {
   const controller = useCallController();
   const { uiState, debugState } = controller;
+  const { mediaStreamsRef } = useSessionAuth();
   const stageRef = useRef<HTMLElement | null>(null);
   const pipRef = useRef<HTMLDivElement | null>(null);
   const pipPositionRef = useRef<PipPosition | null>(null);
@@ -119,6 +121,13 @@ export const CallInterviewPage = () => {
     primaryParticipantId === 'interviewer'
       ? uiState.userAudioLevel ?? 0
       : uiState.interviewerAudioLevel ?? 0;
+  const userVideoTrack =
+    mediaStreamsRef.current.userMedia
+      ?.getVideoTracks()
+      .find(track => track.readyState === 'live') ?? null;
+  const userVideoStream = useMemo(() => {
+    return userVideoTrack ? new MediaStream([userVideoTrack]) : null;
+  }, [userVideoTrack]);
 
   const syncPipPosition = useCallback(() => {
     if (!stageRef.current || !pipRef.current) {
@@ -263,6 +272,9 @@ export const CallInterviewPage = () => {
             audioLevel={mainAudioLevel}
             variant="main"
             mirrored={mainParticipant.role === 'user'}
+            videoStream={
+              mainParticipant.role === 'user' ? userVideoStream : null
+            }
           />
         </div>
 
@@ -287,6 +299,9 @@ export const CallInterviewPage = () => {
             audioLevel={pipAudioLevel}
             variant="pip"
             mirrored={pipParticipant.role === 'user'}
+            videoStream={
+              pipParticipant.role === 'user' ? userVideoStream : null
+            }
             onClick={onSwapMainPip}
           />
         </div>

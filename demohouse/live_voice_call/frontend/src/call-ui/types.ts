@@ -125,6 +125,7 @@ export interface CallParticipantCardProps {
   audioLevel?: number;
   variant?: 'main' | 'pip';
   mirrored?: boolean;
+  videoStream?: MediaStream | null;
   onClick?: () => void;
 }
 

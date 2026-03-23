@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { CallParticipantCardProps } from '@/call-ui/types';
 
 export const CallParticipantCard = ({
@@ -6,10 +7,25 @@ export const CallParticipantCard = ({
   audioLevel = 0,
   variant = 'main',
   mirrored = false,
+  videoStream = null,
   onClick,
 }: CallParticipantCardProps) => {
   void audioLevel;
   const clickable = typeof onClick === 'function';
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hasVideo = Boolean(videoStream);
+
+  useEffect(() => {
+    if (!videoRef.current) {
+      return;
+    }
+    videoRef.current.srcObject = videoStream;
+    return () => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [videoStream]);
 
   return (
     <section
@@ -30,13 +46,23 @@ export const CallParticipantCard = ({
           : undefined
       }
     >
-      <div className="avatar-shell">
-        <div
-          className="avatar-core"
-          style={{ background: participant.color }}
-          aria-hidden="true"
+      {hasVideo ? (
+        <video
+          ref={videoRef}
+          className="participant-video"
+          autoPlay
+          playsInline
+          muted
         />
-      </div>
+      ) : (
+        <div className="avatar-shell">
+          <div
+            className="avatar-core"
+            style={{ background: participant.color }}
+            aria-hidden="true"
+          />
+        </div>
+      )}
       <div className="card-footer">
         <strong>{participant.name}</strong>
       </div>
