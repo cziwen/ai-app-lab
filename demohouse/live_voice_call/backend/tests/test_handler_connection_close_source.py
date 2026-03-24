@@ -16,14 +16,21 @@ class _ListLogger:
 
 
 class _FakeAdmission:
-    def __init__(self):
+    def __init__(self, acquire_result="admitted"):
         self.released = []
+        self.acquire_result = acquire_result
 
-    async def acquire_or_enqueue(self, _token):
-        return True, None, False
+    config = SimpleNamespace(heartbeat_seconds=1000, ttl_seconds=30)
 
-    async def release(self, token):
+    def acquire(self, _token, _owner_id):
+        return self.acquire_result
+
+    def heartbeat(self, _token, _owner_id):
+        return "ok"
+
+    def release(self, token, _owner_id):
         self.released.append(token)
+        return True
 
 
 class _FakePersistence:
@@ -41,9 +48,11 @@ class _FakeWebSocket:
         self._send_calls = 0
         self._close_exc_cls = close_exc_cls
         self._fail_on_send_call = fail_on_send_call
+        self.sent_messages = []
 
-    async def send(self, _data):
+    async def send(self, data):
         self._send_calls += 1
+        self.sent_messages.append(data)
         if (
             self._fail_on_send_call is not None
             and self._send_calls >= self._fail_on_send_call
@@ -112,7 +121,7 @@ def test_handler_close_source_client_ws(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
-        monkeypatch.setattr(handler, "ADMISSION", fake_admission)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
@@ -162,7 +171,7 @@ def test_handler_close_source_asr_upstream(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
-        monkeypatch.setattr(handler, "ADMISSION", fake_admission)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
@@ -181,22 +190,45 @@ def test_handler_close_source_asr_upstream(monkeypatch):
     asyncio.run(_run())
 
 
-def test_admission_controller_rejects_same_token_concurrent():
+def test_handler_rejects_when_capacity_full(monkeypatch):
     async def _run():
-        admission = handler.AdmissionController(max_active=5)
-        admitted_first, waiter_first, duplicated_first = await admission.acquire_or_enqueue(
-            "INT-SAME-TOKEN"
-        )
-        admitted_second, waiter_second, duplicated_second = await admission.acquire_or_enqueue(
-            "INT-SAME-TOKEN"
-        )
+        fake_occupancy = _FakeAdmission(acquire_result="capacity_full")
+        token = "INT-HANDLER-CAPACITY-FULL"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError)
 
-        assert admitted_first is True
-        assert waiter_first is None
-        assert duplicated_first is False
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
+        monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
 
-        assert admitted_second is False
-        assert waiter_second is None
-        assert duplicated_second is True
+        await handler.handler(ws, f"/?token={token}")
+
+        assert ws.closed is True
+        assert len(ws.sent_messages) == 1
+
+    asyncio.run(_run())
+
+
+def test_handler_rejects_when_token_already_occupied(monkeypatch):
+    async def _run():
+        fake_occupancy = _FakeAdmission(acquire_result="duplicate_token")
+        token = "INT-HANDLER-DUPLICATE"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError)
+
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
+        monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert ws.closed is True
+        assert len(ws.sent_messages) == 1
 
     asyncio.run(_run())

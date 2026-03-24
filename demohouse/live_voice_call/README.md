@@ -40,10 +40,10 @@
    - **智能决策**：根据覆盖度评分自动决定是否追问（阈值 0.7）
    - **追问限制**：每题最多 2 次追问，全局最多 20 轮对话
 
-3. **并发与队列系统**
+3. **并发控制系统**
    - **准入控制**：限制同时进行的面试数量（默认 5 个）
-   - **排队机制**：超出限制自动进入队列，支持超时和取消
-   - **队列事件**：实时通知队列状态（QueueEntered、QueueUpdate、QueueAdmitted）
+   - **占用过期**：基于 Redis 锁 + TTL 自动回收异常断开的占用
+   - **快速失败**：达到并发上限时直接返回“当前面试的人有点多，请稍后再试”
 
 4. **性能监控**
    - **Turn Trace**：详细记录每轮对话的性能指标
@@ -122,7 +122,8 @@
 
     # 并发控制
     export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数
-    export QUEUE_WAIT_TIMEOUT_SECONDS=1800  # 队列等待超时（秒）
+    export INTERVIEW_OCCUPANCY_TTL_SECONDS=30      # token 占用 TTL（秒）
+    export INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS=10  # 占用续期间隔（秒）
     export LLM_CONCURRENT_REQUESTS=5      # LLM 并发请求数
 
     # 管理后台配置
