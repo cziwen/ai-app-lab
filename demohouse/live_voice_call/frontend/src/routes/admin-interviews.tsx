@@ -24,6 +24,20 @@ const CHECKIN_LABEL: Record<CheckInKey, string> = {
   screen: '屏幕共享',
 };
 
+const COMPLETED_REASON_LABEL: Record<string, string> = {
+  normal_end: '正常结束',
+  hangup: '主动挂断',
+  disconnect: '断连结束',
+  error: '异常结束',
+};
+
+const formatCompletedReason = (reason?: string | null): string => {
+  if (!reason) {
+    return '';
+  }
+  return COMPLETED_REASON_LABEL[reason] || reason;
+};
+
 export const AdminInterviewsPage = () => {
   const { loadingAuth, username, globalError, setGlobalError, handleLogout } = useAdminAuth();
   const [interviewSearch, setInterviewSearch] = useState('');
@@ -240,6 +254,9 @@ export const AdminInterviewsPage = () => {
                 <p>
                   {item.job.name} | token: {item.token} | 状态: {item.status}
                 </p>
+                {item.status === 'completed' && item.completed_reason && (
+                  <p>完成原因：{formatCompletedReason(item.completed_reason)}</p>
+                )}
               </div>
               <div className="admin-list-actions">
                 <button type="button" onClick={() => openInterviewDetail(item.token)}>
@@ -374,6 +391,13 @@ export const AdminInterviewsPage = () => {
                 <p>题目数：{interviewDetail.question_count}</p>
                 <p>创建时间：{interviewDetail.created_at}</p>
                 <p>完成时间：{interviewDetail.completed_at || '未完成'}</p>
+                {interviewDetail.status === 'completed' &&
+                  interviewDetail.completed_reason && (
+                    <p>
+                      完成原因：
+                      {formatCompletedReason(interviewDetail.completed_reason)}
+                    </p>
+                  )}
               </section>
 
               <section>
