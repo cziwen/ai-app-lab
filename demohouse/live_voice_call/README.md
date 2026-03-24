@@ -126,6 +126,11 @@
     export INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS=10  # 占用续期间隔（秒）
     export LLM_CONCURRENT_REQUESTS=5      # LLM 并发请求数
 
+    # WebSocket 保活（用于更快回收异常断开的会话占位）
+    export WS_PING_INTERVAL_SECONDS=20
+    export WS_PING_TIMEOUT_SECONDS=20
+    export WS_CLOSE_TIMEOUT_SECONDS=5
+
     # 管理后台配置
     export ADMIN_USERNAME=admin           # 管理员用户名
     export ADMIN_PASSWORD=admin123456     # 管理员密码
