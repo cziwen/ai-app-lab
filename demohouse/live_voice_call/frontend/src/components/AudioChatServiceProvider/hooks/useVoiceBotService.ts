@@ -173,6 +173,14 @@ export const useVoiceBotService = () => {
     resetWsState();
   };
 
+  const notifyClientHangup = () => {
+    serviceRef.current?.sendMessage({
+      event: EventType.ClientHangup,
+      payload: {},
+    });
+    log('send | event:' + EventType.ClientHangup);
+  };
+
   const shutdownSession = () => {
     wsReadyRef.current = false;
     serviceRef.current?.shutdown();
@@ -304,5 +312,6 @@ export const useVoiceBotService = () => {
     handleConnect,
     disconnectSession,
     shutdownSession,
+    notifyClientHangup,
   };
 };

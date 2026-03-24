@@ -27,11 +27,15 @@ import websockets
 from arkitect.utils.event_loop import get_event_loop
 from admin_api import create_admin_app
 from admin_store import (
+    INTERVIEW_COMPLETED_REASON_DISCONNECT,
+    INTERVIEW_COMPLETED_REASON_ERROR,
+    INTERVIEW_COMPLETED_REASON_HANGUP,
+    INTERVIEW_COMPLETED_REASON_NORMAL_END,
     INTERVIEW_LOG_DIR,
     ensure_default_admin,
     interview_exists,
-    mark_interview_disconnected,
     mark_interview_completed,
+    mark_interview_in_progress,
     persist_interview_audio,
     save_interview_turns,
     start_interview_session,
@@ -233,7 +237,8 @@ class PersistenceTask:
     turns: list
     candidate_pcm_bytes: bytes
     interviewer_encoded_bytes: bytes
-    interview_completed: bool
+    should_mark_completed: bool
+    completed_reason: Optional[str]
     candidate_audio_dropped_frames: int
     grace_seconds: int = 30
     retries: int = 0
@@ -296,11 +301,11 @@ class PersistenceQueue:
                 len(task.interviewer_encoded_bytes),
                 task.candidate_audio_dropped_frames,
             )
-            if task.interview_completed:
-                await asyncio.to_thread(mark_interview_completed, task.token)
-            else:
+            if task.should_mark_completed:
                 await asyncio.to_thread(
-                    mark_interview_disconnected, task.token, task.grace_seconds
+                    mark_interview_completed,
+                    task.token,
+                    task.completed_reason,
                 )
         except Exception as persist_err:
             if task.retries >= PERSISTENCE_MAX_RETRIES:
@@ -328,6 +333,7 @@ class PersistenceQueue:
 
 OCCUPANCY = InterviewOccupancy(load_occupancy_config(max_active=MAX_ACTIVE_INTERVIEWS))
 PERSISTENCE = PersistenceQueue(server_logger)
+CLIENT_HANGUP_EVENT = "ClientHangup"
 
 
 class ClientWebSocketClosedError(RuntimeError):
@@ -444,6 +450,18 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         await websocket.close()
         return
 
+    session_marked = await asyncio.to_thread(mark_interview_in_progress, token)
+    if not session_marked:
+        await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
+        unavailable_payload = BotErrorPayload(
+            error=ErrorEvent(code="SERVICE_UNAVAILABLE", message="服务暂时不可用，请稍后重试")
+        )
+        await websocket.send(
+            convert_web_event_to_binary(WebEvent.from_payload(unavailable_payload))
+        )
+        await websocket.close()
+        return
+
     interview_logger = _get_interview_logger(token, "backend")
     interview_log: Callable[[str], None] = interview_logger.info
     server_logger.info(
@@ -458,6 +476,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     interviewer_audio_encoded = bytearray()
     candidate_audio_dropped_frames = 0
     interview_completed = False
+    client_hangup = False
     close_source: Optional[str] = None
     close_detail = "-"
     occupancy_heartbeat_stop = asyncio.Event()
@@ -538,7 +557,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         Returns:
             AsyncIterable[WebEvent]: An asynchronous generator of input events.
         """
-        nonlocal candidate_audio_dropped_frames
+        nonlocal candidate_audio_dropped_frames, client_hangup
         async for m in ws:
             input_event = convert_binary_to_web_event_to_binary(m)
             data_len = len(input_event.data) if input_event.data else 0
@@ -546,6 +565,10 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 f"Received input event: {input_event.event}, \
                 payload: {input_event.event}, data len:{data_len}"
             )
+            if input_event.event == CLIENT_HANGUP_EVENT:
+                client_hangup = True
+                interview_log("event=session.client_hangup")
+                continue
             if input_event.event == USER_AUDIO and input_event.data:
                 pcm_bytes = _extract_pcm_audio(input_event.data, interview_log)
                 if pcm_bytes:
@@ -616,18 +639,32 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 await occupancy_heartbeat_task
         await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
         try:
+            completed_reason = (
+                INTERVIEW_COMPLETED_REASON_NORMAL_END
+                if interview_completed
+                else (
+                    INTERVIEW_COMPLETED_REASON_HANGUP
+                    if client_hangup
+                    else (
+                        INTERVIEW_COMPLETED_REASON_ERROR
+                        if close_source == "internal_error"
+                        else INTERVIEW_COMPLETED_REASON_DISCONNECT
+                    )
+                )
+            )
             await PERSISTENCE.submit(
                 PersistenceTask(
                     token=token,
                     turns=turns,
                     candidate_pcm_bytes=bytes(candidate_audio),
                     interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
-                    interview_completed=interview_completed,
+                    should_mark_completed=True,
+                    completed_reason=completed_reason,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,
                     grace_seconds=30,
                 )
             )
-            end_status = "completed" if interview_completed else "disconnected"
+            end_status = "completed"
             if not interview_completed and close_source is None:
                 close_source = "client_ws" if websocket.closed else "internal_error"
                 if close_detail == "-":
@@ -885,7 +922,18 @@ async def main():
     )
     server_logger.info("event=server.http_log.ready url=http://%s:%s", LOG_HOST, LOG_PORT)
 
-    admin_app = create_admin_app()
+    def _active_interview_metrics_provider() -> Dict[str, int]:
+        active_interviews = OCCUPANCY.active_count()
+        if active_interviews is None:
+            raise RuntimeError("active_interview_metrics_unavailable")
+        return {
+            "active_interviews": active_interviews,
+            "max_active_interviews": MAX_ACTIVE_INTERVIEWS,
+        }
+
+    admin_app = create_admin_app(
+        active_interview_metrics_provider=_active_interview_metrics_provider
+    )
     admin_config = uvicorn.Config(
         app=admin_app,
         host=ADMIN_API_HOST,

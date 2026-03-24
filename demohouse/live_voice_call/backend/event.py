@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 BOT_READY = "BotReady"
 BOT_UPDATE_CONFIG = "BotUpdateConfig"
 USER_AUDIO = "UserAudio"
+CLIENT_HANGUP = "ClientHangup"
 SENTENCE_RECOGNIZED = "SentenceRecognized"
 TTS_SENTENCE_START = "TTSSentenceStart"
 TTS_SENTENCE_END = "TTSSentenceEnd"

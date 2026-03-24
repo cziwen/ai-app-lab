@@ -28,6 +28,16 @@ INTERVIEW_STATUS_IN_PROGRESS = "in_progress"
 INTERVIEW_STATUS_COMPLETED = "completed"
 INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
+INTERVIEW_COMPLETED_REASON_NORMAL_END = "normal_end"
+INTERVIEW_COMPLETED_REASON_HANGUP = "hangup"
+INTERVIEW_COMPLETED_REASON_DISCONNECT = "disconnect"
+INTERVIEW_COMPLETED_REASON_ERROR = "error"
+INTERVIEW_COMPLETED_REASONS = {
+    INTERVIEW_COMPLETED_REASON_NORMAL_END,
+    INTERVIEW_COMPLETED_REASON_HANGUP,
+    INTERVIEW_COMPLETED_REASON_DISCONNECT,
+    INTERVIEW_COMPLETED_REASON_ERROR,
+}
 MAX_INTERRUPTION_COUNT = 3
 CHECKIN_ORDER = ("speaker", "mic", "camera", "screen")
 DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
@@ -109,6 +119,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   updated_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   completed_at TEXT,
+  completed_reason TEXT,
   interruption_count INTEGER NOT NULL DEFAULT 0,
   reconnect_deadline_at TEXT,
   candidate_audio_path TEXT,
@@ -199,6 +210,10 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     if "expires_at" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN expires_at TEXT"
+        )
+    if "completed_reason" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN completed_reason TEXT"
         )
     expires_rows = conn.execute(
         "SELECT token, created_at FROM interviews WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
@@ -917,7 +932,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
         rows = conn.execute(
             f"""
             SELECT i.token, i.candidate_name, i.question_count,
-                   i.notes, i.status, i.created_at, i.completed_at, i.interruption_count,
+                   i.notes, i.status, i.created_at, i.completed_at, i.completed_reason, i.interruption_count,
                    i.expires_at,
                    j.job_uid, j.name AS job_name
             FROM interviews i
@@ -939,6 +954,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             "interruption_count": int(row["interruption_count"] or 0),
             "created_at": row["created_at"],
             "completed_at": row["completed_at"],
+            "completed_reason": row["completed_reason"],
             "expires_at": row["expires_at"],
             "job": {
                 "job_uid": row["job_uid"],
@@ -1013,6 +1029,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "updated_at": row["updated_at"],
         "expires_at": row["expires_at"],
         "completed_at": row["completed_at"],
+        "completed_reason": row["completed_reason"],
         "reconnect_deadline_at": row["reconnect_deadline_at"],
         "candidate_audio_path": row["candidate_audio_path"],
         "interviewer_audio_path": row["interviewer_audio_path"],
@@ -1149,7 +1166,6 @@ def _build_question_evidence(question_row: sqlite3.Row) -> Dict[str, Any]:
 
 def start_interview_session(token: str) -> Optional[InterviewSessionData]:
     resolve_interview_timeout(token)
-    now = utc_now_iso()
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -1205,26 +1221,40 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                     }
                 )
 
-        if row["status"] == INTERVIEW_STATUS_PENDING or row["reconnect_deadline_at"]:
-            conn.execute(
-                """
-                UPDATE interviews
-                SET status = ?, reconnect_deadline_at = ?, updated_at = ?
-                WHERE token = ?
-                """,
-                (INTERVIEW_STATUS_IN_PROGRESS, None, now, token),
-            )
-            conn.commit()
-            _invalidate_interview_cache(token)
-
     return InterviewSessionData(
         token=row["token"],
         candidate_name=row["candidate_name"],
         job_uid=row["job_uid"],
         job_name=row["job_name"],
-        status=INTERVIEW_STATUS_IN_PROGRESS,
+        status=row["status"],
         questions=selected_questions,
     )
+
+
+def mark_interview_in_progress(token: str) -> bool:
+    now = datetime.now(timezone.utc)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, expires_at FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return False
+        if not _is_interview_active(row["status"]):
+            return False
+        if _is_interview_expired(row["expires_at"], now):
+            return False
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_STATUS_IN_PROGRESS, None, now.isoformat(), token),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    return True
 
 
 def clear_interview_turns(token: str) -> None:
@@ -1313,16 +1343,18 @@ def persist_interview_audio(
     }
 
 
-def mark_interview_completed(token: str) -> None:
+def mark_interview_completed(token: str, completed_reason: Optional[str] = None) -> None:
+    if completed_reason is not None and completed_reason not in INTERVIEW_COMPLETED_REASONS:
+        raise ValueError("invalid_completed_reason")
     now = utc_now_iso()
     with get_conn() as conn:
         conn.execute(
             """
             UPDATE interviews
-            SET status = ?, completed_at = ?, reconnect_deadline_at = ?, updated_at = ?
+            SET status = ?, completed_at = ?, completed_reason = ?, reconnect_deadline_at = ?, updated_at = ?
             WHERE token = ?
             """,
-            (INTERVIEW_STATUS_COMPLETED, now, None, now, token),
+            (INTERVIEW_STATUS_COMPLETED, now, completed_reason, None, now, token),
         )
         conn.commit()
     _invalidate_interview_cache(token)

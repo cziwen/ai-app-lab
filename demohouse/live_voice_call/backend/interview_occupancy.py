@@ -56,6 +56,11 @@ end
 return 0
 """
 
+_ACTIVE_COUNT_SCRIPT = """
+redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
+return redis.call("ZCARD", KEYS[1])
+"""
+
 
 @dataclass(frozen=True)
 class OccupancyConfig:
@@ -170,3 +175,21 @@ class InterviewOccupancy:
         except RedisError:
             return False
         return bool(result)
+
+    def active_count(self) -> Optional[int]:
+        client = self._get_client()
+        if client is None:
+            return None
+        try:
+            result = client.eval(
+                _ACTIVE_COUNT_SCRIPT,
+                1,
+                self._active_key(),
+                self._now_ms(),
+            )
+        except RedisError:
+            return None
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return None

@@ -121,6 +121,7 @@ def test_handler_close_source_client_ws(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
@@ -132,7 +133,7 @@ def test_handler_close_source_client_ws(monkeypatch):
         assert len(fake_persistence.tasks) == 1
         assert any("Connection closed source=client_ws" in line for line in interview_logger.lines)
         assert any(
-            "[Session] closed status=disconnected close_source=client_ws" in line
+            "[Session] closed status=completed close_source=client_ws" in line
             for line in interview_logger.lines
         )
 
@@ -171,6 +172,7 @@ def test_handler_close_source_asr_upstream(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
@@ -183,7 +185,7 @@ def test_handler_close_source_asr_upstream(monkeypatch):
         assert len(fake_persistence.tasks) == 1
         assert any("Connection closed source=asr_upstream" in line for line in interview_logger.lines)
         assert any(
-            "[Session] closed status=disconnected close_source=asr_upstream" in line
+            "[Session] closed status=completed close_source=asr_upstream" in line
             for line in interview_logger.lines
         )
 
@@ -201,6 +203,7 @@ def test_handler_rejects_when_capacity_full(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
         monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
 
@@ -223,6 +226,7 @@ def test_handler_rejects_when_token_already_occupied(monkeypatch):
             "start_interview_session",
             lambda incoming_token: _fake_session_data(incoming_token),
         )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
         monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
 
@@ -230,5 +234,64 @@ def test_handler_rejects_when_token_already_occupied(monkeypatch):
 
         assert ws.closed is True
         assert len(ws.sent_messages) == 1
+
+    asyncio.run(_run())
+
+
+def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypatch):
+    class _OneMessageWebSocket(_FakeWebSocket):
+        def __init__(self):
+            super().__init__(close_exc_cls=RuntimeError)
+            self._count = 0
+
+        async def __anext__(self):
+            if self._count == 0:
+                self._count += 1
+                return b"ignored"
+            self.closed = True
+            raise StopAsyncIteration
+
+    class _FakeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, inputs):
+            async for _ in inputs:
+                break
+            if False:
+                yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-HANGUP"
+        ws = _OneMessageWebSocket()
+
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(
+            handler,
+            "convert_binary_to_web_event_to_binary",
+            lambda _data: WebEvent(event=handler.CLIENT_HANGUP_EVENT),
+        )
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].completed_reason == "hangup"
+        assert any("event=session.client_hangup" in line for line in interview_logger.lines)
 
     asyncio.run(_run())

@@ -1,8 +1,9 @@
+import asyncio
 import csv
 import io
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -148,7 +149,9 @@ class CreateInterviewBody(BaseModel):
     required_checkins: Optional[List[str]] = Field(default=None)
 
 
-def create_admin_app() -> FastAPI:
+def create_admin_app(
+    active_interview_metrics_provider: Optional[Callable[[], Dict[str, int]]] = None,
+) -> FastAPI:
     ensure_default_admin()
 
     app = FastAPI(title="AI Interview Admin API", version="1.0.0")
@@ -244,6 +247,25 @@ def create_admin_app() -> FastAPI:
     ) -> Dict[str, Any]:
         return list_interviews(q, page, page_size)
 
+    @app.get("/api/admin/interviews/metrics")
+    async def get_interview_metrics(
+        _admin: Dict[str, Any] = Depends(require_admin),
+    ) -> Dict[str, int]:
+        if active_interview_metrics_provider is None:
+            raise HTTPException(status_code=503, detail="实时指标服务不可用")
+        try:
+            metrics = await asyncio.to_thread(active_interview_metrics_provider)
+        except Exception as provider_err:
+            raise HTTPException(status_code=503, detail="实时指标服务不可用") from provider_err
+        active_interviews = metrics.get("active_interviews")
+        max_active_interviews = metrics.get("max_active_interviews")
+        if not isinstance(active_interviews, int) or not isinstance(max_active_interviews, int):
+            raise HTTPException(status_code=503, detail="实时指标服务不可用")
+        return {
+            "active_interviews": active_interviews,
+            "max_active_interviews": max_active_interviews,
+        }
+
     @app.post("/api/admin/interviews")
     async def post_interview(body: CreateInterviewBody, _admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
         try:
@@ -290,6 +312,7 @@ def create_admin_app() -> FastAPI:
                 "interruption_count": detail.get("interruption_count", 0),
                 "created_at": detail["created_at"],
                 "completed_at": detail["completed_at"],
+                "completed_reason": detail.get("completed_reason"),
                 "job": detail["job"],
                 "selected_questions": detail.get("selected_questions", []),
                 "required_checkins": detail.get("required_checkins", []),

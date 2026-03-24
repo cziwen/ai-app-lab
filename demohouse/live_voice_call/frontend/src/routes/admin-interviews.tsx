@@ -29,6 +29,8 @@ export const AdminInterviewsPage = () => {
   const [interviewSearch, setInterviewSearch] = useState('');
   const [interviews, setInterviews] = useState<InterviewListItem[]>([]);
   const [loadingInterviews, setLoadingInterviews] = useState(false);
+  const [activeInterviews, setActiveInterviews] = useState<number | null>(null);
+  const [maxActiveInterviews, setMaxActiveInterviews] = useState<number | null>(null);
 
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [showCreateInterview, setShowCreateInterview] = useState(false);
@@ -73,11 +75,34 @@ export const AdminInterviewsPage = () => {
     }
   };
 
+  const loadInterviewMetrics = async () => {
+    try {
+      const data = await adminApi.getInterviewMetrics();
+      setActiveInterviews(data.active_interviews);
+      setMaxActiveInterviews(data.max_active_interviews);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : '加载实时面试人数失败');
+    }
+  };
+
   useEffect(() => {
     if (loadingAuth) {
       return;
     }
-    Promise.all([loadJobs(), loadInterviews('')]);
+    Promise.all([loadJobs(), loadInterviews(''), loadInterviewMetrics()]);
+  }, [loadingAuth]);
+
+  useEffect(() => {
+    if (loadingAuth) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      loadInterviewMetrics();
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [loadingAuth]);
 
   useEffect(() => {
@@ -200,6 +225,12 @@ export const AdminInterviewsPage = () => {
     >
       <section className="admin-list-card">
         <h2>面试列表</h2>
+        <p>
+          正在面试：
+          {activeInterviews === null || maxActiveInterviews === null
+            ? '加载中...'
+            : `${activeInterviews} / ${maxActiveInterviews}`}
+        </p>
         {loadingInterviews && <p className="admin-loading">加载中...</p>}
         <ul className="admin-list">
           {interviews.map(item => (

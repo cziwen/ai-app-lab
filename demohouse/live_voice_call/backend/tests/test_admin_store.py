@@ -426,6 +426,7 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "output_format" in question_columns
     assert "question_followup_limits" in interview_columns
     assert "expires_at" in interview_columns
+    assert "completed_reason" in interview_columns
 
 
 def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp_path):
@@ -463,3 +464,36 @@ def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp
     detail = admin_store.get_interview_detail(token)
     assert detail is not None
     assert detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
+
+
+def test_mark_interview_completed_persists_completed_reason(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    assert admin_store.mark_interview_in_progress(token) is True
+    admin_store.mark_interview_completed(
+        token,
+        completed_reason=admin_store.INTERVIEW_COMPLETED_REASON_HANGUP,
+    )
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["status"] == admin_store.INTERVIEW_STATUS_COMPLETED
+    assert detail["completed_reason"] == admin_store.INTERVIEW_COMPLETED_REASON_HANGUP

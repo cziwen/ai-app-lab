@@ -37,6 +37,7 @@ export enum EventType {
   BotError = 'BotError',
   BotUpdateConfig = 'BotUpdateConfig',
   UserAudio = 'UserAudio',
+  ClientHangup = 'ClientHangup',
 }
 export interface IWebSocketResponse {
   messageType: number;

@@ -123,3 +123,25 @@ def test_create_interview_invalid_question_followups_returns_400(monkeypatch, tm
     )
     assert response.status_code == 400
     assert "question_followups" in response.json().get("detail", "")
+
+
+def test_admin_interview_metrics_returns_active_counts(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    app = admin_api.create_admin_app(
+        active_interview_metrics_provider=lambda: {
+            "active_interviews": 3,
+            "max_active_interviews": 5,
+        }
+    )
+    client = TestClient(app)
+    login = client.post(
+        "/api/admin/auth/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    assert login.status_code == 200
+
+    response = client.get("/api/admin/interviews/metrics")
+    assert response.status_code == 200
+    assert response.json() == {"active_interviews": 3, "max_active_interviews": 5}

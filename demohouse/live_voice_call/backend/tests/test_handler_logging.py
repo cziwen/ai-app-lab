@@ -273,7 +273,8 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
         turns=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        interview_completed=False,
+        should_mark_completed=True,
+        completed_reason="disconnect",
         candidate_audio_dropped_frames=0,
         retries=handler.PERSISTENCE_MAX_RETRIES,
     )

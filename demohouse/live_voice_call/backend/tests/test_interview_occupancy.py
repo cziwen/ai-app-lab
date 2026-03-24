@@ -21,6 +21,12 @@ class _FakeRedis:
     def eval(self, script, numkeys, *args):
         keys = args[:numkeys]
         argv = args[numkeys:]
+
+        if 'return redis.call("ZCARD", KEYS[1])' in script:
+            now_ms = int(argv[0])
+            self._cleanup(now_ms)
+            return len(self.active)
+
         lock_key = keys[0]
         token = argv[0]
         owner_id = argv[1]
@@ -113,3 +119,18 @@ def test_occupancy_heartbeat_and_release_require_same_owner(monkeypatch):
     assert ctrl.heartbeat("INT-1", "owner-b") == "lost_lock"
     assert ctrl.release("INT-1", "owner-b") is False
     assert ctrl.release("INT-1", "owner-a") is True
+
+
+def test_occupancy_active_count_cleans_expired(monkeypatch):
+    fake_redis = _FakeRedis()
+    monkeypatch.setenv("REDIS_URL", "redis://test")
+    monkeypatch.setenv("INTERVIEW_OCCUPANCY_TTL_SECONDS", "1")
+    monkeypatch.setattr(occupancy.Redis, "from_url", lambda *a, **k: fake_redis)
+    ctrl = occupancy.InterviewOccupancy(
+        occupancy.load_occupancy_config(max_active=5)
+    )
+
+    assert ctrl.acquire("INT-1", "owner-a") == "admitted"
+    assert ctrl.active_count() == 1
+    time.sleep(1.05)
+    assert ctrl.active_count() == 0

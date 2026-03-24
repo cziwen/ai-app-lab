@@ -40,6 +40,7 @@ export type InterviewListItem = {
   status: string;
   created_at: string;
   completed_at?: string | null;
+  completed_reason?: string | null;
   job: {
     job_uid: string;
     name: string;
@@ -54,6 +55,7 @@ export type InterviewDetail = {
   status: string;
   created_at: string;
   completed_at?: string | null;
+  completed_reason?: string | null;
   job: {
     job_uid: string;
     name: string;
@@ -145,6 +147,11 @@ export const adminApi = {
   listInterviews: (q = '') =>
     request<{ items: InterviewListItem[]; total: number }>(
       `/api/admin/interviews?q=${encodeURIComponent(q)}&page=1&page_size=100`,
+    ),
+
+  getInterviewMetrics: () =>
+    request<{ active_interviews: number; max_active_interviews: number }>(
+      '/api/admin/interviews/metrics',
     ),
 
   createInterview: (payload: {

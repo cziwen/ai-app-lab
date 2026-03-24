@@ -112,7 +112,7 @@ export const useCallController = (): CallController => {
   const { currentBotSentence, currentUserSentence } = useCurrentSentence();
   const { wsUrl, setWsUrl } = useWsUrl();
   const { recStart, recStop } = useAudioRecorder();
-  const { handleConnect, disconnectSession, shutdownSession } =
+  const { handleConnect, disconnectSession, shutdownSession, notifyClientHangup } =
     useVoiceBotService();
   const { logContent } = useLogContent();
   const { mediaStreamsRef } = useSessionAuth();
@@ -175,9 +175,16 @@ export const useCallController = (): CallController => {
     setEndPhase('idle');
     setEndCountdownSec(null);
     cleanupCaptureResources();
+    notifyClientHangup();
     shutdownSession();
     navigate(`/hangup-result${location.search}`);
-  }, [cleanupCaptureResources, location.search, navigate, shutdownSession]);
+  }, [
+    cleanupCaptureResources,
+    location.search,
+    navigate,
+    notifyClientHangup,
+    shutdownSession,
+  ]);
 
   useEffect(() => {
     if (mode !== 'real' || endingRef.current) {
