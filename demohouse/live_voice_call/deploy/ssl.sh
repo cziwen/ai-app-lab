@@ -79,10 +79,10 @@ extract_domain_from_url() {
 resolve_domain() {
   local domain="${DOMAIN_OVERRIDE:-}"
   if [[ -z "$domain" ]]; then
-    domain="$(extract_domain_from_url "${PUBLIC_INTERVIEW_BASE_URL:-}")"
+    domain="$(extract_domain_from_url "${INTERVIEW_BASE_DOMAIN:-}")"
   fi
   if [[ -z "$domain" ]]; then
-    echo "[ssl] Missing domain. Set PUBLIC_INTERVIEW_BASE_URL in .env or pass --domain" >&2
+    echo "[ssl] Missing domain. Set INTERVIEW_BASE_DOMAIN in .env or pass --domain" >&2
     return 1
   fi
 

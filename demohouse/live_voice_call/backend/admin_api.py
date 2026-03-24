@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,9 +52,18 @@ def _load_cors_origins() -> List[str]:
 
 
 def build_interview_link(token: str) -> str:
-    base = (os.getenv("PUBLIC_INTERVIEW_BASE_URL") or "http://localhost:8080/check-in").strip()
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}token={token}"
+    raw = (os.getenv("INTERVIEW_BASE_DOMAIN") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=500, detail="INTERVIEW_BASE_DOMAIN missing")
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    scheme = parsed.scheme or "https"
+    domain = (parsed.netloc or "").strip()
+    if not domain:
+        raise HTTPException(status_code=500, detail="INTERVIEW_BASE_DOMAIN invalid")
+    normalized_base = f"{scheme}://{domain}".rstrip("/")
+    return f"{normalized_base}/check-in?token={token}"
 
 
 def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:

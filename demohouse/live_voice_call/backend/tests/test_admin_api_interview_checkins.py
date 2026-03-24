@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import admin_api
@@ -145,3 +147,35 @@ def test_admin_interview_metrics_returns_active_counts(monkeypatch, tmp_path):
     response = client.get("/api/admin/interviews/metrics")
     assert response.status_code == 200
     assert response.json() == {"active_interviews": 3, "max_active_interviews": 5}
+
+
+def test_build_interview_link_uses_https_domain_without_trailing_slash(monkeypatch):
+    monkeypatch.setenv("INTERVIEW_BASE_DOMAIN", "https://smartinterview.cn/")
+    assert (
+        admin_api.build_interview_link("INT-abc123")
+        == "https://smartinterview.cn/check-in?token=INT-abc123"
+    )
+
+
+def test_build_interview_link_adds_https_scheme_when_missing(monkeypatch):
+    monkeypatch.setenv("INTERVIEW_BASE_DOMAIN", "smartinterview.cn")
+    assert (
+        admin_api.build_interview_link("INT-abc123")
+        == "https://smartinterview.cn/check-in?token=INT-abc123"
+    )
+
+
+def test_build_interview_link_ignores_configured_path(monkeypatch):
+    monkeypatch.setenv("INTERVIEW_BASE_DOMAIN", "https://smartinterview.cn/foo")
+    assert (
+        admin_api.build_interview_link("INT-abc123")
+        == "https://smartinterview.cn/check-in?token=INT-abc123"
+    )
+
+
+def test_build_interview_link_requires_domain(monkeypatch):
+    monkeypatch.delenv("INTERVIEW_BASE_DOMAIN", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        admin_api.build_interview_link("INT-abc123")
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "INTERVIEW_BASE_DOMAIN missing"

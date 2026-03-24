@@ -108,14 +108,13 @@ def parse_question_csv(upload: UploadFile) -> List[Dict]:
 
 ```python
 def build_interview_link(token: str) -> str:
-    base = os.getenv("PUBLIC_INTERVIEW_BASE_URL") or "http://localhost:8080/check-in"
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}token={token}"
+    domain = os.getenv("INTERVIEW_BASE_DOMAIN") or "http://localhost:8080"
+    return f"{domain.rstrip('/')}/check-in?token={token}"
 ```
 
 **环境变量配置**：
 ```bash
-PUBLIC_INTERVIEW_BASE_URL=https://yourdomain.com/interview
+INTERVIEW_BASE_DOMAIN=https://yourdomain.com
 ```
 
 ## API请求示例

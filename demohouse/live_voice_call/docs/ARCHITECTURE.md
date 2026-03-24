@@ -392,7 +392,7 @@ LLM_CONCURRENT_REQUESTS=5
 # === 管理后台 ===
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123456
-PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in
+INTERVIEW_BASE_DOMAIN=https://smartinterview.cn
 
 # === HTTPS 部署 ===
 LETSENCRYPT_EMAIL=your-email@example.com

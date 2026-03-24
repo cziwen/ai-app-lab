@@ -136,8 +136,8 @@
     export ADMIN_PASSWORD=admin123456     # 管理员密码
     export ADMIN_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 
-    # 公共访问配置
-    export PUBLIC_INTERVIEW_BASE_URL=http://localhost:8080/check-in
+    # 公共访问配置（只填域名；系统自动拼接 /check-in?token=...）
+    export INTERVIEW_BASE_DOMAIN=http://localhost:8080
     ```
 
     **日志配置（可选）**：
@@ -325,7 +325,7 @@ docker compose down
 - 默认管理员账号通过环境变量初始化：
   - `ADMIN_USERNAME`（默认 `admin`）
   - `ADMIN_PASSWORD`（默认 `admin123456`）
-- 候选人面试链接基址可通过 `PUBLIC_INTERVIEW_BASE_URL` 配置（默认 `http://localhost:8080/check-in`）
+- 候选人面试链接基址通过 `INTERVIEW_BASE_DOMAIN` 配置（只填域名，例如 `https://smartinterview.cn`）
 - 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认同源地址）
 
 ## WebSocket交互协议说明

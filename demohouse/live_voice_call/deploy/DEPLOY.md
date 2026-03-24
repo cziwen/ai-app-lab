@@ -21,7 +21,7 @@ cp .env.example .env
 
 至少确认：
 
-- `PUBLIC_INTERVIEW_BASE_URL=https://smartinterview.cn/check-in`
+- `INTERVIEW_BASE_DOMAIN=https://smartinterview.cn`
 - `LETSENCRYPT_EMAIL=2377963631@qq.com`（建议填写你常用且可收邮件的邮箱，用于到期提醒）
 - 业务凭据 `ARK_API_KEY`、`LLM1_ENDPOINT_ID`、`LLM2_ENDPOINT_ID`、`ASR_*`、`TTS_*`
 - Redis 配置 `REDIS_URL=redis://redis:6379/0`（必填）
@@ -144,4 +144,4 @@ poetry run python -c "import importlib.metadata as m; from volcenginesdkarkrunti
 4. 命中 Let’s Encrypt 频率限制（too many certificates）
 - 不要重复执行签发，先执行：`./deploy/ssl.sh activate`
 - 当前脚本 `./deploy/ssl.sh init` 会自动复用已有证书，只有不存在时才申请
-- 如必须换 identifier（例如改成新子域名），需先完成 DNS 指向并更新 `.env` 里的 `PUBLIC_INTERVIEW_BASE_URL`
+- 如必须换 identifier（例如改成新子域名），需先完成 DNS 指向并更新 `.env` 里的 `INTERVIEW_BASE_DOMAIN`
