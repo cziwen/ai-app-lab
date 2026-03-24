@@ -639,6 +639,12 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 await occupancy_heartbeat_task
         await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
         try:
+            if not interview_completed and close_source is None:
+                close_source = "client_ws" if websocket.closed else "internal_error"
+                if close_detail == "-":
+                    close_detail = (
+                        "websocket.closed" if websocket.closed else "source_unknown"
+                    )
             completed_reason = (
                 INTERVIEW_COMPLETED_REASON_NORMAL_END
                 if interview_completed
@@ -665,12 +671,6 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 )
             )
             end_status = "completed"
-            if not interview_completed and close_source is None:
-                close_source = "client_ws" if websocket.closed else "internal_error"
-                if close_detail == "-":
-                    close_detail = (
-                        "websocket.closed" if websocket.closed else "source_unknown"
-                    )
             close_source_for_log = close_source or "-"
             interview_log(
                 f"[Session] closed status={end_status} "

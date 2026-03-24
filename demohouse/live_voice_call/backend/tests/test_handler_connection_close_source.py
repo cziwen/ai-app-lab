@@ -295,3 +295,47 @@ def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypat
         assert any("event=session.client_hangup" in line for line in interview_logger.lines)
 
     asyncio.run(_run())
+
+
+def test_handler_marks_error_reason_after_close_source_normalization(monkeypatch):
+    class _FakeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            if False:
+                yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-CLOSE-SOURCE-NORMALIZE"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError)
+        ws.closed = False
+
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].completed_reason == "error"
+        assert any(
+            "[Session] closed status=completed close_source=internal_error" in line
+            for line in interview_logger.lines
+        )
+
+    asyncio.run(_run())

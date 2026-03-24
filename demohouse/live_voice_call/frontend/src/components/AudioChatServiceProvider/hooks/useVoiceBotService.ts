@@ -176,7 +176,7 @@ export const useVoiceBotService = () => {
   const notifyClientHangup = () => {
     serviceRef.current?.sendMessage({
       event: EventType.ClientHangup,
-      payload: {},
+      payload: { source: 'ui_hangup' },
     });
     log('send | event:' + EventType.ClientHangup);
   };
