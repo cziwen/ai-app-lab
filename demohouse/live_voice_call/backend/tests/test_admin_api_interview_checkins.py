@@ -8,6 +8,20 @@ import admin_api
 import admin_store
 
 
+class _FakeExpiryIndex:
+    def ensure_ready(self):
+        return True
+
+    def schedule(self, token: str, expires_at: str):
+        return True
+
+    def remove(self, token: str):
+        return True
+
+    def due_tokens(self, now_ms=None, *, limit=200):
+        return []
+
+
 def _setup_tmp_store(monkeypatch, tmp_path: Path):
     data_dir = tmp_path / "data"
     storage_dir = data_dir / "storage"
@@ -19,12 +33,14 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(admin_store, "AUDIO_DIR", audio_dir)
     monkeypatch.setattr(admin_store, "INTERVIEW_LOG_DIR", interview_log_dir)
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
+    monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _FakeExpiryIndex())
 
 
 def _client_with_login(monkeypatch, tmp_path: Path) -> TestClient:
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("INTERVIEW_BASE_DOMAIN", "http://localhost:8080")
     app = admin_api.create_admin_app()
     client = TestClient(app)
     response = client.post(

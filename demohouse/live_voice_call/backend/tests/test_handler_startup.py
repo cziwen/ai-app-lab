@@ -64,6 +64,7 @@ def test_handler_main_logs_selected_log_file(monkeypatch):
             messages.append(text)
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(handler, "ensure_interview_expiry_ready", lambda: True)
         monkeypatch.setattr(
             handler,
             "PERSISTENCE",
@@ -100,6 +101,7 @@ def test_handler_main_aborts_on_failed_self_check(monkeypatch):
             raise AssertionError("http server should not start on failed self check")
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(handler, "ensure_interview_expiry_ready", lambda: True)
         monkeypatch.setattr(
             handler,
             "PERSISTENCE",
@@ -151,6 +153,7 @@ def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
             return _HttpServer()
 
         monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(handler, "ensure_interview_expiry_ready", lambda: True)
         monkeypatch.setattr(
             handler,
             "PERSISTENCE",
@@ -158,12 +161,48 @@ def test_handler_main_starts_servers_when_self_check_passes(monkeypatch):
         )
         monkeypatch.setattr(handler.websockets, "serve", _fake_ws_serve)
         monkeypatch.setattr(asyncio, "start_server", _fake_http_start)
-        monkeypatch.setattr(handler, "create_admin_app", lambda: object())
+        monkeypatch.setattr(handler, "create_admin_app", lambda **_kwargs: object())
         monkeypatch.setattr(handler.uvicorn, "Server", _ApiServer)
 
         await handler.main()
         assert called["ws"] is True
         assert called["http"] is True
         assert called["api"] is True
+
+    asyncio.run(_run())
+
+
+def test_handler_main_aborts_when_interview_expiry_not_ready(monkeypatch):
+    async def _run():
+        called = {"ws": False, "http": False}
+
+        async def _fake_self_check(config):
+            return _ok_report()
+
+        async def _fake_ws_serve(*args, **kwargs):
+            called["ws"] = True
+            raise AssertionError("ws server should not start when expiry is not ready")
+
+        async def _fake_http_start(*args, **kwargs):
+            called["http"] = True
+            raise AssertionError("http server should not start when expiry is not ready")
+
+        monkeypatch.setattr(handler, "run_startup_self_check", _fake_self_check)
+        monkeypatch.setattr(handler, "ensure_interview_expiry_ready", lambda: False)
+        monkeypatch.setattr(
+            handler,
+            "PERSISTENCE",
+            handler.PersistenceQueue(handler.server_logger),
+        )
+        monkeypatch.setattr(handler.websockets, "serve", _fake_ws_serve)
+        monkeypatch.setattr(asyncio, "start_server", _fake_http_start)
+
+        try:
+            await handler.main()
+            assert False, "expected SystemExit"
+        except SystemExit as e:
+            assert e.code == 1
+        assert called["ws"] is False
+        assert called["http"] is False
 
     asyncio.run(_run())

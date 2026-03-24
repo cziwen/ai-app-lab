@@ -4,6 +4,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import time
 import uuid
 import wave
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from arkitect.telemetry.logger import INFO
+from redis import Redis
+from redis.exceptions import RedisError
 from interview_cache import CACHE_MISS, InterviewTokenCache
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,8 +48,85 @@ FOLLOWUP_MIN = 0
 FOLLOWUP_MAX = 3
 DEFAULT_QUESTION_MAX_FOLLOWUPS = 0
 INTERVIEW_TOKEN_TTL_HOURS = 24
+INTERVIEW_EXPIRY_KEY_PREFIX = (os.getenv("INTERVIEW_EXPIRY_KEY_PREFIX") or "interview:expiry").strip()
+INTERVIEW_EXPIRY_SWEEP_SECONDS = max(
+    1, int(os.getenv("INTERVIEW_EXPIRY_SWEEP_SECONDS", "10"))
+)
+INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE = max(
+    1, int(os.getenv("INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE", "200"))
+)
 
 INTERVIEW_CACHE = InterviewTokenCache()
+
+
+class InterviewExpiryIndex:
+    def __init__(self) -> None:
+        self.redis_url = (os.getenv("REDIS_URL") or "").strip()
+        self.key_prefix = INTERVIEW_EXPIRY_KEY_PREFIX
+        self._client: Optional[Redis] = None
+
+    def _key(self) -> str:
+        return f"{self.key_prefix}:zset"
+
+    def _get_client(self) -> Optional[Redis]:
+        if not self.redis_url:
+            return None
+        if self._client is None:
+            self._client = Redis.from_url(
+                self.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+        return self._client
+
+    def ensure_ready(self) -> bool:
+        client = self._get_client()
+        if client is None:
+            return False
+        try:
+            return bool(client.ping())
+        except RedisError:
+            return False
+
+    def schedule(self, token: str, expires_at: Optional[str]) -> bool:
+        client = self._get_client()
+        if client is None:
+            return False
+        expires_at_dt = parse_iso_or_none(expires_at)
+        if not token or not expires_at_dt:
+            return False
+        try:
+            client.zadd(self._key(), {token: int(expires_at_dt.timestamp() * 1000)})
+            return True
+        except RedisError:
+            return False
+
+    def remove(self, token: str) -> bool:
+        client = self._get_client()
+        if client is None:
+            return False
+        if not token:
+            return False
+        try:
+            client.zrem(self._key(), token)
+            return True
+        except RedisError:
+            return False
+
+    def due_tokens(self, now_ms: Optional[int] = None, *, limit: int = 200) -> Optional[List[str]]:
+        client = self._get_client()
+        if client is None:
+            return None
+        current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        try:
+            entries = client.zrangebyscore(self._key(), "-inf", current_ms, start=0, num=max(1, int(limit)))
+            return [str(item) for item in entries if item]
+        except RedisError:
+            return None
+
+
+INTERVIEW_EXPIRY_INDEX = InterviewExpiryIndex()
 
 
 @dataclass
@@ -758,6 +838,7 @@ def _resolve_interview_timeout_in_conn(
             (INTERVIEW_STATUS_FAILED, None, now.isoformat(), token),
         )
         _invalidate_interview_cache(token)
+        INTERVIEW_EXPIRY_INDEX.remove(token)
         return conn.execute(
             """
             SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
@@ -788,6 +869,8 @@ def _resolve_interview_timeout_in_conn(
         (next_count, None, next_status, now.isoformat(), token),
     )
     _invalidate_interview_cache(token)
+    if next_status == INTERVIEW_STATUS_FAILED:
+        INTERVIEW_EXPIRY_INDEX.remove(token)
     return conn.execute(
         """
         SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
@@ -829,6 +912,54 @@ def resolve_all_interview_timeouts(
                 max_interruptions=max_interruptions,
             )
         conn.commit()
+
+
+def ensure_interview_expiry_ready() -> bool:
+    return INTERVIEW_EXPIRY_INDEX.ensure_ready()
+
+
+def expire_interview_if_due(token: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, expires_at FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return False
+        if not _is_interview_active(row["status"]):
+            return False
+        if not _is_interview_expired(row["expires_at"], current_time):
+            return False
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_STATUS_FAILED, None, current_time.isoformat(), token),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    return True
+
+
+def sweep_expired_interviews(limit: int = INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE) -> Dict[str, int]:
+    due_tokens = INTERVIEW_EXPIRY_INDEX.due_tokens(limit=max(1, int(limit)))
+    if due_tokens is None:
+        raise RuntimeError("interview_expiry_redis_unavailable")
+    expired_count = 0
+    removed_count = 0
+    for token in due_tokens:
+        if expire_interview_if_due(token):
+            expired_count += 1
+        if INTERVIEW_EXPIRY_INDEX.remove(token):
+            removed_count += 1
+    return {
+        "scanned": len(due_tokens),
+        "expired": expired_count,
+        "removed": removed_count,
+    }
 
 
 def create_interview(
@@ -890,6 +1021,12 @@ def create_interview(
         )
         conn.commit()
     _invalidate_interview_cache(token)
+    if not INTERVIEW_EXPIRY_INDEX.schedule(token, expires_at):
+        with get_conn() as conn:
+            conn.execute("DELETE FROM interviews WHERE token = ?", (token,))
+            conn.commit()
+        _invalidate_interview_cache(token)
+        raise RuntimeError("interview_expiry_schedule_failed")
 
     return {
         "token": token,
@@ -910,7 +1047,6 @@ def create_interview(
 
 
 def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]:
-    resolve_all_interview_timeouts()
     where = ""
     params: List[object] = []
     if search.strip():
@@ -972,7 +1108,6 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
 
 
 def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
-    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -1062,6 +1197,7 @@ def delete_interview(token: str) -> bool:
         conn.execute("DELETE FROM interviews WHERE token = ?", (token,))
         conn.commit()
     _invalidate_interview_cache(token)
+    INTERVIEW_EXPIRY_INDEX.remove(token)
 
     _delete_interview_assets(token)
     return True
@@ -1072,7 +1208,6 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
     if cached is not CACHE_MISS:
         return cached
 
-    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -1117,7 +1252,6 @@ def interview_exists(token: str) -> bool:
     if cached is not None:
         return cached
 
-    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             "SELECT token, expires_at FROM interviews WHERE token = ?",
@@ -1165,7 +1299,6 @@ def _build_question_evidence(question_row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def start_interview_session(token: str) -> Optional[InterviewSessionData]:
-    resolve_interview_timeout(token)
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -1358,6 +1491,7 @@ def mark_interview_completed(token: str, completed_reason: Optional[str] = None)
         )
         conn.commit()
     _invalidate_interview_cache(token)
+    INTERVIEW_EXPIRY_INDEX.remove(token)
 
 
 def mark_interview_disconnected(token: str, grace_seconds: int = 30) -> bool:

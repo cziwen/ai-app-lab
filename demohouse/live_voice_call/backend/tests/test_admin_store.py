@@ -5,6 +5,33 @@ import sqlite3
 import admin_store
 
 
+class _FakeExpiryIndex:
+    def __init__(self):
+        self.entries = {}
+
+    def ensure_ready(self):
+        return True
+
+    def schedule(self, token: str, expires_at: str):
+        dt = datetime.fromisoformat(expires_at)
+        self.entries[token] = int(dt.timestamp() * 1000)
+        return True
+
+    def remove(self, token: str):
+        self.entries.pop(token, None)
+        return True
+
+    def due_tokens(self, now_ms=None, *, limit=200):
+        current_ms = (
+            int(datetime.now(timezone.utc).timestamp() * 1000)
+            if now_ms is None
+            else int(now_ms)
+        )
+        due = [token for token, score in self.entries.items() if score <= current_ms]
+        due.sort()
+        return due[: max(1, int(limit))]
+
+
 def _setup_tmp_store(monkeypatch, tmp_path: Path):
     data_dir = tmp_path / "data"
     storage_dir = data_dir / "storage"
@@ -16,6 +43,7 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(admin_store, "AUDIO_DIR", audio_dir)
     monkeypatch.setattr(admin_store, "INTERVIEW_LOG_DIR", interview_log_dir)
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
+    monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _FakeExpiryIndex())
 
 
 def _followups_for_job(job_uid: str, *, max_followups: int = 0):
@@ -458,12 +486,107 @@ def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp
             (expired, token),
         )
         conn.commit()
+    assert admin_store.INTERVIEW_EXPIRY_INDEX.schedule(token, expired) is True
 
     assert admin_store.get_public_access(token) is None
     assert admin_store.start_interview_session(token) is None
+    summary = admin_store.sweep_expired_interviews(limit=10)
+    assert summary["expired"] == 1
     detail = admin_store.get_interview_detail(token)
     assert detail is not None
     assert detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
+
+
+def test_sweep_expired_interviews_respects_batch_limit(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="批处理岗位",
+        duties="批处理验证",
+        requirements="熟悉测试",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍项目", "背景 职责 结果")],
+    )
+    tokens = []
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    for idx in range(3):
+        interview = admin_store.create_interview(
+            candidate_name=f"用户{idx}",
+            job_uid=job["job_uid"],
+            notes=None,
+            question_followups=_followups_for_job(job["job_uid"]),
+        )
+        token = interview["token"]
+        tokens.append(token)
+        with admin_store.get_conn() as conn:
+            conn.execute(
+                "UPDATE interviews SET expires_at = ? WHERE token = ?",
+                (expired, token),
+            )
+            conn.commit()
+        admin_store.INTERVIEW_EXPIRY_INDEX.schedule(token, expired)
+
+    first = admin_store.sweep_expired_interviews(limit=2)
+    assert first["scanned"] == 2
+    second = admin_store.sweep_expired_interviews(limit=2)
+    assert second["expired"] == 1
+    for token in tokens:
+        detail = admin_store.get_interview_detail(token)
+        assert detail is not None
+        assert detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
+
+
+def test_sweep_expired_interviews_raises_when_redis_unavailable(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+
+    class _UnavailableExpiryIndex:
+        def due_tokens(self, now_ms=None, *, limit=200):
+            return None
+
+    monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _UnavailableExpiryIndex())
+    try:
+        admin_store.sweep_expired_interviews(limit=10)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert str(exc) == "interview_expiry_redis_unavailable"
+
+
+def test_create_interview_fails_when_expiry_schedule_fails(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    class _FailingExpiryIndex:
+        def schedule(self, token: str, expires_at: str):
+            return False
+
+        def remove(self, token: str):
+            return True
+
+    monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _FailingExpiryIndex())
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    try:
+        admin_store.create_interview(
+            candidate_name="测试用户",
+            job_uid=job["job_uid"],
+            notes=None,
+            question_followups=_followups_for_job(job["job_uid"]),
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert str(exc) == "interview_expiry_schedule_failed"
 
 
 def test_mark_interview_completed_persists_completed_reason(monkeypatch, tmp_path):

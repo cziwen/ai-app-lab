@@ -124,6 +124,8 @@
     export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数
     export INTERVIEW_OCCUPANCY_TTL_SECONDS=30      # token 占用 TTL（秒）
     export INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS=10  # 占用续期间隔（秒）
+    export INTERVIEW_EXPIRY_SWEEP_SECONDS=10       # 过期 token 扫描周期（秒）
+    export INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE=200   # 每轮最多处理的过期 token 数
     export LLM_CONCURRENT_REQUESTS=5      # LLM 并发请求数
 
     # WebSocket 保活（用于更快回收异常断开的会话占位）

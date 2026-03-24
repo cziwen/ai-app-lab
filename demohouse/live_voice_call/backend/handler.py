@@ -31,13 +31,17 @@ from admin_store import (
     INTERVIEW_COMPLETED_REASON_ERROR,
     INTERVIEW_COMPLETED_REASON_HANGUP,
     INTERVIEW_COMPLETED_REASON_NORMAL_END,
+    INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,
+    INTERVIEW_EXPIRY_SWEEP_SECONDS,
     INTERVIEW_LOG_DIR,
+    ensure_interview_expiry_ready,
     ensure_default_admin,
     interview_exists,
     mark_interview_completed,
     mark_interview_in_progress,
     persist_interview_audio,
     save_interview_turns,
+    sweep_expired_interviews,
     start_interview_session,
 )
 from service import DEFAULT_SPEAKER, VoiceBotService
@@ -907,7 +911,7 @@ async def main():
     PERSISTENCE.start()
     server_logger.info("event=server.startup.begin")
     server_logger.info(
-        "event=server.config max_active=%s occupancy_ttl_seconds=%s occupancy_heartbeat_seconds=%s llm_limit=%s tts_speaker=%s frontend_log_max_body_bytes=%s frontend_log_max_entries=%s frontend_log_max_entry_chars=%s interview_logger_cache_max=%s interview_logger_idle_seconds=%s",
+        "event=server.config max_active=%s occupancy_ttl_seconds=%s occupancy_heartbeat_seconds=%s llm_limit=%s tts_speaker=%s frontend_log_max_body_bytes=%s frontend_log_max_entries=%s frontend_log_max_entry_chars=%s interview_logger_cache_max=%s interview_logger_idle_seconds=%s interview_expiry_sweep_seconds=%s interview_expiry_sweep_batch_size=%s",
         MAX_ACTIVE_INTERVIEWS,
         OCCUPANCY.config.ttl_seconds,
         OCCUPANCY.config.heartbeat_seconds,
@@ -918,6 +922,8 @@ async def main():
         FRONTEND_LOG_MAX_ENTRY_CHARS,
         INTERVIEW_LOGGER_CACHE_MAX,
         INTERVIEW_LOGGER_IDLE_SECONDS,
+        INTERVIEW_EXPIRY_SWEEP_SECONDS,
+        INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,
     )
     server_logger.info("event=startup_self_check.begin")
     self_check_report = await run_startup_self_check(RUNTIME_CONFIG)
@@ -926,6 +932,31 @@ async def main():
     if not self_check_report.ok:
         server_logger.error("event=startup_self_check.failed action=abort")
         raise SystemExit(1)
+    if not ensure_interview_expiry_ready():
+        server_logger.error("event=interview_expiry.startup_check.failed action=abort")
+        raise SystemExit(1)
+
+    async def _run_interview_expiry_sweeper() -> None:
+        while True:
+            try:
+                summary = await asyncio.to_thread(
+                    sweep_expired_interviews,
+                    INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,
+                )
+                if summary.get("scanned", 0) > 0:
+                    server_logger.info(
+                        "event=interview_expiry.sweep scanned=%s expired=%s removed=%s",
+                        summary.get("scanned", 0),
+                        summary.get("expired", 0),
+                        summary.get("removed", 0),
+                    )
+            except Exception as sweep_err:
+                server_logger.error(
+                    "event=interview_expiry.sweep_failed error=%s",
+                    sweep_err,
+                    exc_info=True,
+                )
+            await asyncio.sleep(INTERVIEW_EXPIRY_SWEEP_SECONDS)
 
     # Start the WebSocket server
     ws_server = await websockets.serve(
@@ -970,6 +1001,9 @@ async def main():
         ADMIN_API_PORT,
     )
 
+    interview_expiry_task: Optional[asyncio.Task] = asyncio.create_task(
+        _run_interview_expiry_sweeper()
+    )
     try:
         await asyncio.gather(
             ws_server.wait_closed(),
@@ -977,6 +1011,10 @@ async def main():
             admin_server.serve(),
         )
     finally:
+        if interview_expiry_task is not None:
+            interview_expiry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await interview_expiry_task
         await PERSISTENCE.shutdown(PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS)
         server_logger.info("event=server.shutdown")
 
