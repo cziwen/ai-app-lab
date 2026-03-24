@@ -13,6 +13,7 @@
 ### 📚 主文档
 - [README](../README.md) - 项目介绍、快速开始、配置说明
 - [部署文档](../deploy/DEPLOY.md) - Docker Compose 部署指南
+- [甲方接口文档](./CLIENT_INTERVIEW_API.md) - 面试数据链路对接（curl + JSON 示例）
 
 ## 后端模块文档
 
