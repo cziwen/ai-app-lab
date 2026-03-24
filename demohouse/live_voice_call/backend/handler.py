@@ -98,6 +98,9 @@ FRONTEND_LOG_MAX_ENTRIES = max(1, int(os.getenv("FRONTEND_LOG_MAX_ENTRIES", "200
 FRONTEND_LOG_MAX_ENTRY_CHARS = max(
     1, int(os.getenv("FRONTEND_LOG_MAX_ENTRY_CHARS", "2000"))
 )
+WS_PING_INTERVAL_SECONDS = max(1.0, float(os.getenv("WS_PING_INTERVAL_SECONDS", "20")))
+WS_PING_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_PING_TIMEOUT_SECONDS", "20")))
+WS_CLOSE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_CLOSE_TIMEOUT_SECONDS", "5")))
 
 _INTERVIEW_LOGGER_CACHE: Dict[Tuple[str, str], logging.Logger] = {}
 _INTERVIEW_LOGGER_LAST_USED: Dict[Tuple[str, str], float] = {}
@@ -608,7 +611,19 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         )
         # Start the handler loop and asynchronously fetch output events
         outputs = service.handler_loop(async_gen(websocket))
-        await asyncio.create_task(fetch_output(websocket, outputs))
+        fetch_task = asyncio.create_task(fetch_output(websocket, outputs))
+        wait_closed_task = asyncio.create_task(websocket.wait_closed())
+        done, pending = await asyncio.wait(
+            {fetch_task, wait_closed_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     except ClientWebSocketClosedError as close_err:
         close_source = "client_ws"
         close_detail = str(close_err.original)
@@ -913,7 +928,14 @@ async def main():
         raise SystemExit(1)
 
     # Start the WebSocket server
-    ws_server = await websockets.serve(handler, host=WS_HOST, port=WS_PORT)
+    ws_server = await websockets.serve(
+        handler,
+        host=WS_HOST,
+        port=WS_PORT,
+        ping_interval=WS_PING_INTERVAL_SECONDS,
+        ping_timeout=WS_PING_TIMEOUT_SECONDS,
+        close_timeout=WS_CLOSE_TIMEOUT_SECONDS,
+    )
     server_logger.info("event=server.ws.ready url=ws://%s:%s", WS_HOST, WS_PORT)
 
     # Start the HTTP log server
