@@ -312,6 +312,18 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail="面试不存在")
 
         completed = detail["status"] == "completed"
+        raw_scorecard = detail.get("scorecard") if isinstance(detail, dict) else None
+        scorecard = (
+            raw_scorecard
+            if isinstance(raw_scorecard, dict)
+            else {
+                "status": "pending",
+                "overall_score": None,
+                "completed_at": None,
+                "error_message": None,
+                "question_scores": [],
+            }
+        )
         response: Dict[str, Any] = {
             "interview": {
                 "token": detail["token"],
@@ -328,6 +340,13 @@ def create_admin_app(
                 "required_checkins": detail.get("required_checkins", []),
                 "interview_link": build_interview_link(detail["token"]),
                 "completed": completed,
+                "scorecard": {
+                    "status": str(scorecard.get("status", "pending") or "pending"),
+                    "overall_score": scorecard.get("overall_score"),
+                    "completed_at": scorecard.get("completed_at"),
+                    "error_message": scorecard.get("error_message"),
+                    "question_scores": scorecard.get("question_scores", []),
+                },
             }
         }
 

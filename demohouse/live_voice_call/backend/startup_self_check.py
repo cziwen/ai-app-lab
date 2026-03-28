@@ -24,6 +24,9 @@ class RuntimeConfig:
     llm2_thinking_type: Optional[str]
     llm1_reasoning_effort: Optional[str]
     llm2_reasoning_effort: Optional[str]
+    llm3_endpoint_id: Optional[str]
+    llm3_thinking_type: Optional[str]
+    llm3_reasoning_effort: Optional[str]
     asr_app_id: Optional[str]
     asr_access_token: Optional[str]
     asr_resource_id: Optional[str]
@@ -65,6 +68,9 @@ def load_runtime_config() -> RuntimeConfig:
         llm2_thinking_type=_env("LLM2_THINKING_TYPE"),
         llm1_reasoning_effort=_env("LLM1_REASONING_EFFORT"),
         llm2_reasoning_effort=_env("LLM2_REASONING_EFFORT"),
+        llm3_endpoint_id=_env("LLM3_ENDPOINT_ID"),
+        llm3_thinking_type=_env("LLM3_THINKING_TYPE"),
+        llm3_reasoning_effort=_env("LLM3_REASONING_EFFORT"),
         asr_app_id=_env("ASR_APP_ID"),
         asr_access_token=_env("ASR_ACCESS_TOKEN"),
         asr_resource_id=_env("ASR_RESOURCE_ID"),
@@ -158,6 +164,18 @@ async def check_llm2(config: RuntimeConfig) -> CheckResult:
         endpoint_id=config.llm2_endpoint_id,
         thinking_type=config.llm2_thinking_type,
         reasoning_effort=config.llm2_reasoning_effort,
+    )
+
+
+async def check_llm3(config: RuntimeConfig) -> CheckResult:
+    if not config.llm3_endpoint_id:
+        return CheckResult(ok=True, detail="LLM3 skipped (not configured)")
+    return await _check_llm_stage(
+        config,
+        stage_env_prefix="LLM3",
+        endpoint_id=config.llm3_endpoint_id,
+        thinking_type=config.llm3_thinking_type,
+        reasoning_effort=config.llm3_reasoning_effort,
     )
 
 
@@ -325,6 +343,7 @@ async def run_startup_self_check(
 
     checks["llm1"] = await check_llm1(runtime)
     checks["llm2"] = await check_llm2(runtime)
+    checks["llm3"] = await check_llm3(runtime)
     checks["asr"] = await check_asr(runtime)
     checks["tts"] = await check_tts(runtime)
     checks["redis"] = await check_redis(runtime)
@@ -341,7 +360,7 @@ async def run_startup_self_check(
 def format_self_check_lines(report: SelfCheckReport) -> List[str]:
     status = "PASS" if report.ok else "FAIL"
     lines = [f"[StartupSelfCheck] summary status={status}"]
-    for name in ("llm1", "llm2", "asr", "tts", "redis"):
+    for name in ("llm1", "llm2", "llm3", "asr", "tts", "redis"):
         result = report.checks.get(name)
         if not result:
             lines.append(f"[StartupSelfCheck] {name} status=FAIL detail=missing_result")

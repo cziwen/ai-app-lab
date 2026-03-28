@@ -80,6 +80,22 @@ export type InterviewDetail = {
     candidate_url: string;
     interviewer_url: string;
   };
+  scorecard: {
+    status: 'pending' | 'completed' | 'failed' | string;
+    overall_score?: number | null;
+    completed_at?: string | null;
+    error_message?: string | null;
+    question_scores: Array<{
+      question_id: string;
+      sort_order: number;
+      question: string;
+      ability_dimension: string;
+      output_format: string;
+      aggregated_answer: string;
+      numeric_score: number;
+      comment: string;
+    }>;
+  };
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {

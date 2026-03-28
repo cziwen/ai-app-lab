@@ -37,13 +37,17 @@ from admin_store import (
     ensure_interview_expiry_ready,
     ensure_default_admin,
     interview_exists,
+    init_interview_scorecard,
     mark_interview_completed,
     mark_interview_in_progress,
     persist_interview_audio,
+    save_interview_scorecard_failed,
+    save_interview_scorecard_success,
     save_interview_turns,
     sweep_expired_interviews,
     start_interview_session,
 )
+from interview_scorer import InterviewScorer
 from service import DEFAULT_SPEAKER, VoiceBotService
 from startup_self_check import (
     format_self_check_lines,
@@ -244,11 +248,18 @@ class PersistenceTask:
     turns: list
     candidate_pcm_bytes: bytes
     interviewer_encoded_bytes: bytes
+    score_inputs: List[Dict[str, Any]]
     should_mark_completed: bool
     completed_reason: Optional[str]
     candidate_audio_dropped_frames: int
     grace_seconds: int = 30
     retries: int = 0
+
+
+@dataclass
+class ScoringTask:
+    token: str
+    score_inputs: List[Dict[str, Any]]
 
 
 class PersistenceQueue:
@@ -314,6 +325,13 @@ class PersistenceQueue:
                     task.token,
                     task.completed_reason,
                 )
+                await asyncio.to_thread(init_interview_scorecard, task.token)
+                await SCORING.submit(
+                    ScoringTask(
+                        token=task.token,
+                        score_inputs=list(task.score_inputs or []),
+                    )
+                )
         except Exception as persist_err:
             if task.retries >= PERSISTENCE_MAX_RETRIES:
                 self.logger.error(
@@ -338,8 +356,97 @@ class PersistenceQueue:
             await self._queue.put(task)
 
 
+class ScoringQueue:
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self._queue: "asyncio.Queue[Optional[ScoringTask]]" = asyncio.Queue(
+            maxsize=max(1, PERSISTENCE_QUEUE_SIZE)
+        )
+        self._worker_task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._worker_task and not self._worker_task.done():
+            return
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
+    async def submit(self, task: ScoringTask) -> None:
+        await self._queue.put(task)
+
+    async def shutdown(self, timeout_seconds: float) -> None:
+        if not self._worker_task:
+            return
+        await self._queue.put(None)
+        try:
+            await asyncio.wait_for(self._worker_task, timeout=max(0.1, timeout_seconds))
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                "event=scoring_queue.shutdown_timeout action=cancel_worker"
+            )
+            self._worker_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._worker_task
+
+    async def _worker_loop(self) -> None:
+        while True:
+            task = await self._queue.get()
+            if task is None:
+                self._queue.task_done()
+                return
+            try:
+                await self._process(task)
+            finally:
+                self._queue.task_done()
+
+    async def _process(self, task: ScoringTask) -> None:
+        scorer = InterviewScorer(
+            llm_endpoint_id=(RUNTIME_CONFIG.llm3_endpoint_id or "").strip() or None,
+            llm_thinking_type=(RUNTIME_CONFIG.llm3_thinking_type or "disabled"),
+            llm_reasoning_effort=RUNTIME_CONFIG.llm3_reasoning_effort,
+        )
+        try:
+            result = await scorer.score_interview(task.score_inputs)
+            payload = [
+                {
+                    "question_id": item.question_id,
+                    "sort_order": item.sort_order,
+                    "question": item.question,
+                    "ability_dimension": item.ability_dimension,
+                    "output_format": item.output_format,
+                    "aggregated_answer": item.aggregated_answer,
+                    "numeric_score": item.numeric_score,
+                    "comment": item.comment,
+                }
+                for item in result.question_scores
+            ]
+            await asyncio.to_thread(
+                save_interview_scorecard_success,
+                task.token,
+                result.overall_score,
+                payload,
+            )
+            self.logger.info(
+                "event=interview_scoring.success token=%s question_count=%s overall_score=%.2f",
+                task.token,
+                len(payload),
+                result.overall_score,
+            )
+        except Exception as score_err:
+            await asyncio.to_thread(
+                save_interview_scorecard_failed,
+                task.token,
+                str(score_err),
+            )
+            self.logger.error(
+                "event=interview_scoring.failed token=%s error=%s",
+                task.token,
+                score_err,
+                exc_info=True,
+            )
+
+
 OCCUPANCY = InterviewOccupancy(load_occupancy_config(max_active=MAX_ACTIVE_INTERVIEWS))
 PERSISTENCE = PersistenceQueue(server_logger)
+SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
 
 
@@ -677,12 +784,27 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     )
                 )
             )
+            score_inputs: List[Dict[str, Any]] = []
+            build_score_inputs = getattr(service, "build_interview_score_inputs", None)
+            if callable(build_score_inputs):
+                try:
+                    raw_score_inputs = build_score_inputs()
+                    if isinstance(raw_score_inputs, list):
+                        score_inputs = [
+                            item for item in raw_score_inputs if isinstance(item, dict)
+                        ]
+                except Exception as scoring_payload_err:
+                    interview_log(
+                        "[InterviewScoring] failed to build score inputs: "
+                        f"{scoring_payload_err}"
+                    )
             await PERSISTENCE.submit(
                 PersistenceTask(
                     token=token,
                     turns=turns,
                     candidate_pcm_bytes=bytes(candidate_audio),
                     interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
+                    score_inputs=score_inputs,
                     should_mark_completed=True,
                     completed_reason=completed_reason,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,
@@ -909,6 +1031,7 @@ async def main():
     server_logger.info("event=server.log_file.selected path=%s", SERVER_BOOT_LOG_PATH)
     configure_llm_limit(int(os.getenv("LLM_CONCURRENT_REQUESTS", "5")))
     PERSISTENCE.start()
+    SCORING.start()
     server_logger.info("event=server.startup.begin")
     server_logger.info(
         "event=server.config max_active=%s occupancy_ttl_seconds=%s occupancy_heartbeat_seconds=%s llm_limit=%s tts_speaker=%s frontend_log_max_body_bytes=%s frontend_log_max_entries=%s frontend_log_max_entry_chars=%s interview_logger_cache_max=%s interview_logger_idle_seconds=%s interview_expiry_sweep_seconds=%s interview_expiry_sweep_batch_size=%s",
@@ -1016,6 +1139,7 @@ async def main():
             with contextlib.suppress(asyncio.CancelledError):
                 await interview_expiry_task
         await PERSISTENCE.shutdown(PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS)
+        await SCORING.shutdown(PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS)
         server_logger.info("event=server.shutdown")
 
 

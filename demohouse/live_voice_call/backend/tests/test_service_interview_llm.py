@@ -2,6 +2,7 @@ import asyncio
 
 from arkitect.core.component.llm.model import ArkMessage
 
+from interview_flow import QuestionAnswerSnapshot
 import service
 
 
@@ -52,3 +53,44 @@ def test_stream_interview_llm_chat_uses_responses_adapter_and_persists_history()
         assert svc.history_messages[-1].content == "你好，请继续。"
 
     asyncio.run(_run())
+
+
+def test_build_interview_score_inputs_maps_snapshot_fields():
+    class _FakeFlow:
+        def export_question_answer_snapshots(self):
+            return [
+                QuestionAnswerSnapshot(
+                    question_id="q1",
+                    sort_order=1,
+                    question="请介绍项目",
+                    evidence={
+                        "ability_dimension": "项目管理",
+                        "scoring_boundary": "目标-行动-结果",
+                        "best_standard": "完整闭环",
+                        "medium_standard": "部分闭环",
+                        "worst_standard": "无结果",
+                        "output_format": "评分0-5 + 摘要",
+                    },
+                    candidate_answers=["我负责拆解目标", "最终提升转化率"],
+                    aggregated_answer="我负责拆解目标\\n最终提升转化率",
+                )
+            ]
+
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+    )
+    svc.interview_flow = _FakeFlow()
+    payloads = svc.build_interview_score_inputs()
+    assert len(payloads) == 1
+    item = payloads[0]
+    assert item["question_id"] == "q1"
+    assert item["ability_dimension"] == "项目管理"
+    assert item["output_format"] == "评分0-5 + 摘要"
+    assert item["aggregated_answer"] == "我负责拆解目标\\n最终提升转化率"

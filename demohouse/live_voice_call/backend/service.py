@@ -33,6 +33,7 @@ from interview_flow import (
     ASK_QUESTION,
     DONE,
     INTRO,
+    QuestionAnswerSnapshot,
     WAIT_ANSWER,
     WRAP_UP,
     FlowResponse,
@@ -352,6 +353,44 @@ class VoiceBotService(BaseModel):
             self._log(
                 f"[InterviewPersist] on_interview_completed callback failed: {callback_error}"
             )
+
+    def build_interview_score_inputs(self) -> List[Dict[str, Any]]:
+        if not self.interview_mode or not self.interview_flow:
+            return []
+        snapshots: List[QuestionAnswerSnapshot] = (
+            self.interview_flow.export_question_answer_snapshots()
+        )
+        items: List[Dict[str, Any]] = []
+        for snapshot in snapshots:
+            evidence = snapshot.evidence or {}
+            items.append(
+                {
+                    "question_id": snapshot.question_id,
+                    "sort_order": snapshot.sort_order,
+                    "question": snapshot.question,
+                    "ability_dimension": str(
+                        evidence.get("ability_dimension", "") or ""
+                    ).strip(),
+                    "scoring_boundary": str(
+                        evidence.get("scoring_boundary", "") or ""
+                    ).strip(),
+                    "best_standard": str(
+                        evidence.get("best_standard", "") or ""
+                    ).strip(),
+                    "medium_standard": str(
+                        evidence.get("medium_standard", "") or ""
+                    ).strip(),
+                    "worst_standard": str(
+                        evidence.get("worst_standard", "") or ""
+                    ).strip(),
+                    "output_format": str(
+                        evidence.get("output_format", "") or ""
+                    ).strip(),
+                    "candidate_answers": snapshot.candidate_answers,
+                    "aggregated_answer": snapshot.aggregated_answer,
+                }
+            )
+        return items
 
     async def _greeting_text_stream(self, text: str) -> AsyncIterable[str]:
         """Yield a single greeting text for TTS processing (no LLM call)."""

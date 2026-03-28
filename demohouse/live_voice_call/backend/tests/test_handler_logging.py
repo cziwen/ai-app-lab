@@ -288,6 +288,7 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
         turns=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
+        score_inputs=[],
         should_mark_completed=True,
         completed_reason="disconnect",
         candidate_audio_dropped_frames=0,
@@ -301,3 +302,77 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
         and "event=interview_persist.failed" in record.getMessage()
         for record in captured_records
     )
+
+
+def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
+    captured = {
+        "init_scorecard": [],
+        "mark_completed": [],
+        "scoring_tasks": [],
+    }
+
+    class _FakeScoringQueue:
+        async def submit(self, task):
+            captured["scoring_tasks"].append(task)
+
+    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(
+        handler,
+        "mark_interview_completed",
+        lambda token, reason: captured["mark_completed"].append((token, reason)),
+    )
+    monkeypatch.setattr(
+        handler,
+        "init_interview_scorecard",
+        lambda token: captured["init_scorecard"].append(token),
+    )
+    monkeypatch.setattr(handler, "SCORING", _FakeScoringQueue())
+
+    queue = handler.PersistenceQueue(logging.getLogger("test.persistence.scoring"))
+    task = handler.PersistenceTask(
+        token="INT-PERSIST-SCORING",
+        turns=[],
+        candidate_pcm_bytes=b"",
+        interviewer_encoded_bytes=b"",
+        score_inputs=[{"question_id": "q1"}],
+        should_mark_completed=True,
+        completed_reason="normal_end",
+        candidate_audio_dropped_frames=0,
+    )
+
+    asyncio.run(queue._process(task))
+
+    assert captured["mark_completed"] == [("INT-PERSIST-SCORING", "normal_end")]
+    assert captured["init_scorecard"] == ["INT-PERSIST-SCORING"]
+    assert len(captured["scoring_tasks"]) == 1
+    assert captured["scoring_tasks"][0].token == "INT-PERSIST-SCORING"
+
+
+def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):
+    captured = {"failed": []}
+
+    class _BrokenScorer:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def score_interview(self, _inputs):
+            raise RuntimeError("mock score failure")
+
+    monkeypatch.setattr(handler, "InterviewScorer", _BrokenScorer)
+    monkeypatch.setattr(
+        handler,
+        "save_interview_scorecard_failed",
+        lambda token, error: captured["failed"].append((token, error)),
+    )
+
+    queue = handler.ScoringQueue(logging.getLogger("test.scoring.queue"))
+    task = handler.ScoringTask(
+        token="INT-SCORE-FAILED",
+        score_inputs=[{"question_id": "q1", "aggregated_answer": "abc"}],
+    )
+
+    asyncio.run(queue._process(task))
+
+    assert len(captured["failed"]) == 1
+    assert captured["failed"][0][0] == "INT-SCORE-FAILED"

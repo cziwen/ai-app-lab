@@ -38,6 +38,19 @@ const formatCompletedReason = (reason?: string | null): string => {
   return COMPLETED_REASON_LABEL[reason] || reason;
 };
 
+const SCORECARD_STATUS_LABEL: Record<string, string> = {
+  pending: '评分中',
+  completed: '评分完成',
+  failed: '评分失败',
+};
+
+const formatScorecardStatus = (status?: string): string => {
+  if (!status) {
+    return '评分中';
+  }
+  return SCORECARD_STATUS_LABEL[status] || status;
+};
+
 export const AdminInterviewsPage = () => {
   const { loadingAuth, username, globalError, setGlobalError, handleLogout } = useAdminAuth();
   const [interviewSearch, setInterviewSearch] = useState('');
@@ -435,6 +448,35 @@ export const AdminInterviewsPage = () => {
                   </ol>
                 )}
                 {!interviewDetail.selected_questions?.length && <p>暂无抽题数据</p>}
+              </section>
+
+              <section>
+                <h3 className="admin-detail-title">AI 评分</h3>
+                <p>状态：{formatScorecardStatus(interviewDetail.scorecard?.status)}</p>
+                {interviewDetail.scorecard?.status === 'completed' && (
+                  <p>总分：{(interviewDetail.scorecard?.overall_score ?? 0).toFixed(2)} / 5.00</p>
+                )}
+                {interviewDetail.scorecard?.status === 'failed' && (
+                  <p>失败原因：{interviewDetail.scorecard?.error_message || '评分服务异常'}</p>
+                )}
+                {!!interviewDetail.scorecard?.question_scores?.length && (
+                  <ol className="admin-qa-list">
+                    {interviewDetail.scorecard.question_scores.map(item => (
+                      <li key={`${item.question_id}-${item.sort_order}`}>
+                        <p>
+                          {item.sort_order}. {item.question}
+                        </p>
+                        <p>分数：{item.numeric_score.toFixed(2)} / 5.00</p>
+                        {item.ability_dimension && <p>能力维度：{item.ability_dimension}</p>}
+                        {item.output_format && <p>输出格式：{item.output_format}</p>}
+                        <p>评语：{item.comment}</p>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {!interviewDetail.scorecard?.question_scores?.length && (
+                  <p>暂无逐题评分数据。</p>
+                )}
               </section>
 
               {interviewDetail.completed ? (

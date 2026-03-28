@@ -446,6 +446,16 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
         interview_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(interviews)").fetchall()
         }
+        scorecard_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(interview_scorecards)").fetchall()
+        }
+        question_score_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(interview_question_scores)"
+            ).fetchall()
+        }
     assert "ability_dimension" in question_columns
     assert "scoring_boundary" in question_columns
     assert "best_standard" in question_columns
@@ -455,6 +465,11 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "question_followup_limits" in interview_columns
     assert "expires_at" in interview_columns
     assert "completed_reason" in interview_columns
+    assert "status" in scorecard_columns
+    assert "overall_score" in scorecard_columns
+    assert "error_message" in scorecard_columns
+    assert "numeric_score" in question_score_columns
+    assert "comment" in question_score_columns
 
 
 def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp_path):
@@ -620,3 +635,103 @@ def test_mark_interview_completed_persists_completed_reason(monkeypatch, tmp_pat
     assert detail is not None
     assert detail["status"] == admin_store.INTERVIEW_STATUS_COMPLETED
     assert detail["completed_reason"] == admin_store.INTERVIEW_COMPLETED_REASON_HANGUP
+
+
+def test_interview_scorecard_success_is_persisted_and_returned(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    admin_store.init_interview_scorecard(token)
+    admin_store.save_interview_scorecard_success(
+        token,
+        overall_score=4.25,
+        question_scores=[
+            {
+                "question_id": "q1",
+                "sort_order": 1,
+                "question": "介绍一个项目",
+                "ability_dimension": "项目管理",
+                "output_format": "评分0-5 + 摘要",
+                "aggregated_answer": "我负责拆解目标并推动上线。",
+                "numeric_score": 4.25,
+                "comment": "回答覆盖较完整。",
+            }
+        ],
+    )
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    scorecard = detail["scorecard"]
+    assert scorecard is not None
+    assert scorecard["status"] == admin_store.SCORECARD_STATUS_COMPLETED
+    assert scorecard["overall_score"] == 4.25
+    assert len(scorecard["question_scores"]) == 1
+    assert scorecard["question_scores"][0]["comment"] == "回答覆盖较完整。"
+
+
+def test_interview_scorecard_failed_clears_question_scores(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    admin_store.init_interview_scorecard(token)
+    admin_store.save_interview_scorecard_success(
+        token,
+        overall_score=3.0,
+        question_scores=[
+            {
+                "question_id": "q1",
+                "sort_order": 1,
+                "question": "介绍一个项目",
+                "ability_dimension": "",
+                "output_format": "",
+                "aggregated_answer": "回答",
+                "numeric_score": 3.0,
+                "comment": "中等。",
+            }
+        ],
+    )
+    admin_store.save_interview_scorecard_failed(token, "mock scoring error")
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    scorecard = detail["scorecard"]
+    assert scorecard is not None
+    assert scorecard["status"] == admin_store.SCORECARD_STATUS_FAILED
+    assert scorecard["error_message"] == "mock scoring error"
+    assert scorecard["question_scores"] == []

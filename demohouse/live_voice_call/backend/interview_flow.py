@@ -36,6 +36,16 @@ class FlowResponse:
     transition_trace: List[str]
 
 
+@dataclass
+class QuestionAnswerSnapshot:
+    question_id: str
+    sort_order: int
+    question: str
+    evidence: Dict[str, Any]
+    candidate_answers: List[str]
+    aggregated_answer: str
+
+
 class InterviewFlow:
     def __init__(
         self,
@@ -229,3 +239,24 @@ class InterviewFlow:
             question_id=q.question_id,
             transition_trace=trace,
         )
+
+    def export_question_answer_snapshots(self) -> List[QuestionAnswerSnapshot]:
+        snapshots: List[QuestionAnswerSnapshot] = []
+        for idx, q in enumerate(self.questions):
+            candidate_answers = [
+                str(turn.get("content", "")).strip()
+                for turn in q.turns
+                if str(turn.get("role", "")) == "candidate" and str(turn.get("content", "")).strip()
+            ]
+            aggregated = "\n".join(candidate_answers).strip()
+            snapshots.append(
+                QuestionAnswerSnapshot(
+                    question_id=q.question_id,
+                    sort_order=idx + 1,
+                    question=q.main_question,
+                    evidence=dict(q.evidence or {}),
+                    candidate_answers=candidate_answers,
+                    aggregated_answer=aggregated,
+                )
+            )
+        return snapshots

@@ -119,6 +119,31 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
     ]
 
 
+def test_interview_detail_includes_scorecard(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="李四",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+        required_checkins=["speaker", "mic"],
+    )
+
+    response = client.get(f"/api/admin/interviews/{interview['token']}")
+    assert response.status_code == 200
+    scorecard = response.json()["interview"]["scorecard"]
+    assert scorecard["status"] == "pending"
+    assert scorecard["question_scores"] == []
+
+
 def test_create_interview_invalid_question_followups_returns_400(monkeypatch, tmp_path):
     client = _client_with_login(monkeypatch, tmp_path)
     job = admin_store.create_job(

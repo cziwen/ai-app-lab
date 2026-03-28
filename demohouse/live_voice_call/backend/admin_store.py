@@ -31,6 +31,9 @@ INTERVIEW_STATUS_IN_PROGRESS = "in_progress"
 INTERVIEW_STATUS_COMPLETED = "completed"
 INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
+SCORECARD_STATUS_PENDING = "pending"
+SCORECARD_STATUS_COMPLETED = "completed"
+SCORECARD_STATUS_FAILED = "failed"
 INTERVIEW_COMPLETED_REASON_NORMAL_END = "normal_end"
 INTERVIEW_COMPLETED_REASON_HANGUP = "hangup"
 INTERVIEW_COMPLETED_REASON_DISCONNECT = "disconnect"
@@ -214,6 +217,31 @@ CREATE TABLE IF NOT EXISTS interview_turns (
   content TEXT NOT NULL,
   created_at TEXT NOT NULL,
   sort_order INTEGER NOT NULL,
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS interview_scorecards (
+  interview_token TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'pending',
+  overall_score REAL,
+  error_message TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS interview_question_scores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  interview_token TEXT NOT NULL,
+  question_id TEXT NOT NULL,
+  sort_order INTEGER NOT NULL,
+  question TEXT NOT NULL,
+  ability_dimension TEXT NOT NULL DEFAULT '',
+  output_format TEXT NOT NULL DEFAULT '',
+  aggregated_answer TEXT NOT NULL DEFAULT '',
+  numeric_score REAL NOT NULL DEFAULT 0,
+  comment TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
 );
 """
@@ -1152,6 +1180,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
                     "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
                 }
             )
+        scorecard = _load_interview_scorecard_in_conn(conn, token)
 
     return {
         "token": row["token"],
@@ -1174,6 +1203,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         },
         "selected_questions": selected_questions,
         "required_checkins": parse_required_checkins(row["required_checkins"]),
+        "scorecard": scorecard,
         "turns": [
             {
                 "role": t["role"],
@@ -1408,6 +1438,179 @@ def save_interview_turns(token: str, turns: Sequence[Tuple[str, str, str]]) -> N
                 (token, role, content, created_at, idx),
             )
         conn.commit()
+
+
+def init_interview_scorecard(token: str) -> None:
+    now = utc_now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO interview_scorecards (
+                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(interview_token) DO UPDATE SET
+                status = excluded.status,
+                overall_score = excluded.overall_score,
+                error_message = excluded.error_message,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                token,
+                SCORECARD_STATUS_PENDING,
+                None,
+                None,
+                now,
+                None,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM interview_question_scores WHERE interview_token = ?",
+            (token,),
+        )
+        conn.commit()
+
+
+def save_interview_scorecard_success(
+    token: str,
+    overall_score: float,
+    question_scores: Sequence[Dict[str, Any]],
+) -> None:
+    now = utc_now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO interview_scorecards (
+                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(interview_token) DO UPDATE SET
+                status = excluded.status,
+                overall_score = excluded.overall_score,
+                error_message = excluded.error_message,
+                completed_at = excluded.completed_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                token,
+                SCORECARD_STATUS_COMPLETED,
+                float(overall_score),
+                None,
+                now,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM interview_question_scores WHERE interview_token = ?",
+            (token,),
+        )
+        for item in question_scores:
+            conn.execute(
+                """
+                INSERT INTO interview_question_scores (
+                    interview_token, question_id, sort_order, question, ability_dimension,
+                    output_format, aggregated_answer, numeric_score, comment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    str(item.get("question_id", "") or ""),
+                    int(item.get("sort_order", 0) or 0),
+                    str(item.get("question", "") or ""),
+                    str(item.get("ability_dimension", "") or ""),
+                    str(item.get("output_format", "") or ""),
+                    str(item.get("aggregated_answer", "") or ""),
+                    float(item.get("numeric_score", 0.0) or 0.0),
+                    str(item.get("comment", "") or ""),
+                ),
+            )
+        conn.commit()
+
+
+def save_interview_scorecard_failed(token: str, error_message: str) -> None:
+    now = utc_now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO interview_scorecards (
+                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(interview_token) DO UPDATE SET
+                status = excluded.status,
+                overall_score = excluded.overall_score,
+                error_message = excluded.error_message,
+                completed_at = excluded.completed_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                token,
+                SCORECARD_STATUS_FAILED,
+                None,
+                (error_message or "").strip()[:2000],
+                now,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM interview_question_scores WHERE interview_token = ?",
+            (token,),
+        )
+        conn.commit()
+
+
+def _load_interview_scorecard_in_conn(
+    conn: sqlite3.Connection, token: str
+) -> Optional[Dict[str, Any]]:
+    card = conn.execute(
+        """
+        SELECT interview_token, status, overall_score, error_message, started_at, completed_at
+        FROM interview_scorecards
+        WHERE interview_token = ?
+        """,
+        (token,),
+    ).fetchone()
+    if not card:
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT question_id, sort_order, question, ability_dimension, output_format,
+               aggregated_answer, numeric_score, comment
+        FROM interview_question_scores
+        WHERE interview_token = ?
+        ORDER BY sort_order ASC, id ASC
+        """,
+        (token,),
+    ).fetchall()
+    return {
+        "status": card["status"],
+        "overall_score": (
+            None if card["overall_score"] is None else float(card["overall_score"])
+        ),
+        "started_at": card["started_at"],
+        "completed_at": card["completed_at"],
+        "error_message": card["error_message"],
+        "question_scores": [
+            {
+                "question_id": row["question_id"],
+                "sort_order": int(row["sort_order"] or 0),
+                "question": row["question"],
+                "ability_dimension": row["ability_dimension"],
+                "output_format": row["output_format"],
+                "aggregated_answer": row["aggregated_answer"],
+                "numeric_score": float(row["numeric_score"] or 0.0),
+                "comment": row["comment"],
+            }
+            for row in rows
+        ],
+    }
 
 
 def _write_pcm_to_wav(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:

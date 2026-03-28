@@ -166,3 +166,35 @@ def test_intro_mentions_dynamic_question_count():
         assert "本场共1道题" in intro.interviewer_text
 
     asyncio.run(_run())
+
+
+def test_export_question_answer_snapshots_aggregates_answers_per_question():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[
+                Decision(False, True, "继续补充结果", "need_more", 0.3),
+                Decision(True, False, "", "enough", 0.8),
+                Decision(True, False, "", "ok", 0.9),
+            ]
+        )
+        questions = [
+            {"question_id": "q1", "main_question": "介绍项目", "max_followups": 2},
+            {"question_id": "q2", "main_question": "介绍协作", "max_followups": 0},
+        ]
+        flow = InterviewFlow(questions=questions, judge=judge)
+
+        await _bootstrap_to_wait(flow)
+        await flow.receive_candidate_answer("回答1")
+        await _bootstrap_to_wait(flow)
+        await flow.receive_candidate_answer("回答2")
+        await _bootstrap_to_wait(flow)
+        await flow.receive_candidate_answer("回答3")
+
+        snapshots = flow.export_question_answer_snapshots()
+        assert len(snapshots) == 2
+        assert snapshots[0].candidate_answers == ["回答1", "回答2"]
+        assert snapshots[0].aggregated_answer == "回答1\n回答2"
+        assert snapshots[1].candidate_answers == ["回答3"]
+        assert snapshots[1].aggregated_answer == "回答3"
+
+    asyncio.run(_run())
