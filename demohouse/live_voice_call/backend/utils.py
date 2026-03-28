@@ -10,6 +10,7 @@
 # limitations under the License. 
 
 import struct
+from typing import Any, Dict, Optional
 
 from arkitect.utils.binary_protocol import (
     AUDIO_ONLY_SERVER,
@@ -21,6 +22,23 @@ from arkitect.utils.binary_protocol import (
     parse_request,
 )
 from event import *
+
+
+def _convert_json_request_to_web_event(req: Dict[str, Any]) -> WebEvent:
+    raw_event = req.get("event")
+    if not isinstance(raw_event, str) or not raw_event:
+        raise ValueError("invalid event in json request")
+
+    payload_obj: Optional[WebPayload] = None
+    raw_payload = req.get("payload")
+    if isinstance(raw_payload, dict):
+        if raw_event == BOT_UPDATE_CONFIG:
+            payload_obj = BotUpdateConfigPayload(**raw_payload)
+        else:
+            # Client control events may carry free-form payload for logging only.
+            payload_obj = None
+
+    return WebEvent(event=raw_event, payload=payload_obj)
 
 
 def json_payload_to_binary_response(event: WebEvent) -> bytes:
@@ -112,7 +130,7 @@ def convert_binary_to_web_event_to_binary(data: bytes) -> WebEvent:
     req = parse_request(data)
     # If the parsing result is a dictionary, convert it to a WebEvent object
     if isinstance(req, dict):
-        return WebEvent.parse_obj(req)
+        return _convert_json_request_to_web_event(req)
     # Otherwise, create a new WebEvent object containing the audio data
     else:
         return WebEvent(event=USER_AUDIO, data=req)
