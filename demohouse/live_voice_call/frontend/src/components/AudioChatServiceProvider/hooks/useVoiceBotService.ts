@@ -181,6 +181,14 @@ export const useVoiceBotService = () => {
     log('send | event:' + EventType.ClientHangup);
   };
 
+  const notifyClientEndAnswer = () => {
+    serviceRef.current?.sendMessage({
+      event: EventType.ClientEndAnswer,
+      payload: { source: 'ui_end_answer' },
+    });
+    log('send | event:' + EventType.ClientEndAnswer);
+  };
+
   const shutdownSession = () => {
     wsReadyRef.current = false;
     serviceRef.current?.shutdown();
@@ -232,6 +240,12 @@ export const useVoiceBotService = () => {
             wsReadyRef.current = true;
             setChatMessages(prev => [...prev, { role: 'bot', content: '' }]);
             break;
+          case EventType.SentencePartialRecognized: {
+            const partial =
+              (payload as { sentence?: string } | undefined)?.sentence || '';
+            setCurrentUserSentence(partial);
+            break;
+          }
           case EventType.SentenceRecognized:
             recStop();
             const content =
@@ -313,5 +327,6 @@ export const useVoiceBotService = () => {
     disconnectSession,
     shutdownSession,
     notifyClientHangup,
+    notifyClientEndAnswer,
   };
 };

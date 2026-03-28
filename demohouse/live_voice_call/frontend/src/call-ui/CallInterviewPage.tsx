@@ -309,6 +309,8 @@ export const CallInterviewPage = () => {
         <div className="overlay-bottom">
           <CallControlBar
             isInCall={uiState.isInCall}
+            showEndAnswerButton={uiState.showEndAnswerButton}
+            endAnswerEnabled={uiState.endAnswerEnabled}
             debugAllowed={controller.debugAllowed}
             onAction={controller.onControlAction}
           />

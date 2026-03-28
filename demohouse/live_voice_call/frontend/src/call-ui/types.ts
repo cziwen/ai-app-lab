@@ -31,6 +31,8 @@ export interface CallUiState {
   mode: CallMode;
   isConnected: boolean;
   isInCall: boolean;
+  showEndAnswerButton?: boolean;
+  endAnswerEnabled?: boolean;
   interviewerSpeaking: boolean;
   candidateSpeaking: boolean;
   micOn: boolean;
@@ -49,6 +51,7 @@ export type CallControlAction =
   | 'toggleMic'
   | 'toggleCam'
   | 'toggleShare'
+  | 'endAnswer'
   | 'hangUp'
   | 'connect'
   | 'toggleDebug'
@@ -87,6 +90,7 @@ export interface WsReadyPayload {
 export type WsContractEventMap = {
   BotReady: WsEventEnvelope<WsReadyPayload>;
   SentenceRecognized: WsEventEnvelope<WsSentencePayload>;
+  SentencePartialRecognized: WsEventEnvelope<WsSentencePayload>;
   TTSSentenceStart: WsEventEnvelope<WsSentencePayload>;
   TTSDone: WsEventEnvelope<Record<string, never>>;
   BotError: WsEventEnvelope<{
@@ -117,6 +121,8 @@ export interface CallParticipantCardProps {
 
 export interface CallControlBarProps {
   isInCall: boolean;
+  showEndAnswerButton?: boolean;
+  endAnswerEnabled?: boolean;
   debugAllowed: boolean;
   onAction: (action: CallControlAction) => void;
 }

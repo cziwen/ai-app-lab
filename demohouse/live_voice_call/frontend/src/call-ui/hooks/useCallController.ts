@@ -112,8 +112,13 @@ export const useCallController = (): CallController => {
   const { currentBotSentence, currentUserSentence } = useCurrentSentence();
   const { wsUrl, setWsUrl } = useWsUrl();
   const { recStart, recStop } = useAudioRecorder();
-  const { handleConnect, disconnectSession, shutdownSession, notifyClientHangup } =
-    useVoiceBotService();
+  const {
+    handleConnect,
+    disconnectSession,
+    shutdownSession,
+    notifyClientHangup,
+    notifyClientEndAnswer,
+  } = useVoiceBotService();
   const { logContent } = useLogContent();
   const { mediaStreamsRef } = useSessionAuth();
   const debugAllowed = useMemo(
@@ -317,6 +322,9 @@ export const useCallController = (): CallController => {
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
   const isInCall = mode === 'mock' ? mockInCall : realInCall;
+  const showEndAnswerButton = mode === 'real' && userSpeaking;
+  const endAnswerEnabled =
+    showEndAnswerButton && currentUserSentence.trim().length > 0;
   const interviewerActive = botSpeaking || botAudioPlaying;
   const interviewerSpeaking =
     mode === 'mock'
@@ -372,6 +380,17 @@ export const useCallController = (): CallController => {
       case 'toggleShare':
         setShareOn(prev => !prev);
         return;
+      case 'endAnswer':
+        if (mode !== 'real' || !showEndAnswerButton) {
+          return;
+        }
+        if (!endAnswerEnabled) {
+          Message.warning('请先说出可识别内容后再结束本题');
+          return;
+        }
+        recStop();
+        notifyClientEndAnswer();
+        return;
       case 'hangUp':
         if (mode === 'mock') {
           setMockInCall(false);
@@ -425,6 +444,8 @@ export const useCallController = (): CallController => {
       mode,
       isConnected,
       isInCall,
+      showEndAnswerButton,
+      endAnswerEnabled,
       interviewerSpeaking,
       candidateSpeaking,
       micOn,

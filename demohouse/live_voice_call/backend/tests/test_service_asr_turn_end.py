@@ -231,3 +231,79 @@ def test_handler_loop_restarts_when_asr_stream_unexpectedly_ends(monkeypatch):
         assert any("ASR_STREAM_RESET reason=upstream_closed" in line for line in logs)
 
     asyncio.run(_run())
+
+
+def test_force_finalize_turn_immediately_after_client_end_request(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_force_finalize_requested = True
+
+        async def _responses():
+            yield _asr_response("你好", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "你好"
+        assert fake.close_calls == 1
+        assert any("ASR_TURN_END reason=client_end_answer" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_force_finalize_request_dropped_when_no_recognized_text(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_force_finalize_requested = True
+
+        async def _responses():
+            if False:
+                yield _asr_response("unused")
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        try:
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+            assert False, "should not emit recognized payload without text"
+        except StopAsyncIteration:
+            pass
+
+        assert svc.asr_force_finalize_requested is False
+        assert any("ASR_TURN_END_REQUEST_DROPPED reason=no_recognized_text" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_emit_partial_recognition_events_before_final_sentence(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        svc.emit_asr_partial_events = True
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("你", 100)
+            await asyncio.sleep(0.02)
+            yield _asr_response("你好", 200)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        first = await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+        second = await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+        third = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+
+        assert isinstance(first, service.SentencePartialRecognizedPayload)
+        assert first.sentence == "你"
+        assert isinstance(second, service.SentencePartialRecognizedPayload)
+        assert second.sentence == "你好"
+        assert isinstance(third, service.SentenceRecognizedPayload)
+        assert third.sentence == "你好"
+
+    asyncio.run(_run())

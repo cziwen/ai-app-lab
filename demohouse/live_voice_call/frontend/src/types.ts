@@ -32,12 +32,14 @@ export type WebRequest = {
 export enum EventType {
   BotReady = 'BotReady',
   SentenceRecognized = 'SentenceRecognized',
+  SentencePartialRecognized = 'SentencePartialRecognized',
   TTSSentenceStart = 'TTSSentenceStart',
   TTSDone = 'TTSDone',
   BotError = 'BotError',
   BotUpdateConfig = 'BotUpdateConfig',
   UserAudio = 'UserAudio',
   ClientHangup = 'ClientHangup',
+  ClientEndAnswer = 'ClientEndAnswer',
 }
 export interface IWebSocketResponse {
   messageType: number;

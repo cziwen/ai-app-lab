@@ -47,8 +47,32 @@ from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient, SaucASRFullServer
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
-# asr continuous detection no input duration, empirical value
-ASRInterval = 2000
+DEFAULT_ASR_SILENCE_TIMEOUT_MS = 8000
+
+
+def _load_asr_silence_timeout_ms() -> int:
+    raw_value = (os.getenv("ASR_SILENCE_TIMEOUT_MS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_SILENCE_TIMEOUT_MS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_SILENCE_TIMEOUT_MS invalid, fallback to default "
+            f"value={DEFAULT_ASR_SILENCE_TIMEOUT_MS}"
+        )
+        return DEFAULT_ASR_SILENCE_TIMEOUT_MS
+    if parsed <= 0:
+        INFO(
+            "ASR_SILENCE_TIMEOUT_MS must be positive, fallback to default "
+            f"value={DEFAULT_ASR_SILENCE_TIMEOUT_MS}"
+        )
+        return DEFAULT_ASR_SILENCE_TIMEOUT_MS
+    return parsed
+
+
+# asr continuous detection no input duration, configurable via env
+ASRInterval = _load_asr_silence_timeout_ms()
 ASR_POLL_INTERVAL_SECONDS = 0.2
 ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
@@ -132,6 +156,9 @@ class VoiceBotService(BaseModel):
     asr_stream_last_reset_mono_ms: int = 0  # Last ASR stream reset monotonic ts
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
+    asr_force_finalize_requested: bool = False
+    asr_last_partial_sentence: str = ""
+    emit_asr_partial_events: bool = False
     current_turn_id: Optional[str] = None
     turn_timestamps_ms: Optional[Dict[str, int]] = None
 
@@ -163,6 +190,7 @@ class VoiceBotService(BaseModel):
 
 
         if self.interview_mode:
+            self.emit_asr_partial_events = True
             if not self.responses_adapter:
                 self.responses_adapter = ArkResponsesAdapter(api_key=self.ark_api_key)
             flow_questions = self.interview_questions or DEFAULT_INTERVIEW_QUESTIONS
@@ -200,6 +228,8 @@ class VoiceBotService(BaseModel):
         self.asr_last_duration = 0
         self.asr_last_growth_mono_ms = 0
         self.asr_silence_tick_count = 0
+        self.asr_force_finalize_requested = False
+        self.asr_last_partial_sentence = ""
 
     def _log_asr_stream_reset(self, reason: str) -> None:
         now_ms = self._mono_ms()
@@ -223,23 +253,36 @@ class VoiceBotService(BaseModel):
 
         silence_ms = max(0, self._mono_ms() - self.asr_last_growth_mono_ms)
         self.asr_no_input_duration = silence_ms
-        self.asr_silence_tick_count += 1
-        if self.asr_silence_tick_count % ASR_SILENCE_LOG_EVERY_TICKS == 0:
-            self._log(
-                f"ASR_SILENCE_TICK silence_ms={silence_ms} text_len={len(self.asr_buffer)}"
-            )
+        reason = "client_end_answer" if self.asr_force_finalize_requested else ""
+        if not reason:
+            self.asr_silence_tick_count += 1
+            if self.asr_silence_tick_count % ASR_SILENCE_LOG_EVERY_TICKS == 0:
+                self._log(
+                    f"ASR_SILENCE_TICK silence_ms={silence_ms} text_len={len(self.asr_buffer)}"
+                )
 
-        if silence_ms <= ASRInterval:
-            return None
+            if silence_ms <= ASRInterval:
+                return None
+            reason = "silence_timeout"
 
         sentence = self.asr_buffer
         self._log(
-            f"ASR_TURN_END reason=silence_timeout silence_ms={silence_ms} text_len={len(sentence)}"
+            f"ASR_TURN_END reason={reason} silence_ms={silence_ms} text_len={len(sentence)}"
         )
         self._reset_asr_buffer_state()
         if self.asr_client:
             await self.asr_client.close()
         return SentenceRecognizedPayload(sentence=sentence)
+
+    def _build_asr_partial_payload(self) -> Optional[SentencePartialRecognizedPayload]:
+        if not self.emit_asr_partial_events:
+            return None
+        if not self.asr_buffer:
+            return None
+        if self.asr_buffer == self.asr_last_partial_sentence:
+            return None
+        self.asr_last_partial_sentence = self.asr_buffer
+        return SentencePartialRecognizedPayload(sentence=self.asr_buffer)
 
     def _start_turn(self) -> None:
         self.current_turn_id = str(uuid.uuid4())
@@ -475,7 +518,12 @@ class VoiceBotService(BaseModel):
             while True:
                 self.asr_last_stream_end_reason = ""
                 asr_responses = await self.handle_input_event(inputs)
-                async for asr_recognized in self.handle_asr_response(asr_responses):
+                async for asr_payload in self.handle_asr_response(asr_responses):
+                    if isinstance(asr_payload, SentencePartialRecognizedPayload):
+                        yield WebEvent.from_payload(asr_payload)
+                        continue
+
+                    asr_recognized = asr_payload
                     # set state into InProgress
                     self.state = StateInProgress
                     yield WebEvent.from_payload(asr_recognized)
@@ -540,6 +588,9 @@ class VoiceBotService(BaseModel):
                     input_event.payload, BotUpdateConfigPayload
                 ):
                     self.tts_speaker = input_event.payload.speaker
+                elif input_event.event == CLIENT_END_ANSWER:
+                    self.asr_force_finalize_requested = True
+                    self._log("ASR_TURN_END_REQUEST source=client_end_answer")
                 elif input_event.event == USER_AUDIO and input_event.data:
                     yield input_event.data
 
@@ -577,7 +628,9 @@ class VoiceBotService(BaseModel):
 
     async def handle_asr_response(
         self, asr_responses: AsyncIterable[SaucASRFullServerResponse]
-    ) -> AsyncIterable[SentenceRecognizedPayload]:
+    ) -> AsyncIterable[
+        Union[SentenceRecognizedPayload, SentencePartialRecognizedPayload]
+    ]:
         """
         Handle ASR responses and generate recognized sentences.
         """
@@ -603,6 +656,11 @@ class VoiceBotService(BaseModel):
                 last_finalized = await self._finalize_asr_turn_if_silent()
                 if last_finalized is not None:
                     yield last_finalized
+                elif self.asr_force_finalize_requested:
+                    self._log(
+                        "ASR_TURN_END_REQUEST_DROPPED reason=no_recognized_text"
+                    )
+                    self.asr_force_finalize_requested = False
                 break
             else:
                 next_asr_task = None
@@ -629,6 +687,13 @@ class VoiceBotService(BaseModel):
             self._log(
                 f"asr buffer incremented: {increment_len}, utterances: {response.result.utterances}"
             )
+            partial_payload = self._build_asr_partial_payload()
+            if partial_payload is not None:
+                yield partial_payload
+
+            forced_finalized = await self._finalize_asr_turn_if_silent()
+            if forced_finalized is not None:
+                yield forced_finalized
 
         if next_asr_task is not None:
             next_asr_task.cancel()
@@ -832,7 +897,12 @@ class VoiceBotService(BaseModel):
             while True:
                 self.asr_last_stream_end_reason = ""
                 asr_responses = await self.handle_input_event(inputs)
-                async for asr_recognized in self.handle_asr_response(asr_responses):
+                async for asr_payload in self.handle_asr_response(asr_responses):
+                    if isinstance(asr_payload, SentencePartialRecognizedPayload):
+                        yield WebEvent.from_payload(asr_payload)
+                        continue
+
+                    asr_recognized = asr_payload
                     self.state = StateInProgress
                     self._start_turn()
                     self._log_turn_event(

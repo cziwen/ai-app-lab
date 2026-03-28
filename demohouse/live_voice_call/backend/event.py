@@ -19,7 +19,9 @@ BOT_READY = "BotReady"
 BOT_UPDATE_CONFIG = "BotUpdateConfig"
 USER_AUDIO = "UserAudio"
 CLIENT_HANGUP = "ClientHangup"
+CLIENT_END_ANSWER = "ClientEndAnswer"
 SENTENCE_RECOGNIZED = "SentenceRecognized"
+SENTENCE_PARTIAL_RECOGNIZED = "SentencePartialRecognized"
 TTS_SENTENCE_START = "TTSSentenceStart"
 TTS_SENTENCE_END = "TTSSentenceEnd"
 TTS_DONE = "TTSDone"
@@ -78,6 +80,17 @@ class SentenceRecognizedPayload(WebPayload, BaseModel):
 
     Attributes:
         sentence (str): The recognized sentence.
+    """
+
+    sentence: str
+
+
+class SentencePartialRecognizedPayload(WebPayload, BaseModel):
+    """
+    Payload for the SentencePartialRecognized event.
+
+    Attributes:
+        sentence (str): The partial recognized sentence.
     """
 
     sentence: str
@@ -164,6 +177,8 @@ class WebEvent(BaseModel):
             return cls(event=BOT_UPDATE_CONFIG, payload=payload)
         elif isinstance(payload, SentenceRecognizedPayload):
             return cls(event=SENTENCE_RECOGNIZED, payload=payload)
+        elif isinstance(payload, SentencePartialRecognizedPayload):
+            return cls(event=SENTENCE_PARTIAL_RECOGNIZED, payload=payload)
         elif isinstance(payload, TTSSentenceStartPayload):
             return cls(event=TTS_SENTENCE_START, payload=payload)
         elif isinstance(payload, TTSSentenceEndPayload):
