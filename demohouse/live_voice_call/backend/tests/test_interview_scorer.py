@@ -28,7 +28,7 @@ def test_parse_and_clamp_score_from_llm_json():
         async def _mock_decider(_payload):
             return 'prefix {"numeric_score": 6.7, "comment": "覆盖较完整"} suffix'
 
-        scorer = InterviewScorer(llm_decider=_mock_decider)
+        scorer = InterviewScorer(llm_decider=_mock_decider, raw_preview_chars=1000)
         result = await scorer.score_question(
             {
                 "question_id": "q2",
@@ -39,6 +39,8 @@ def test_parse_and_clamp_score_from_llm_json():
         )
         assert result.numeric_score == 5.0
         assert result.comment == "覆盖较完整"
+        assert result.debug_meta["parse_fallback_used"] is True
+        assert result.debug_meta["numeric_score_was_clamped"] is True
 
     asyncio.run(_run())
 
@@ -93,5 +95,31 @@ def test_missing_llm3_endpoint_raises_for_non_empty_answer():
             assert False, "expected RuntimeError"
         except RuntimeError as exc:
             assert "LLM3_ENDPOINT_ID missing" in str(exc)
+
+    asyncio.run(_run())
+
+
+def test_raw_output_preview_is_truncated_and_error_meta_attached():
+    async def _run():
+        async def _mock_decider(_payload):
+            return "x" * 220
+
+        scorer = InterviewScorer(llm_decider=_mock_decider, raw_preview_chars=100)
+        try:
+            await scorer.score_question(
+                {
+                    "question_id": "q9",
+                    "sort_order": 9,
+                    "question": "Q9",
+                    "aggregated_answer": "候选人回答",
+                }
+            )
+            assert False, "expected RuntimeError"
+        except RuntimeError as exc:
+            assert "LLM3 parse failure" in str(exc)
+            debug_meta = getattr(exc, "scoring_debug_meta", {})
+            assert debug_meta.get("stage") == "parse"
+            assert debug_meta.get("raw_output_truncated") is True
+            assert len(debug_meta.get("raw_output_preview", "")) <= 100
 
     asyncio.run(_run())

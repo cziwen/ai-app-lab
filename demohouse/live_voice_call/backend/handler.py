@@ -109,6 +109,13 @@ FRONTEND_LOG_MAX_ENTRY_CHARS = max(
 WS_PING_INTERVAL_SECONDS = max(1.0, float(os.getenv("WS_PING_INTERVAL_SECONDS", "20")))
 WS_PING_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_PING_TIMEOUT_SECONDS", "20")))
 WS_CLOSE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_CLOSE_TIMEOUT_SECONDS", "5")))
+SCORING_DEBUG_LOG_ENABLED = (
+    os.getenv("SCORING_DEBUG_LOG_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+SCORING_LOG_RAW_PREVIEW_CHARS = max(
+    100, int(os.getenv("SCORING_LOG_RAW_PREVIEW_CHARS", "800"))
+)
 
 _INTERVIEW_LOGGER_CACHE: Dict[Tuple[str, str], logging.Logger] = {}
 _INTERVIEW_LOGGER_LAST_USED: Dict[Tuple[str, str], float] = {}
@@ -398,13 +405,74 @@ class ScoringQueue:
                 self._queue.task_done()
 
     async def _process(self, task: ScoringTask) -> None:
+        started = monotonic()
+        debug_logger = None
+        if SCORING_DEBUG_LOG_ENABLED:
+            try:
+                debug_logger = _get_interview_logger(task.token, "backend")
+            except Exception as logger_err:
+                self.logger.warning(
+                    "event=interview_scoring.debug_logger_unavailable token=%s error=%s",
+                    task.token,
+                    logger_err,
+                    exc_info=True,
+                )
+
+        def _scoring_log(payload: Dict[str, Any]) -> None:
+            if debug_logger is None:
+                return
+            try:
+                debug_logger.info(
+                    "[InterviewScoring] %s",
+                    json.dumps(payload, ensure_ascii=False),
+                )
+            except Exception as log_err:
+                self.logger.warning(
+                    "event=interview_scoring.debug_log_failed token=%s error=%s",
+                    task.token,
+                    log_err,
+                    exc_info=True,
+                )
+
         scorer = InterviewScorer(
             llm_endpoint_id=(RUNTIME_CONFIG.llm3_endpoint_id or "").strip() or None,
             llm_thinking_type=(RUNTIME_CONFIG.llm3_thinking_type or "disabled"),
             llm_reasoning_effort=RUNTIME_CONFIG.llm3_reasoning_effort,
+            raw_preview_chars=SCORING_LOG_RAW_PREVIEW_CHARS,
+        )
+        _scoring_log(
+            {
+                "stage": "start",
+                "token": task.token,
+                "question_count": len(task.score_inputs or []),
+            }
         )
         try:
             result = await scorer.score_interview(task.score_inputs)
+            input_meta = [
+                {
+                    "question_id": str(item.get("question_id", "") or ""),
+                    "sort_order": int(item.get("sort_order", 0) or 0),
+                    "aggregated_answer_len": len(
+                        str(item.get("aggregated_answer", "") or "").strip()
+                    ),
+                    "scoring_boundary_len": len(
+                        str(item.get("scoring_boundary", "") or "").strip()
+                    ),
+                    "best_standard_len": len(
+                        str(item.get("best_standard", "") or "").strip()
+                    ),
+                    "medium_standard_len": len(
+                        str(item.get("medium_standard", "") or "").strip()
+                    ),
+                    "worst_standard_len": len(
+                        str(item.get("worst_standard", "") or "").strip()
+                    ),
+                }
+                for item in (task.score_inputs or [])
+                if isinstance(item, dict)
+            ]
+
             payload = [
                 {
                     "question_id": item.question_id,
@@ -418,11 +486,56 @@ class ScoringQueue:
                 }
                 for item in result.question_scores
             ]
+            for idx, item in enumerate(result.question_scores):
+                meta = input_meta[idx] if idx < len(input_meta) else {}
+                debug_meta = item.debug_meta if isinstance(item.debug_meta, dict) else {}
+                _scoring_log(
+                    {
+                        "stage": "question",
+                        "token": task.token,
+                        "question_id": item.question_id,
+                        "sort_order": item.sort_order,
+                        "ability_dimension": item.ability_dimension,
+                        "output_format": item.output_format,
+                        "aggregated_answer_len": meta.get(
+                            "aggregated_answer_len",
+                            len(item.aggregated_answer or ""),
+                        ),
+                        "scoring_boundary_len": meta.get("scoring_boundary_len", 0),
+                        "best_standard_len": meta.get("best_standard_len", 0),
+                        "medium_standard_len": meta.get("medium_standard_len", 0),
+                        "worst_standard_len": meta.get("worst_standard_len", 0),
+                        "numeric_score": item.numeric_score,
+                        "comment_len": len(item.comment or ""),
+                        "elapsed_ms": int(debug_meta.get("elapsed_ms", 0) or 0),
+                        "parse_fallback_used": bool(
+                            debug_meta.get("parse_fallback_used", False)
+                        ),
+                        "numeric_score_was_clamped": bool(
+                            debug_meta.get("numeric_score_was_clamped", False)
+                        ),
+                        "raw_output_truncated": bool(
+                            debug_meta.get("raw_output_truncated", False)
+                        ),
+                        "raw_output_preview": str(
+                            debug_meta.get("raw_output_preview", "") or ""
+                        ),
+                    }
+                )
             await asyncio.to_thread(
                 save_interview_scorecard_success,
                 task.token,
                 result.overall_score,
                 payload,
+            )
+            _scoring_log(
+                {
+                    "stage": "success",
+                    "token": task.token,
+                    "question_count": len(payload),
+                    "overall_score": result.overall_score,
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                }
             )
             self.logger.info(
                 "event=interview_scoring.success token=%s question_count=%s overall_score=%.2f",
@@ -431,6 +544,17 @@ class ScoringQueue:
                 result.overall_score,
             )
         except Exception as score_err:
+            debug_meta = getattr(score_err, "scoring_debug_meta", None)
+            _scoring_log(
+                {
+                    "stage": "failed",
+                    "token": task.token,
+                    "error_type": type(score_err).__name__,
+                    "error_message": str(score_err),
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                    "debug_meta": debug_meta if isinstance(debug_meta, dict) else {},
+                }
+            )
             await asyncio.to_thread(
                 save_interview_scorecard_failed,
                 task.token,

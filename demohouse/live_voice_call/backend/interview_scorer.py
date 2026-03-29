@@ -1,7 +1,8 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from time import monotonic
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ark_responses_adapter import ArkResponsesAdapter
 from llm_limiter import llm_slot
@@ -23,6 +24,7 @@ class QuestionScoreResult:
     aggregated_answer: str
     numeric_score: float
     comment: str
+    debug_meta: Dict[str, Any]
 
 
 @dataclass
@@ -39,12 +41,20 @@ class InterviewScorer:
         llm_reasoning_effort: Optional[str] = None,
         responses_adapter: Optional[ArkResponsesAdapter] = None,
         llm_decider: Optional[Callable[[Dict[str, Any]], Awaitable[str]]] = None,
+        raw_preview_chars: Optional[int] = None,
     ) -> None:
         self.llm_endpoint_id = llm_endpoint_id
         self.llm_thinking_type = llm_thinking_type
         self.llm_reasoning_effort = llm_reasoning_effort
         self.responses_adapter = responses_adapter
         self.llm_decider = llm_decider
+        preview_chars = raw_preview_chars
+        if preview_chars is None:
+            try:
+                preview_chars = int(os.getenv("SCORING_LOG_RAW_PREVIEW_CHARS", "800"))
+            except ValueError:
+                preview_chars = 800
+        self.raw_preview_chars = max(100, int(preview_chars))
 
     async def score_interview(self, questions: List[Dict[str, Any]]) -> ScorecardResult:
         results: List[QuestionScoreResult] = []
@@ -59,6 +69,7 @@ class InterviewScorer:
         return ScorecardResult(overall_score=overall, question_scores=results)
 
     async def score_question(self, payload: Dict[str, Any]) -> QuestionScoreResult:
+        started = monotonic()
         question_id = str(payload.get("question_id", "") or "")
         sort_order = int(payload.get("sort_order", 0) or 0)
         question = str(payload.get("question", "") or "").strip()
@@ -76,12 +87,52 @@ class InterviewScorer:
                 aggregated_answer="",
                 numeric_score=0.0,
                 comment="候选人未给出有效回答。",
+                debug_meta={
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                    "skipped_empty_answer": True,
+                    "raw_output_preview": "",
+                    "raw_output_truncated": False,
+                    "parse_fallback_used": False,
+                    "numeric_score_was_clamped": False,
+                },
             )
 
-        raw = await self._call_llm(payload)
-        parsed = self._parse_score_json(raw)
+        try:
+            raw = await self._call_llm(payload)
+        except Exception as llm_err:
+            setattr(
+                llm_err,
+                "scoring_debug_meta",
+                {
+                    "stage": "llm_call",
+                    "question_id": question_id,
+                    "sort_order": sort_order,
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                },
+            )
+            raise
+
+        try:
+            parsed = self._parse_score_json(raw)
+        except Exception as parse_err:
+            raw_preview, raw_truncated = self._build_raw_preview(raw)
+            setattr(
+                parse_err,
+                "scoring_debug_meta",
+                {
+                    "stage": "parse",
+                    "question_id": question_id,
+                    "sort_order": sort_order,
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                    "raw_output_preview": raw_preview,
+                    "raw_output_truncated": raw_truncated,
+                },
+            )
+            raise
+
         numeric_score = parsed["numeric_score"]
         comment = parsed["comment"]
+        raw_preview, raw_truncated = self._build_raw_preview(raw)
 
         return QuestionScoreResult(
             question_id=question_id,
@@ -92,6 +143,14 @@ class InterviewScorer:
             aggregated_answer=aggregated_answer,
             numeric_score=numeric_score,
             comment=comment,
+            debug_meta={
+                "elapsed_ms": int((monotonic() - started) * 1000),
+                "skipped_empty_answer": False,
+                "raw_output_preview": raw_preview,
+                "raw_output_truncated": raw_truncated,
+                "parse_fallback_used": bool(parsed["parse_fallback_used"]),
+                "numeric_score_was_clamped": bool(parsed["numeric_score_was_clamped"]),
+            },
         )
 
     async def _call_llm(self, payload: Dict[str, Any]) -> str:
@@ -143,6 +202,7 @@ class InterviewScorer:
     def _parse_score_json(self, raw: str) -> Dict[str, Any]:
         content = (raw or "").strip()
         parsed: Optional[Dict[str, Any]] = None
+        parse_fallback_used = False
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
@@ -151,17 +211,21 @@ class InterviewScorer:
             if start >= 0 and end > start:
                 try:
                     parsed = json.loads(content[start : end + 1])
+                    parse_fallback_used = True
                 except json.JSONDecodeError:
                     parsed = None
 
         if not isinstance(parsed, dict):
             raise RuntimeError("LLM3 parse failure")
 
+        raw_numeric_score = parsed.get("numeric_score", 0.0)
         try:
-            numeric_score = float(parsed.get("numeric_score", 0.0))
+            numeric_score = float(raw_numeric_score)
         except (TypeError, ValueError):
             numeric_score = 0.0
-        numeric_score = max(0.0, min(5.0, numeric_score))
+        clamped_score = max(0.0, min(5.0, numeric_score))
+        numeric_score_was_clamped = clamped_score != numeric_score
+        numeric_score = clamped_score
 
         comment = str(parsed.get("comment", "") or "").strip()
         if not comment:
@@ -170,4 +234,12 @@ class InterviewScorer:
         return {
             "numeric_score": numeric_score,
             "comment": comment,
+            "parse_fallback_used": parse_fallback_used,
+            "numeric_score_was_clamped": numeric_score_was_clamped,
         }
+
+    def _build_raw_preview(self, raw: str) -> Tuple[str, bool]:
+        content = str(raw or "")
+        if len(content) <= self.raw_preview_chars:
+            return content, False
+        return content[: self.raw_preview_chars], True

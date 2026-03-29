@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import admin_store
 import handler
@@ -351,15 +352,33 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
 
 def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):
     captured = {"failed": []}
+    captured_lines = []
+
+    class _CaptureInterviewLogger:
+        def info(self, msg, *args, **kwargs):
+            text = msg % args if args else msg
+            captured_lines.append(text)
 
     class _BrokenScorer:
         def __init__(self, **_kwargs):
             pass
 
         async def score_interview(self, _inputs):
-            raise RuntimeError("mock score failure")
+            err = RuntimeError("mock score failure")
+            setattr(
+                err,
+                "scoring_debug_meta",
+                {
+                    "stage": "parse",
+                    "question_id": "q1",
+                    "raw_output_preview": "invalid",
+                },
+            )
+            raise err
 
     monkeypatch.setattr(handler, "InterviewScorer", _BrokenScorer)
+    monkeypatch.setattr(handler, "SCORING_DEBUG_LOG_ENABLED", True)
+    monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: _CaptureInterviewLogger())
     monkeypatch.setattr(
         handler,
         "save_interview_scorecard_failed",
@@ -376,3 +395,77 @@ def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):
 
     assert len(captured["failed"]) == 1
     assert captured["failed"][0][0] == "INT-SCORE-FAILED"
+    assert any('"stage": "failed"' in line for line in captured_lines)
+    assert any('"debug_meta": {' in line for line in captured_lines)
+
+
+def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatch):
+    captured = {"success": []}
+    captured_lines = []
+
+    class _CaptureInterviewLogger:
+        def info(self, msg, *args, **kwargs):
+            text = msg % args if args else msg
+            captured_lines.append(text)
+
+    class _FakeScorer:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def score_interview(self, _inputs):
+            return SimpleNamespace(
+                overall_score=4.2,
+                question_scores=[
+                    SimpleNamespace(
+                        question_id="q1",
+                        sort_order=1,
+                        question="Q1",
+                        ability_dimension="ownership",
+                        output_format="STAR",
+                        aggregated_answer="候选人回答",
+                        numeric_score=4.2,
+                        comment="覆盖较完整",
+                        debug_meta={
+                            "elapsed_ms": 123,
+                            "parse_fallback_used": True,
+                            "numeric_score_was_clamped": False,
+                            "raw_output_truncated": True,
+                            "raw_output_preview": "raw-preview",
+                        },
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(handler, "InterviewScorer", _FakeScorer)
+    monkeypatch.setattr(handler, "SCORING_DEBUG_LOG_ENABLED", True)
+    monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: _CaptureInterviewLogger())
+    monkeypatch.setattr(
+        handler,
+        "save_interview_scorecard_success",
+        lambda token, overall, payload: captured["success"].append((token, overall, payload)),
+    )
+
+    queue = handler.ScoringQueue(logging.getLogger("test.scoring.queue.success"))
+    task = handler.ScoringTask(
+        token="INT-SCORE-SUCCESS",
+        score_inputs=[
+            {
+                "question_id": "q1",
+                "sort_order": 1,
+                "aggregated_answer": "候选人回答",
+                "scoring_boundary": "边界",
+                "best_standard": "优秀标准",
+                "medium_standard": "中等标准",
+                "worst_standard": "较差标准",
+            }
+        ],
+    )
+
+    asyncio.run(queue._process(task))
+
+    assert len(captured["success"]) == 1
+    assert captured["success"][0][0] == "INT-SCORE-SUCCESS"
+    assert any('"stage": "start"' in line for line in captured_lines)
+    assert any('"stage": "question"' in line for line in captured_lines)
+    assert any('"stage": "success"' in line for line in captured_lines)
+    assert any('"raw_output_preview": "raw-preview"' in line for line in captured_lines)
