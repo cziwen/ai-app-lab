@@ -10,7 +10,8 @@ from llm_limiter import llm_slot
 SCORER_INSTRUCTIONS = (
     "你是结构化面试评分器。只输出一个JSON对象，不要输出任何额外文字。"
     "JSON字段必须包含：numeric_score(float 0~5), comment(str)。"
-    "评分时请严格参考提供的 rubric 字段与候选人聚合回答。"
+    "请优先参考提供的 rubric 字段，并结合候选人回答中的有效证据做综合判断。"
+    "当回答与 rubric 不完全贴合时，可给中间分，不要默认极低分。"
 )
 
 
@@ -178,7 +179,9 @@ class InterviewScorer:
             "candidate_answer": str(payload.get("aggregated_answer", "") or "").strip(),
             "instruction": (
                 "请输出 numeric_score(0~5) 与 comment。"
-                "comment 需说明候选人与 rubric 的匹配度，并给出简短改进建议。"
+                "评分原则：rubric优先、证据加权、避免一票否决。"
+                "若信息不足，给保守中间分并指出缺失信息；仅在明显不匹配时给低分。"
+                "comment 需简要说明命中点、缺失点，并给出改进建议。"
             ),
         }
 
