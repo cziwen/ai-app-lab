@@ -292,6 +292,8 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
         score_inputs=[],
         should_mark_completed=True,
         completed_reason="disconnect",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
         candidate_audio_dropped_frames=0,
         retries=handler.PERSISTENCE_MAX_RETRIES,
     )
@@ -339,6 +341,8 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
         score_inputs=[{"question_id": "q1"}],
         should_mark_completed=True,
         completed_reason="normal_end",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
         candidate_audio_dropped_frames=0,
     )
 

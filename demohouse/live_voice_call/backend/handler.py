@@ -258,6 +258,8 @@ class PersistenceTask:
     score_inputs: List[Dict[str, Any]]
     should_mark_completed: bool
     completed_reason: Optional[str]
+    candidate_frame_prefixed_count: int
+    candidate_frame_raw_count: int
     candidate_audio_dropped_frames: int
     grace_seconds: int = 30
     retries: int = 0
@@ -320,10 +322,12 @@ class PersistenceQueue:
                 interviewer_encoded_bytes=task.interviewer_encoded_bytes,
             )
             self.logger.info(
-                "event=interview_persist.success token=%s candidate_bytes=%s interviewer_bytes=%s candidate_dropped_frames=%s",
+                "event=interview_persist.success token=%s candidate_bytes=%s interviewer_bytes=%s candidate_frame_prefixed_count=%s candidate_frame_raw_count=%s candidate_frame_dropped_count=%s",
                 task.token,
                 len(task.candidate_pcm_bytes),
                 len(task.interviewer_encoded_bytes),
+                task.candidate_frame_prefixed_count,
+                task.candidate_frame_raw_count,
                 task.candidate_audio_dropped_frames,
             )
             if task.should_mark_completed:
@@ -581,13 +585,17 @@ class ClientWebSocketClosedError(RuntimeError):
 
 
 def _extract_pcm_audio(
-    raw_audio: bytes, log_fn: Optional[Callable[[str], None]] = None
+    raw_audio: bytes,
+    log_fn: Optional[Callable[[str], None]] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> bytes:
     """Accept raw PCM payloads and reject legacy nested protocol payloads."""
     if not raw_audio:
         return b""
     if log_fn is None:
         log_fn = lambda _msg: None
+    if stats is None:
+        stats = {}
 
     # Old clients nested an extra audio-only frame here. This path is intentionally
     # unsupported after the protocol migration.
@@ -604,12 +612,26 @@ def _extract_pcm_audio(
                 "[InterviewPersist] drop candidate audio frame: "
                 "legacy nested UserAudio payload is unsupported"
             )
+            stats["dropped"] = stats.get("dropped", 0) + 1
             return b""
+
+    # Some clients prepend a 4-byte big-endian payload size per 100ms frame.
+    # Strip it when the declared size exactly matches the remaining bytes.
+    if len(raw_audio) >= 6:
+        payload_size = int.from_bytes(raw_audio[:4], "big", signed=False)
+        if payload_size > 0 and payload_size == len(raw_audio) - 4:
+            raw_audio = raw_audio[4:]
+            stats["prefixed"] = stats.get("prefixed", 0) + 1
+        else:
+            stats["raw"] = stats.get("raw", 0) + 1
+    else:
+        stats["raw"] = stats.get("raw", 0) + 1
 
     if len(raw_audio) % 2 != 0:
         log_fn(
             "[InterviewPersist] drop candidate audio frame: invalid pcm payload size"
         )
+        stats["dropped"] = stats.get("dropped", 0) + 1
         return b""
 
     return raw_audio
@@ -712,6 +734,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     turns = []
     candidate_audio = bytearray()
     interviewer_audio_encoded = bytearray()
+    candidate_frame_prefixed_count = 0
+    candidate_frame_raw_count = 0
     candidate_audio_dropped_frames = 0
     interview_completed = False
     client_hangup = False
@@ -795,7 +819,10 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         Returns:
             AsyncIterable[WebEvent]: An asynchronous generator of input events.
         """
-        nonlocal candidate_audio_dropped_frames, client_hangup
+        nonlocal candidate_audio_dropped_frames
+        nonlocal candidate_frame_prefixed_count
+        nonlocal candidate_frame_raw_count
+        nonlocal client_hangup
         async for m in ws:
             input_event = convert_binary_to_web_event_to_binary(m)
             data_len = len(input_event.data) if input_event.data else 0
@@ -808,7 +835,12 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 interview_log("event=session.client_hangup")
                 continue
             if input_event.event == USER_AUDIO and input_event.data:
-                pcm_bytes = _extract_pcm_audio(input_event.data, interview_log)
+                frame_stats: Dict[str, int] = {}
+                pcm_bytes = _extract_pcm_audio(
+                    input_event.data, interview_log, frame_stats
+                )
+                candidate_frame_prefixed_count += frame_stats.get("prefixed", 0)
+                candidate_frame_raw_count += frame_stats.get("raw", 0)
                 if pcm_bytes:
                     candidate_audio.extend(pcm_bytes)
                 else:
@@ -931,6 +963,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     score_inputs=score_inputs,
                     should_mark_completed=True,
                     completed_reason=completed_reason,
+                    candidate_frame_prefixed_count=candidate_frame_prefixed_count,
+                    candidate_frame_raw_count=candidate_frame_raw_count,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,
                     grace_seconds=30,
                 )

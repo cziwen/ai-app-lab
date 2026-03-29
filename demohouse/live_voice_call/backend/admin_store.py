@@ -4,6 +4,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import time
 import uuid
 import wave
@@ -1633,6 +1634,108 @@ def _is_mp3_audio(data: bytes) -> bool:
     return False
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _run_ffmpeg(args: List[str], input_bytes: bytes) -> Optional[bytes]:
+    ffmpeg_bin = (os.getenv("FFMPEG_BIN") or "ffmpeg").strip() or "ffmpeg"
+    if shutil.which(ffmpeg_bin) is None:
+        INFO(f"[InterviewPersist] ffmpeg unavailable bin={ffmpeg_bin}")
+        return None
+    try:
+        completed = subprocess.run(
+            [ffmpeg_bin, *args],
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except Exception as ffmpeg_err:
+        INFO(f"[InterviewPersist] ffmpeg execution failed error={ffmpeg_err}")
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        stderr_preview = completed.stderr.decode("utf-8", errors="replace")[:400]
+        INFO(
+            "[InterviewPersist] ffmpeg encode failed "
+            f"code={completed.returncode} stderr={stderr_preview}"
+        )
+        return None
+    return bytes(completed.stdout)
+
+
+def _ffmpeg_encode_pcm_to_mp3(
+    pcm_bytes: bytes, *, sample_rate: int, channels: int, bitrate_kbps: int
+) -> Optional[bytes]:
+    if not pcm_bytes:
+        return None
+    return _run_ffmpeg(
+        [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-i",
+            "pipe:0",
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            f"{bitrate_kbps}k",
+            "-f",
+            "mp3",
+            "pipe:1",
+        ],
+        pcm_bytes,
+    )
+
+
+def _ffmpeg_reencode_mp3(
+    mp3_bytes: bytes, *, sample_rate: int, channels: int, bitrate_kbps: int
+) -> Optional[bytes]:
+    if not mp3_bytes:
+        return None
+    return _run_ffmpeg(
+        [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            f"{bitrate_kbps}k",
+            "-f",
+            "mp3",
+            "pipe:1",
+        ],
+        mp3_bytes,
+    )
+
+
 def persist_interview_audio(
     token: str,
     candidate_pcm_bytes: bytes,
@@ -1643,18 +1746,67 @@ def persist_interview_audio(
 
     candidate_path: Optional[Path] = None
     interviewer_path: Optional[Path] = None
+    compress_enabled = _env_flag("AUDIO_COMPRESS_ENABLED", True)
+    candidate_bitrate_kbps = _env_int(
+        "CANDIDATE_MP3_BITRATE_KBPS", 32, minimum=8, maximum=320
+    )
+    interviewer_bitrate_kbps = _env_int(
+        "INTERVIEWER_MP3_BITRATE_KBPS", 32, minimum=8, maximum=320
+    )
+    candidate_sample_rate = _env_int(
+        "CANDIDATE_AUDIO_SAMPLE_RATE", 16000, minimum=8000, maximum=48000
+    )
+    interviewer_sample_rate = _env_int(
+        "INTERVIEWER_AUDIO_SAMPLE_RATE", 24000, minimum=8000, maximum=48000
+    )
+    candidate_channels = _env_int("CANDIDATE_AUDIO_CHANNELS", 1, minimum=1, maximum=2)
+    interviewer_channels = _env_int(
+        "INTERVIEWER_AUDIO_CHANNELS", 1, minimum=1, maximum=2
+    )
 
     if candidate_pcm_bytes:
-        candidate_path = interview_dir / "candidate.wav"
-        _write_pcm_to_wav(candidate_path, candidate_pcm_bytes, sample_rate=16000)
+        candidate_mp3_bytes: Optional[bytes] = None
+        if compress_enabled:
+            candidate_mp3_bytes = _ffmpeg_encode_pcm_to_mp3(
+                candidate_pcm_bytes,
+                sample_rate=candidate_sample_rate,
+                channels=candidate_channels,
+                bitrate_kbps=candidate_bitrate_kbps,
+            )
+        if candidate_mp3_bytes:
+            candidate_path = interview_dir / "candidate.mp3"
+            candidate_path.write_bytes(candidate_mp3_bytes)
+            INFO(
+                f"[InterviewPersist] token={token} candidate_format=mp3 "
+                f"candidate_bytes={len(candidate_mp3_bytes)}"
+            )
+        else:
+            candidate_path = interview_dir / "candidate.wav"
+            _write_pcm_to_wav(
+                candidate_path, candidate_pcm_bytes, sample_rate=candidate_sample_rate
+            )
+            INFO(
+                f"[InterviewPersist] token={token} candidate_format=wav "
+                f"candidate_bytes={len(candidate_pcm_bytes)}"
+            )
 
     if interviewer_encoded_bytes:
+        interviewer_bytes_to_write = interviewer_encoded_bytes
         extension = "mp3" if _is_mp3_audio(interviewer_encoded_bytes) else "raw"
+        if extension == "mp3" and compress_enabled:
+            reencoded_bytes = _ffmpeg_reencode_mp3(
+                interviewer_encoded_bytes,
+                sample_rate=interviewer_sample_rate,
+                channels=interviewer_channels,
+                bitrate_kbps=interviewer_bitrate_kbps,
+            )
+            if reencoded_bytes:
+                interviewer_bytes_to_write = reencoded_bytes
         interviewer_path = interview_dir / f"interviewer.{extension}"
-        interviewer_path.write_bytes(interviewer_encoded_bytes)
+        interviewer_path.write_bytes(interviewer_bytes_to_write)
         INFO(
             f"[InterviewPersist] token={token} interviewer_format={extension} "
-            f"interviewer_bytes={len(interviewer_encoded_bytes)}"
+            f"interviewer_bytes={len(interviewer_bytes_to_write)}"
         )
 
     with get_conn() as conn:

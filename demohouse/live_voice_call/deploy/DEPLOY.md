@@ -66,6 +66,11 @@ cp .env.example .env
 docker compose up -d --build backend
 ```
 
+说明：
+- 音频压缩功能依赖 `ffmpeg`（已内置在 backend 镜像构建中）。
+- 若你拉取了包含音频压缩改动的新代码，务必执行上面的 `--build backend` 让依赖生效。
+- 默认无需修改 `FFMPEG_BIN`；仅在自定义二进制路径时才需要在 `.env` 覆盖。
+
 ## 第三步（可选）：关闭历史自动续签任务
 
 ```bash

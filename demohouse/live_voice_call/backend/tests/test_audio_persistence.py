@@ -35,6 +35,17 @@ def test_extract_pcm_audio_accepts_raw_pcm():
     assert extracted == pcm
 
 
+def test_extract_pcm_audio_strips_4byte_length_prefix():
+    pcm = (b"\x01\x00\x02\x00") * 800  # 3200 bytes
+    payload = len(pcm).to_bytes(4, "big", signed=False) + pcm
+    stats = {}
+    extracted = handler._extract_pcm_audio(payload, stats=stats)
+    assert extracted == pcm
+    assert stats.get("prefixed", 0) == 1
+    assert stats.get("raw", 0) == 0
+    assert stats.get("dropped", 0) == 0
+
+
 def test_extract_pcm_audio_drops_invalid_or_legacy_payload():
     assert handler._extract_pcm_audio(b"\x01") == b""
     assert handler._extract_pcm_audio(_legacy_nested_audio_payload(b"\x00\x00")) == b""
@@ -63,3 +74,70 @@ def test_persist_interview_audio_saves_mp3_and_raw(monkeypatch, tmp_path):
     )
     assert out_raw["interviewer_audio_path"] is not None
     assert out_raw["interviewer_audio_path"].endswith("interviewer.raw")
+
+
+def test_persist_interview_audio_compresses_candidate_and_interviewer_mp3(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    admin_store.ensure_storage()
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "true")
+
+    candidate_mp3 = b"ID3" + b"\x00" * 64
+    interviewer_mp3 = b"ID3" + b"\x11" * 64
+
+    monkeypatch.setattr(
+        admin_store,
+        "_ffmpeg_encode_pcm_to_mp3",
+        lambda *args, **kwargs: candidate_mp3,
+    )
+    monkeypatch.setattr(
+        admin_store,
+        "_ffmpeg_reencode_mp3",
+        lambda *args, **kwargs: interviewer_mp3,
+    )
+
+    token = "INT-audio-compress"
+    out = admin_store.persist_interview_audio(
+        token=token,
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 1600,
+        interviewer_encoded_bytes=b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128,
+    )
+
+    assert out["candidate_audio_path"] is not None
+    assert out["candidate_audio_path"].endswith("candidate.mp3")
+    assert out["interviewer_audio_path"] is not None
+    assert out["interviewer_audio_path"].endswith("interviewer.mp3")
+    assert Path(out["candidate_audio_path"]).read_bytes() == candidate_mp3
+    assert Path(out["interviewer_audio_path"]).read_bytes() == interviewer_mp3
+
+
+def test_persist_interview_audio_falls_back_when_ffmpeg_fails(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    admin_store.ensure_storage()
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "true")
+    monkeypatch.setattr(
+        admin_store,
+        "_ffmpeg_encode_pcm_to_mp3",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        admin_store,
+        "_ffmpeg_reencode_mp3",
+        lambda *args, **kwargs: None,
+    )
+
+    candidate_pcm = (b"\x01\x00\x02\x00") * 1600
+    interviewer_mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    token = "INT-audio-fallback"
+    out = admin_store.persist_interview_audio(
+        token=token,
+        candidate_pcm_bytes=candidate_pcm,
+        interviewer_encoded_bytes=interviewer_mp3,
+    )
+
+    assert out["candidate_audio_path"] is not None
+    assert out["candidate_audio_path"].endswith("candidate.wav")
+    assert out["interviewer_audio_path"] is not None
+    assert out["interviewer_audio_path"].endswith("interviewer.mp3")
+    assert Path(out["interviewer_audio_path"]).read_bytes() == interviewer_mp3
