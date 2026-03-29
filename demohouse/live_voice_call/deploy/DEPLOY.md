@@ -99,6 +99,21 @@ curl -I https://smartinterview.cn
 openssl s_client -connect smartinterview.cn:443 -servername smartinterview.cn </dev/null 2>/dev/null | openssl x509 -noout -issuer -subject -dates
 ```
 
+前端缓存策略验证（发布前端后可快速确认无需强制刷新）：
+
+```bash
+curl -I https://smartinterview.cn/
+curl -I https://smartinterview.cn/index.html
+curl -I https://smartinterview.cn/static/js/index.js
+curl -I https://smartinterview.cn/static/css/index.css
+```
+
+以上响应头应包含：
+
+- `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0`
+- `Pragma: no-cache`
+- `Expires: 0`
+
 访问：
 
 - `https://smartinterview.cn/`
