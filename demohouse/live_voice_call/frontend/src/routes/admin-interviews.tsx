@@ -454,7 +454,16 @@ export const AdminInterviewsPage = () => {
                 <h3 className="admin-detail-title">AI 评分</h3>
                 <p>状态：{formatScorecardStatus(interviewDetail.scorecard?.status)}</p>
                 {interviewDetail.scorecard?.status === 'completed' && (
-                  <p>总分：{(interviewDetail.scorecard?.overall_score ?? 0).toFixed(2)} / 5.00</p>
+                  <p>
+                    总分：
+                    {(
+                      (interviewDetail.scorecard?.question_scores || []).reduce(
+                        (sum, item) => sum + (Number(item.numeric_score) || 0),
+                        0,
+                      )
+                    ).toFixed(2)}{' '}
+                    / {(((interviewDetail.scorecard?.question_scores || []).length || 0) * 5).toFixed(2)}
+                  </p>
                 )}
                 {interviewDetail.scorecard?.status === 'failed' && (
                   <p>失败原因：{interviewDetail.scorecard?.error_message || '评分服务异常'}</p>
