@@ -7,3 +7,5 @@ deploy/acme-webroot/*
 *.wav
 *.mp3
 *.csv
+
+/demo_resource
