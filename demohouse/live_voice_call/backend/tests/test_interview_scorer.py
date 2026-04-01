@@ -156,3 +156,25 @@ def test_invalid_score_scale_falls_back_to_zero_and_sets_score_error():
         assert result.score_error != ""
 
     asyncio.run(_run())
+
+
+def test_score_question_does_not_raise_name_error_for_dynamic_max_score():
+    async def _run():
+        async def _mock_decider(_payload):
+            return '{"numeric_score": 6.2, "comment": "有效"}'
+
+        scorer = InterviewScorer(llm_decider=_mock_decider)
+        result = await scorer.score_question(
+            {
+                "question_id": "q4",
+                "sort_order": 4,
+                "question": "Q4",
+                "score_format": "0-7.5",
+                "aggregated_answer": "候选人回答",
+            }
+        )
+        assert result.numeric_score == 6.2
+        assert result.max_score == 7.5
+        assert result.score_error == ""
+
+    asyncio.run(_run())

@@ -142,7 +142,7 @@ class InterviewScorer:
             )
 
         try:
-            raw = await self._call_llm(payload)
+            raw = await self._call_llm(payload, max_score=max_score)
         except Exception as llm_err:
             setattr(
                 llm_err,
@@ -200,9 +200,12 @@ class InterviewScorer:
             },
         )
 
-    async def _call_llm(self, payload: Dict[str, Any]) -> str:
+    async def _call_llm(self, payload: Dict[str, Any], *, max_score: float) -> str:
         if self.llm_decider is not None:
             return await self.llm_decider(payload)
+
+        if max_score <= 0:
+            raise RuntimeError(f"invalid max_score: {max_score}")
 
         if not self.llm_endpoint_id:
             raise RuntimeError("LLM3_ENDPOINT_ID missing")
