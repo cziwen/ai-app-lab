@@ -6,10 +6,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ark_responses_adapter import ArkResponsesAdapter
 from llm_limiter import llm_slot
+from score_scale import parse_score_scale
 
 SCORER_INSTRUCTIONS = (
     "你是结构化面试评分器。只输出一个JSON对象，不要输出任何额外文字。"
-    "JSON字段必须包含：numeric_score(float 0~5), comment(str)。"
+    "JSON字段必须包含：numeric_score(float), comment(str)。"
     "请优先参考提供的 rubric 字段，并结合候选人回答中的有效证据做综合判断。"
     "当回答与 rubric 不完全贴合时，可给中间分，不要默认极低分。"
 )
@@ -21,7 +22,10 @@ class QuestionScoreResult:
     sort_order: int
     question: str
     ability_dimension: str
-    output_format: str
+    score_format: str
+    comment_requirement: str
+    max_score: float
+    score_error: str
     aggregated_answer: str
     numeric_score: float
     comment: str
@@ -30,7 +34,9 @@ class QuestionScoreResult:
 
 @dataclass
 class ScorecardResult:
-    overall_score: float
+    overall_score: Optional[float]
+    total_score: float
+    total_max_score: float
     question_scores: List[QuestionScoreResult]
 
 
@@ -63,11 +69,21 @@ class InterviewScorer:
             results.append(await self.score_question(payload))
 
         if not results:
-            return ScorecardResult(overall_score=0.0, question_scores=[])
+            return ScorecardResult(
+                overall_score=None,
+                total_score=0.0,
+                total_max_score=0.0,
+                question_scores=[],
+            )
 
-        total = sum(item.numeric_score for item in results)
-        overall = round(total / len(results), 2)
-        return ScorecardResult(overall_score=overall, question_scores=results)
+        total_score = round(sum(item.numeric_score for item in results), 2)
+        total_max_score = round(sum(item.max_score for item in results), 2)
+        return ScorecardResult(
+            overall_score=None,
+            total_score=total_score,
+            total_max_score=total_max_score,
+            question_scores=results,
+        )
 
     async def score_question(self, payload: Dict[str, Any]) -> QuestionScoreResult:
         started = monotonic()
@@ -75,8 +91,32 @@ class InterviewScorer:
         sort_order = int(payload.get("sort_order", 0) or 0)
         question = str(payload.get("question", "") or "").strip()
         ability_dimension = str(payload.get("ability_dimension", "") or "").strip()
-        output_format = str(payload.get("output_format", "") or "").strip()
+        score_format = str(payload.get("score_format", "") or "").strip()
+        comment_requirement = str(payload.get("comment_requirement", "") or "").strip()
         aggregated_answer = str(payload.get("aggregated_answer", "") or "").strip()
+        max_score, scale_error = parse_score_scale(score_format)
+        if max_score is None:
+            return QuestionScoreResult(
+                question_id=question_id,
+                sort_order=sort_order,
+                question=question,
+                ability_dimension=ability_dimension,
+                score_format=score_format,
+                comment_requirement=comment_requirement,
+                max_score=0.0,
+                score_error=f"分数配置无效：{score_format or '(空)'}；{scale_error or ''}".strip(),
+                aggregated_answer=aggregated_answer,
+                numeric_score=0.0,
+                comment="该题分数配置无效，系统按0分处理。",
+                debug_meta={
+                    "elapsed_ms": int((monotonic() - started) * 1000),
+                    "skipped_empty_answer": False,
+                    "raw_output_preview": "",
+                    "raw_output_truncated": False,
+                    "parse_fallback_used": False,
+                    "numeric_score_was_clamped": False,
+                },
+            )
 
         if not aggregated_answer:
             return QuestionScoreResult(
@@ -84,7 +124,10 @@ class InterviewScorer:
                 sort_order=sort_order,
                 question=question,
                 ability_dimension=ability_dimension,
-                output_format=output_format,
+                score_format=score_format,
+                comment_requirement=comment_requirement,
+                max_score=max_score,
+                score_error="",
                 aggregated_answer="",
                 numeric_score=0.0,
                 comment="候选人未给出有效回答。",
@@ -114,7 +157,7 @@ class InterviewScorer:
             raise
 
         try:
-            parsed = self._parse_score_json(raw)
+            parsed = self._parse_score_json(raw, max_score=max_score)
         except Exception as parse_err:
             raw_preview, raw_truncated = self._build_raw_preview(raw)
             setattr(
@@ -140,7 +183,10 @@ class InterviewScorer:
             sort_order=sort_order,
             question=question,
             ability_dimension=ability_dimension,
-            output_format=output_format,
+            score_format=score_format,
+            comment_requirement=comment_requirement,
+            max_score=max_score,
+            score_error="",
             aggregated_answer=aggregated_answer,
             numeric_score=numeric_score,
             comment=comment,
@@ -175,10 +221,13 @@ class InterviewScorer:
             "best_standard": str(payload.get("best_standard", "") or "").strip(),
             "medium_standard": str(payload.get("medium_standard", "") or "").strip(),
             "worst_standard": str(payload.get("worst_standard", "") or "").strip(),
-            "output_format": str(payload.get("output_format", "") or "").strip(),
+            "score_format": str(payload.get("score_format", "") or "").strip(),
+            "comment_requirement": str(
+                payload.get("comment_requirement", "") or ""
+            ).strip(),
             "candidate_answer": str(payload.get("aggregated_answer", "") or "").strip(),
             "instruction": (
-                "请输出 numeric_score(0~5) 与 comment。"
+                f"请输出 numeric_score(0~{max_score:g}) 与 comment。"
                 "评分原则：rubric优先、证据加权、避免一票否决。"
                 "若信息不足，给保守中间分并指出缺失信息；仅在明显不匹配时给低分。"
                 "comment 需简要说明命中点、缺失点，并给出改进建议。"
@@ -202,7 +251,7 @@ class InterviewScorer:
             raise RuntimeError("LLM3 returned empty content")
         return result
 
-    def _parse_score_json(self, raw: str) -> Dict[str, Any]:
+    def _parse_score_json(self, raw: str, *, max_score: float) -> Dict[str, Any]:
         content = (raw or "").strip()
         parsed: Optional[Dict[str, Any]] = None
         parse_fallback_used = False
@@ -226,7 +275,7 @@ class InterviewScorer:
             numeric_score = float(raw_numeric_score)
         except (TypeError, ValueError):
             numeric_score = 0.0
-        clamped_score = max(0.0, min(5.0, numeric_score))
+        clamped_score = max(0.0, min(float(max_score), numeric_score))
         numeric_score_was_clamped = clamped_score != numeric_score
         numeric_score = clamped_score
 

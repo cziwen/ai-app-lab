@@ -184,6 +184,8 @@ CREATE TABLE IF NOT EXISTS job_questions (
   medium_standard TEXT NOT NULL DEFAULT '',
   worst_standard TEXT NOT NULL DEFAULT '',
   output_format TEXT NOT NULL DEFAULT '',
+  score_format TEXT NOT NULL DEFAULT '',
+  comment_requirement TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL,
   FOREIGN KEY(job_uid) REFERENCES jobs(job_uid) ON DELETE CASCADE
 );
@@ -225,6 +227,8 @@ CREATE TABLE IF NOT EXISTS interview_scorecards (
   interview_token TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'pending',
   overall_score REAL,
+  total_score REAL,
+  total_max_score REAL,
   error_message TEXT,
   started_at TEXT,
   completed_at TEXT,
@@ -240,7 +244,11 @@ CREATE TABLE IF NOT EXISTS interview_question_scores (
   question TEXT NOT NULL,
   ability_dimension TEXT NOT NULL DEFAULT '',
   output_format TEXT NOT NULL DEFAULT '',
+  score_format TEXT NOT NULL DEFAULT '',
+  comment_requirement TEXT NOT NULL DEFAULT '',
   aggregated_answer TEXT NOT NULL DEFAULT '',
+  max_score REAL NOT NULL DEFAULT 0,
+  score_error TEXT NOT NULL DEFAULT '',
   numeric_score REAL NOT NULL DEFAULT 0,
   comment TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
@@ -360,6 +368,48 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     if "output_format" not in question_columns:
         conn.execute(
             "ALTER TABLE job_questions ADD COLUMN output_format TEXT NOT NULL DEFAULT ''"
+        )
+    if "score_format" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN score_format TEXT NOT NULL DEFAULT ''"
+        )
+    if "comment_requirement" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN comment_requirement TEXT NOT NULL DEFAULT ''"
+        )
+
+    question_score_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(interview_question_scores)").fetchall()
+    }
+    if "score_format" not in question_score_columns:
+        conn.execute(
+            "ALTER TABLE interview_question_scores ADD COLUMN score_format TEXT NOT NULL DEFAULT ''"
+        )
+    if "comment_requirement" not in question_score_columns:
+        conn.execute(
+            "ALTER TABLE interview_question_scores ADD COLUMN comment_requirement TEXT NOT NULL DEFAULT ''"
+        )
+    if "max_score" not in question_score_columns:
+        conn.execute(
+            "ALTER TABLE interview_question_scores ADD COLUMN max_score REAL NOT NULL DEFAULT 0"
+        )
+    if "score_error" not in question_score_columns:
+        conn.execute(
+            "ALTER TABLE interview_question_scores ADD COLUMN score_error TEXT NOT NULL DEFAULT ''"
+        )
+
+    scorecard_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(interview_scorecards)").fetchall()
+    }
+    if "total_score" not in scorecard_columns:
+        conn.execute(
+            "ALTER TABLE interview_scorecards ADD COLUMN total_score REAL"
+        )
+    if "total_max_score" not in scorecard_columns:
+        conn.execute(
+            "ALTER TABLE interview_scorecards ADD COLUMN total_max_score REAL"
         )
 
 
@@ -618,7 +668,11 @@ def create_job(
                     "best_standard": best_standard,
                     "medium_standard": (item.get("medium_standard") or "").strip(),
                     "worst_standard": (item.get("worst_standard") or "").strip(),
-                    "output_format": (item.get("output_format") or "").strip(),
+                    "output_format": "",
+                    "score_format": (item.get("score_format") or "").strip(),
+                    "comment_requirement": (
+                        item.get("comment_requirement") or ""
+                    ).strip(),
                 }
             )
             continue
@@ -636,6 +690,8 @@ def create_job(
                     "medium_standard": "",
                     "worst_standard": "",
                     "output_format": "",
+                    "score_format": "",
+                    "comment_requirement": "",
                 }
             )
             continue
@@ -656,9 +712,10 @@ def create_job(
                 """
                 INSERT INTO job_questions (
                     job_uid, question, reference_answer, ability_dimension, scoring_boundary,
-                    best_standard, medium_standard, worst_standard, output_format, sort_order
+                    best_standard, medium_standard, worst_standard, output_format,
+                    score_format, comment_requirement, sort_order
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_uid,
@@ -670,6 +727,8 @@ def create_job(
                     question_payload["medium_standard"],
                     question_payload["worst_standard"],
                     question_payload["output_format"],
+                    question_payload["score_format"],
+                    question_payload["comment_requirement"],
                     idx,
                 ),
             )
@@ -745,6 +804,8 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
                 medium_standard,
                 worst_standard,
                 output_format,
+                score_format,
+                comment_requirement,
                 sort_order
             FROM job_questions
             WHERE job_uid = ?
@@ -773,6 +834,8 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
                 "medium_standard": q["medium_standard"],
                 "worst_standard": q["worst_standard"],
                 "output_format": q["output_format"],
+                "score_format": q["score_format"],
+                "comment_requirement": q["comment_requirement"],
                 "sort_order": int(q["sort_order"]),
             }
             for q in questions
@@ -818,6 +881,8 @@ def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.
             medium_standard,
             worst_standard,
             output_format,
+            score_format,
+            comment_requirement,
             sort_order
         FROM job_questions
         WHERE job_uid = ?
@@ -1326,6 +1391,8 @@ def _build_question_evidence(question_row: sqlite3.Row) -> Dict[str, Any]:
         "medium_standard": question_row["medium_standard"],
         "worst_standard": question_row["worst_standard"],
         "output_format": question_row["output_format"],
+        "score_format": question_row["score_format"],
+        "comment_requirement": question_row["comment_requirement"],
     }
 
 
@@ -1447,12 +1514,15 @@ def init_interview_scorecard(token: str) -> None:
         conn.execute(
             """
             INSERT INTO interview_scorecards (
-                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+                interview_token, status, overall_score, total_score, total_max_score,
+                error_message, started_at, completed_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(interview_token) DO UPDATE SET
                 status = excluded.status,
                 overall_score = excluded.overall_score,
+                total_score = excluded.total_score,
+                total_max_score = excluded.total_max_score,
                 error_message = excluded.error_message,
                 started_at = excluded.started_at,
                 completed_at = excluded.completed_at,
@@ -1461,6 +1531,8 @@ def init_interview_scorecard(token: str) -> None:
             (
                 token,
                 SCORECARD_STATUS_PENDING,
+                None,
+                None,
                 None,
                 None,
                 now,
@@ -1477,7 +1549,8 @@ def init_interview_scorecard(token: str) -> None:
 
 def save_interview_scorecard_success(
     token: str,
-    overall_score: float,
+    total_score: float,
+    total_max_score: float,
     question_scores: Sequence[Dict[str, Any]],
 ) -> None:
     now = utc_now_iso()
@@ -1485,12 +1558,15 @@ def save_interview_scorecard_success(
         conn.execute(
             """
             INSERT INTO interview_scorecards (
-                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+                interview_token, status, overall_score, total_score, total_max_score,
+                error_message, started_at, completed_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(interview_token) DO UPDATE SET
                 status = excluded.status,
                 overall_score = excluded.overall_score,
+                total_score = excluded.total_score,
+                total_max_score = excluded.total_max_score,
                 error_message = excluded.error_message,
                 completed_at = excluded.completed_at,
                 updated_at = excluded.updated_at
@@ -1498,7 +1574,9 @@ def save_interview_scorecard_success(
             (
                 token,
                 SCORECARD_STATUS_COMPLETED,
-                float(overall_score),
+                None,
+                float(total_score),
+                float(total_max_score),
                 None,
                 now,
                 now,
@@ -1514,9 +1592,10 @@ def save_interview_scorecard_success(
                 """
                 INSERT INTO interview_question_scores (
                     interview_token, question_id, sort_order, question, ability_dimension,
-                    output_format, aggregated_answer, numeric_score, comment
+                    output_format, score_format, comment_requirement,
+                    aggregated_answer, max_score, score_error, numeric_score, comment
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token,
@@ -1524,8 +1603,12 @@ def save_interview_scorecard_success(
                     int(item.get("sort_order", 0) or 0),
                     str(item.get("question", "") or ""),
                     str(item.get("ability_dimension", "") or ""),
-                    str(item.get("output_format", "") or ""),
+                    "",
+                    str(item.get("score_format", "") or ""),
+                    str(item.get("comment_requirement", "") or ""),
                     str(item.get("aggregated_answer", "") or ""),
+                    float(item.get("max_score", 0.0) or 0.0),
+                    str(item.get("score_error", "") or ""),
                     float(item.get("numeric_score", 0.0) or 0.0),
                     str(item.get("comment", "") or ""),
                 ),
@@ -1539,12 +1622,15 @@ def save_interview_scorecard_failed(token: str, error_message: str) -> None:
         conn.execute(
             """
             INSERT INTO interview_scorecards (
-                interview_token, status, overall_score, error_message, started_at, completed_at, updated_at
+                interview_token, status, overall_score, total_score, total_max_score,
+                error_message, started_at, completed_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(interview_token) DO UPDATE SET
                 status = excluded.status,
                 overall_score = excluded.overall_score,
+                total_score = excluded.total_score,
+                total_max_score = excluded.total_max_score,
                 error_message = excluded.error_message,
                 completed_at = excluded.completed_at,
                 updated_at = excluded.updated_at
@@ -1552,6 +1638,8 @@ def save_interview_scorecard_failed(token: str, error_message: str) -> None:
             (
                 token,
                 SCORECARD_STATUS_FAILED,
+                None,
+                None,
                 None,
                 (error_message or "").strip()[:2000],
                 now,
@@ -1571,7 +1659,8 @@ def _load_interview_scorecard_in_conn(
 ) -> Optional[Dict[str, Any]]:
     card = conn.execute(
         """
-        SELECT interview_token, status, overall_score, error_message, started_at, completed_at
+        SELECT interview_token, status, overall_score, total_score, total_max_score,
+               error_message, started_at, completed_at
         FROM interview_scorecards
         WHERE interview_token = ?
         """,
@@ -1583,7 +1672,8 @@ def _load_interview_scorecard_in_conn(
     rows = conn.execute(
         """
         SELECT question_id, sort_order, question, ability_dimension, output_format,
-               aggregated_answer, numeric_score, comment
+               score_format, comment_requirement,
+               aggregated_answer, max_score, score_error, numeric_score, comment
         FROM interview_question_scores
         WHERE interview_token = ?
         ORDER BY sort_order ASC, id ASC
@@ -1595,6 +1685,12 @@ def _load_interview_scorecard_in_conn(
         "overall_score": (
             None if card["overall_score"] is None else float(card["overall_score"])
         ),
+        "total_score": (
+            None if card["total_score"] is None else float(card["total_score"])
+        ),
+        "total_max_score": (
+            None if card["total_max_score"] is None else float(card["total_max_score"])
+        ),
         "started_at": card["started_at"],
         "completed_at": card["completed_at"],
         "error_message": card["error_message"],
@@ -1605,7 +1701,11 @@ def _load_interview_scorecard_in_conn(
                 "question": row["question"],
                 "ability_dimension": row["ability_dimension"],
                 "output_format": row["output_format"],
+                "score_format": row["score_format"],
+                "comment_requirement": row["comment_requirement"],
                 "aggregated_answer": row["aggregated_answer"],
+                "max_score": float(row["max_score"] or 0.0),
+                "score_error": row["score_error"],
                 "numeric_score": float(row["numeric_score"] or 0.0),
                 "comment": row["comment"],
             }

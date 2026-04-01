@@ -483,8 +483,11 @@ class ScoringQueue:
                     "sort_order": item.sort_order,
                     "question": item.question,
                     "ability_dimension": item.ability_dimension,
-                    "output_format": item.output_format,
+                    "score_format": item.score_format,
+                    "comment_requirement": item.comment_requirement,
                     "aggregated_answer": item.aggregated_answer,
+                    "max_score": item.max_score,
+                    "score_error": item.score_error,
                     "numeric_score": item.numeric_score,
                     "comment": item.comment,
                 }
@@ -500,7 +503,10 @@ class ScoringQueue:
                         "question_id": item.question_id,
                         "sort_order": item.sort_order,
                         "ability_dimension": item.ability_dimension,
-                        "output_format": item.output_format,
+                        "score_format": item.score_format,
+                        "comment_requirement": item.comment_requirement,
+                        "max_score": item.max_score,
+                        "score_error": item.score_error,
                         "aggregated_answer_len": meta.get(
                             "aggregated_answer_len",
                             len(item.aggregated_answer or ""),
@@ -529,7 +535,8 @@ class ScoringQueue:
             await asyncio.to_thread(
                 save_interview_scorecard_success,
                 task.token,
-                result.overall_score,
+                result.total_score,
+                result.total_max_score,
                 payload,
             )
             _scoring_log(
@@ -537,15 +544,17 @@ class ScoringQueue:
                     "stage": "success",
                     "token": task.token,
                     "question_count": len(payload),
-                    "overall_score": result.overall_score,
+                    "total_score": result.total_score,
+                    "total_max_score": result.total_max_score,
                     "elapsed_ms": int((monotonic() - started) * 1000),
                 }
             )
             self.logger.info(
-                "event=interview_scoring.success token=%s question_count=%s overall_score=%.2f",
+                "event=interview_scoring.success token=%s question_count=%s total_score=%.2f total_max_score=%.2f",
                 task.token,
                 len(payload),
-                result.overall_score,
+                result.total_score,
+                result.total_max_score,
             )
         except Exception as score_err:
             debug_meta = getattr(score_err, "scoring_debug_meta", None)

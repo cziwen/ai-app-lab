@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from score_scale import parse_score_scale
 
 from admin_store import (
     ADMIN_SESSION_COOKIE,
@@ -37,7 +38,8 @@ CSV_TEMPLATE_COLUMNS = [
     "最好标准",
     "中等标准",
     "最差标准",
-    "输出格式",
+    "分数",
+    "评语要求",
 ]
 
 
@@ -98,7 +100,7 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
         )
 
     rows: List[Dict[str, str]] = []
-    for row in reader:
+    for row_index, row in enumerate(reader, start=2):
         if not row or all(not str(cell).strip() for cell in row):
             continue
 
@@ -113,6 +115,16 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
         if not question:
             continue
 
+        max_score, scale_error = parse_score_scale(normalized_row[6])
+        if max_score is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"CSV 第{row_index}行“分数”格式无效：{normalized_row[6] or '(空)'}；"
+                    f"{scale_error or '请使用 5/5分/0-5/0~5/0～5分'}"
+                ),
+            )
+
         rows.append(
             {
                 "question": question,
@@ -121,7 +133,8 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
                 "best_standard": normalized_row[3],
                 "medium_standard": normalized_row[4],
                 "worst_standard": normalized_row[5],
-                "output_format": normalized_row[6],
+                "score_format": normalized_row[6],
+                "comment_requirement": normalized_row[7],
             }
         )
 
@@ -319,6 +332,8 @@ def create_admin_app(
             else {
                 "status": "pending",
                 "overall_score": None,
+                "total_score": None,
+                "total_max_score": None,
                 "completed_at": None,
                 "error_message": None,
                 "question_scores": [],
@@ -343,6 +358,8 @@ def create_admin_app(
                 "scorecard": {
                     "status": str(scorecard.get("status", "pending") or "pending"),
                     "overall_score": scorecard.get("overall_score"),
+                    "total_score": scorecard.get("total_score"),
+                    "total_max_score": scorecard.get("total_max_score"),
                     "completed_at": scorecard.get("completed_at"),
                     "error_message": scorecard.get("error_message"),
                     "question_scores": scorecard.get("question_scores", []),

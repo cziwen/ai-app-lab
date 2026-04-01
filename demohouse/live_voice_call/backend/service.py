@@ -426,8 +426,11 @@ class VoiceBotService(BaseModel):
                     "worst_standard": str(
                         evidence.get("worst_standard", "") or ""
                     ).strip(),
-                    "output_format": str(
-                        evidence.get("output_format", "") or ""
+                    "score_format": str(
+                        evidence.get("score_format", "") or ""
+                    ).strip(),
+                    "comment_requirement": str(
+                        evidence.get("comment_requirement", "") or ""
                     ).strip(),
                     "candidate_answers": snapshot.candidate_answers,
                     "aggregated_answer": snapshot.aggregated_answer,

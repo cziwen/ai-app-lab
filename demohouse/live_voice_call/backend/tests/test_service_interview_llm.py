@@ -69,7 +69,8 @@ def test_build_interview_score_inputs_maps_snapshot_fields():
                         "best_standard": "完整闭环",
                         "medium_standard": "部分闭环",
                         "worst_standard": "无结果",
-                        "output_format": "评分0-5 + 摘要",
+                        "score_format": "评分0-5",
+                        "comment_requirement": "摘要 + 改进建议",
                     },
                     candidate_answers=["我负责拆解目标", "最终提升转化率"],
                     aggregated_answer="我负责拆解目标\\n最终提升转化率",
@@ -92,5 +93,6 @@ def test_build_interview_score_inputs_maps_snapshot_fields():
     item = payloads[0]
     assert item["question_id"] == "q1"
     assert item["ability_dimension"] == "项目管理"
-    assert item["output_format"] == "评分0-5 + 摘要"
+    assert item["score_format"] == "评分0-5"
+    assert item["comment_requirement"] == "摘要 + 改进建议"
     assert item["aggregated_answer"] == "我负责拆解目标\\n最终提升转化率"

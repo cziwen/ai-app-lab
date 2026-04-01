@@ -396,7 +396,8 @@ def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkey
                 "best_standard": "先共情再给分层方案并引导决策",
                 "medium_standard": "能够解释但缺少场景化引导",
                 "worst_standard": "仅强调价格或直接放弃沟通",
-                "output_format": "评分0-5 + 摘要",
+                "score_format": "评分0-5",
+                "comment_requirement": "摘要 + 改进建议",
             }
         ],
     )
@@ -410,7 +411,8 @@ def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkey
     assert question["best_standard"] == "先共情再给分层方案并引导决策"
     assert question["medium_standard"] == "能够解释但缺少场景化引导"
     assert question["worst_standard"] == "仅强调价格或直接放弃沟通"
-    assert question["output_format"] == "评分0-5 + 摘要"
+    assert question["score_format"] == "评分0-5"
+    assert question["comment_requirement"] == "摘要 + 改进建议"
     assert question["reference_answer"] == question["best_standard"]
 
 
@@ -462,14 +464,22 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "medium_standard" in question_columns
     assert "worst_standard" in question_columns
     assert "output_format" in question_columns
+    assert "score_format" in question_columns
+    assert "comment_requirement" in question_columns
     assert "question_followup_limits" in interview_columns
     assert "expires_at" in interview_columns
     assert "completed_reason" in interview_columns
     assert "status" in scorecard_columns
     assert "overall_score" in scorecard_columns
+    assert "total_score" in scorecard_columns
+    assert "total_max_score" in scorecard_columns
     assert "error_message" in scorecard_columns
     assert "numeric_score" in question_score_columns
     assert "comment" in question_score_columns
+    assert "score_format" in question_score_columns
+    assert "comment_requirement" in question_score_columns
+    assert "max_score" in question_score_columns
+    assert "score_error" in question_score_columns
 
 
 def test_expired_interview_becomes_invalid_for_access_and_start(monkeypatch, tmp_path):
@@ -662,15 +672,19 @@ def test_interview_scorecard_success_is_persisted_and_returned(monkeypatch, tmp_
     admin_store.init_interview_scorecard(token)
     admin_store.save_interview_scorecard_success(
         token,
-        overall_score=4.25,
+        total_score=4.25,
+        total_max_score=5.0,
         question_scores=[
             {
                 "question_id": "q1",
                 "sort_order": 1,
                 "question": "介绍一个项目",
                 "ability_dimension": "项目管理",
-                "output_format": "评分0-5 + 摘要",
+                "score_format": "评分0-5",
+                "comment_requirement": "摘要 + 改进建议",
                 "aggregated_answer": "我负责拆解目标并推动上线。",
+                "max_score": 5.0,
+                "score_error": "",
                 "numeric_score": 4.25,
                 "comment": "回答覆盖较完整。",
             }
@@ -682,8 +696,14 @@ def test_interview_scorecard_success_is_persisted_and_returned(monkeypatch, tmp_
     scorecard = detail["scorecard"]
     assert scorecard is not None
     assert scorecard["status"] == admin_store.SCORECARD_STATUS_COMPLETED
-    assert scorecard["overall_score"] == 4.25
+    assert scorecard["overall_score"] is None
+    assert scorecard["total_score"] == 4.25
+    assert scorecard["total_max_score"] == 5.0
     assert len(scorecard["question_scores"]) == 1
+    assert scorecard["question_scores"][0]["score_format"] == "评分0-5"
+    assert scorecard["question_scores"][0]["comment_requirement"] == "摘要 + 改进建议"
+    assert scorecard["question_scores"][0]["max_score"] == 5.0
+    assert scorecard["question_scores"][0]["score_error"] == ""
     assert scorecard["question_scores"][0]["comment"] == "回答覆盖较完整。"
 
 
@@ -712,15 +732,19 @@ def test_interview_scorecard_failed_clears_question_scores(monkeypatch, tmp_path
     admin_store.init_interview_scorecard(token)
     admin_store.save_interview_scorecard_success(
         token,
-        overall_score=3.0,
+        total_score=3.0,
+        total_max_score=5.0,
         question_scores=[
             {
                 "question_id": "q1",
                 "sort_order": 1,
                 "question": "介绍一个项目",
                 "ability_dimension": "",
-                "output_format": "",
+                "score_format": "",
+                "comment_requirement": "",
                 "aggregated_answer": "回答",
+                "max_score": 5.0,
+                "score_error": "",
                 "numeric_score": 3.0,
                 "comment": "中等。",
             }

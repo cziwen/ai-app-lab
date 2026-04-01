@@ -456,13 +456,8 @@ export const AdminInterviewsPage = () => {
                 {interviewDetail.scorecard?.status === 'completed' && (
                   <p>
                     总分：
-                    {(
-                      (interviewDetail.scorecard?.question_scores || []).reduce(
-                        (sum, item) => sum + (Number(item.numeric_score) || 0),
-                        0,
-                      )
-                    ).toFixed(2)}{' '}
-                    / {(((interviewDetail.scorecard?.question_scores || []).length || 0) * 5).toFixed(2)}
+                    {(Number(interviewDetail.scorecard?.total_score) || 0).toFixed(2)} /{' '}
+                    {(Number(interviewDetail.scorecard?.total_max_score) || 0).toFixed(2)}
                   </p>
                 )}
                 {interviewDetail.scorecard?.status === 'failed' && (
@@ -475,9 +470,16 @@ export const AdminInterviewsPage = () => {
                         <p>
                           {item.sort_order}. {item.question}
                         </p>
-                        <p>分数：{item.numeric_score.toFixed(2)} / 5.00</p>
+                        <p>
+                          分数：{item.numeric_score.toFixed(2)} /{' '}
+                          {(Number(item.max_score) || 0).toFixed(2)}
+                        </p>
                         {item.ability_dimension && <p>能力维度：{item.ability_dimension}</p>}
-                        {item.output_format && <p>输出格式：{item.output_format}</p>}
+                        {item.score_format && <p>分数要求：{item.score_format}</p>}
+                        {item.comment_requirement && (
+                          <p>评语要求：{item.comment_requirement}</p>
+                        )}
+                        {item.score_error && <p>分数错误：{item.score_error}</p>}
                         <p>评语：{item.comment}</p>
                       </li>
                     ))}

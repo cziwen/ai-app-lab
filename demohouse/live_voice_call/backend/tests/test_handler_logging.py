@@ -418,15 +418,20 @@ def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatc
 
         async def score_interview(self, _inputs):
             return SimpleNamespace(
-                overall_score=4.2,
+                overall_score=None,
+                total_score=4.2,
+                total_max_score=5.0,
                 question_scores=[
                     SimpleNamespace(
                         question_id="q1",
                         sort_order=1,
                         question="Q1",
                         ability_dimension="ownership",
-                        output_format="STAR",
+                        score_format="0-5",
+                        comment_requirement="一句话点评",
                         aggregated_answer="候选人回答",
+                        max_score=5.0,
+                        score_error="",
                         numeric_score=4.2,
                         comment="覆盖较完整",
                         debug_meta={
@@ -446,7 +451,9 @@ def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatc
     monkeypatch.setattr(
         handler,
         "save_interview_scorecard_success",
-        lambda token, overall, payload: captured["success"].append((token, overall, payload)),
+        lambda token, total_score, total_max_score, payload: captured["success"].append(
+            (token, total_score, total_max_score, payload)
+        ),
     )
 
     queue = handler.ScoringQueue(logging.getLogger("test.scoring.queue.success"))

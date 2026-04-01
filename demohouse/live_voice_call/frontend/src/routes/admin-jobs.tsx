@@ -10,7 +10,8 @@ const CSV_TEMPLATE_COLUMNS = [
   '最好标准',
   '中等标准',
   '最差标准',
-  '输出格式',
+  '分数',
+  '评语要求',
 ] as const;
 
 const parseHeaderLine = (line: string): string[] => {
@@ -311,7 +312,8 @@ export const AdminJobsPage = () => {
                         <th>最好标准</th>
                         <th>中等标准</th>
                         <th>最差标准</th>
-                        <th>输出格式</th>
+                        <th>分数</th>
+                        <th>评语要求</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -324,7 +326,8 @@ export const AdminJobsPage = () => {
                           <td>{item.best_standard || item.reference_answer || '无'}</td>
                           <td>{item.medium_standard || '无'}</td>
                           <td>{item.worst_standard || '无'}</td>
-                          <td>{item.output_format || '无'}</td>
+                          <td>{item.score_format || '无'}</td>
+                          <td>{item.comment_requirement || '无'}</td>
                         </tr>
                       ))}
                     </tbody>

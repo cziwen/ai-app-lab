@@ -27,7 +27,8 @@ export type JobDetail = {
     best_standard: string;
     medium_standard: string;
     worst_standard: string;
-    output_format: string;
+    score_format: string;
+    comment_requirement: string;
     sort_order: number;
   }>;
 };
@@ -83,6 +84,8 @@ export type InterviewDetail = {
   scorecard: {
     status: 'pending' | 'completed' | 'failed' | string;
     overall_score?: number | null;
+    total_score?: number | null;
+    total_max_score?: number | null;
     completed_at?: string | null;
     error_message?: string | null;
     question_scores: Array<{
@@ -90,8 +93,11 @@ export type InterviewDetail = {
       sort_order: number;
       question: string;
       ability_dimension: string;
-      output_format: string;
+      score_format: string;
+      comment_requirement: string;
       aggregated_answer: string;
+      max_score: number;
+      score_error: string;
       numeric_score: number;
       comment: string;
     }>;
