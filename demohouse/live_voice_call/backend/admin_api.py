@@ -32,14 +32,10 @@ from admin_store import (
 )
 
 CSV_TEMPLATE_COLUMNS = [
+    "场景",
     "问题",
-    "能力维度",
-    "评分分界线",
-    "最好标准",
-    "中等标准",
-    "最差标准",
-    "分数",
-    "评语要求",
+    "评分标准",
+    "最大分数",
 ]
 
 
@@ -110,31 +106,28 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
         elif len(normalized_row) > len(CSV_TEMPLATE_COLUMNS):
             normalized_row = normalized_row[: len(CSV_TEMPLATE_COLUMNS)]
 
-        question = normalized_row[0]
+        scenario = normalized_row[0]
+        question = normalized_row[1]
 
         if not question:
             continue
 
-        max_score, scale_error = parse_score_scale(normalized_row[6])
+        max_score, scale_error = parse_score_scale(normalized_row[3])
         if max_score is None:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"CSV 第{row_index}行“分数”格式无效：{normalized_row[6] or '(空)'}；"
+                    f"CSV 第{row_index}行“最大分数”格式无效：{normalized_row[3] or '(空)'}；"
                     f"{scale_error or '请使用 5/5分/0-5/0~5/0～5分'}"
                 ),
             )
 
         rows.append(
             {
+                "scenario": scenario,
                 "question": question,
-                "ability_dimension": normalized_row[1],
                 "scoring_boundary": normalized_row[2],
-                "best_standard": normalized_row[3],
-                "medium_standard": normalized_row[4],
-                "worst_standard": normalized_row[5],
-                "score_format": normalized_row[6],
-                "comment_requirement": normalized_row[7],
+                "score_format": normalized_row[3],
             }
         )
 

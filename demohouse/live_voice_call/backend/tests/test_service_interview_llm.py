@@ -96,3 +96,101 @@ def test_build_interview_score_inputs_maps_snapshot_fields():
     assert item["score_format"] == "评分0-5"
     assert item["comment_requirement"] == "摘要 + 改进建议"
     assert item["aggregated_answer"] == "我负责拆解目标\\n最终提升转化率"
+
+
+def test_stream_interview_llm_chat_uses_contiguous_scene_context_windows():
+    async def _run():
+        fake_adapter = _FakeResponsesAdapter(["好的。"])
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            interview_questions=[
+                {"question_id": "q1", "main_question": "Q1", "scenario": "项目复盘"},
+                {"question_id": "q2", "main_question": "Q2", "scenario": "项目复盘"},
+                {"question_id": "q3", "main_question": "Q3", "scenario": "故障处理"},
+            ],
+            responses_adapter=fake_adapter,
+            session_id="s1",
+        )
+        await svc.init()
+
+        svc._activate_context_segment("q1")
+        svc._append_history_message("user", "A1")
+        svc._append_history_message("assistant", "B1")
+        svc._activate_context_segment("q2")
+        svc._append_history_message("user", "A2")
+
+        svc._activate_context_segment("q3")
+        svc._append_history_message("user", "C1")
+        chunks = []
+        async for chunk in svc.stream_interview_llm_chat("请继续提问"):
+            chunks.append(chunk)
+        assert "".join(chunks) == "好的。"
+
+        third_scene_call = fake_adapter.calls[-1]
+        third_scene_messages = third_scene_call["messages"]
+        third_scene_texts = [item["content"] for item in third_scene_messages]
+        assert "C1" in third_scene_texts
+        assert "A1" not in third_scene_texts
+        assert "A2" not in third_scene_texts
+        assert third_scene_texts[-1] == "请继续提问"
+
+        svc._activate_context_segment("q2")
+        chunks = []
+        async for chunk in svc.stream_interview_llm_chat("继续项目问题"):
+            chunks.append(chunk)
+        assert "".join(chunks) == "好的。"
+        project_scene_call = fake_adapter.calls[-1]
+        project_scene_texts = [item["content"] for item in project_scene_call["messages"]]
+        assert "A1" in project_scene_texts
+        assert "B1" in project_scene_texts
+        assert "A2" in project_scene_texts
+        assert "C1" not in project_scene_texts
+        assert project_scene_texts[-1] == "继续项目问题"
+
+    asyncio.run(_run())
+
+
+def test_stream_interview_llm_chat_treats_empty_scene_as_per_question_window():
+    async def _run():
+        fake_adapter = _FakeResponsesAdapter(["收到。"])
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            interview_questions=[
+                {"question_id": "q1", "main_question": "Q1", "scenario": ""},
+                {"question_id": "q2", "main_question": "Q2", "scenario": ""},
+            ],
+            responses_adapter=fake_adapter,
+            session_id="s2",
+        )
+        await svc.init()
+
+        svc._activate_context_segment("q1")
+        svc._append_history_message("user", "Q1-answer")
+        svc._activate_context_segment("q2")
+        svc._append_history_message("user", "Q2-answer")
+        chunks = []
+        async for chunk in svc.stream_interview_llm_chat("继续第二题"):
+            chunks.append(chunk)
+        assert "".join(chunks) == "收到。"
+
+        call = fake_adapter.calls[-1]
+        texts = [item["content"] for item in call["messages"]]
+        assert "Q2-answer" in texts
+        assert "Q1-answer" not in texts
+        assert texts[-1] == "继续第二题"
+
+    asyncio.run(_run())

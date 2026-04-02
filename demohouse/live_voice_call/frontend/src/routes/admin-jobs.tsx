@@ -4,14 +4,10 @@ import { AdminLoadingPage, AdminModal, AdminShell } from '@/admin/layout';
 import { useAdminAuth } from '@/admin/use-admin-auth';
 
 const CSV_TEMPLATE_COLUMNS = [
+  '场景',
   '问题',
-  '能力维度',
-  '评分分界线',
-  '最好标准',
-  '中等标准',
-  '最差标准',
-  '分数',
-  '评语要求',
+  '评分标准',
+  '最大分数',
 ] as const;
 
 const parseHeaderLine = (line: string): string[] => {
@@ -306,28 +302,20 @@ export const AdminJobsPage = () => {
                     <thead>
                       <tr>
                         <th>#</th>
+                        <th>场景</th>
                         <th>题目</th>
-                        <th>能力维度</th>
-                        <th>评分分界线</th>
-                        <th>最好标准</th>
-                        <th>中等标准</th>
-                        <th>最差标准</th>
-                        <th>分数</th>
-                        <th>评语要求</th>
+                        <th>评分标准</th>
+                        <th>最大分数</th>
                       </tr>
                     </thead>
                     <tbody>
                       {jobDetail.questions.map((item, index) => (
                         <tr key={item.id}>
                           <td>{index + 1}</td>
+                          <td>{item.scenario || '无'}</td>
                           <td>{item.question}</td>
-                          <td>{item.ability_dimension || '无'}</td>
                           <td>{item.scoring_boundary || '无'}</td>
-                          <td>{item.best_standard || item.reference_answer || '无'}</td>
-                          <td>{item.medium_standard || '无'}</td>
-                          <td>{item.worst_standard || '无'}</td>
                           <td>{item.score_format || '无'}</td>
-                          <td>{item.comment_requirement || '无'}</td>
                         </tr>
                       ))}
                     </tbody>

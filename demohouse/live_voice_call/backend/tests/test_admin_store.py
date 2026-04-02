@@ -391,13 +391,9 @@ def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkey
         questions=[
             {
                 "question": "你如何处理客户对价格的顾虑？",
-                "ability_dimension": "沟通能力",
+                "scenario": "咨询场景",
                 "scoring_boundary": "是否兼顾客户需求与成交目标",
-                "best_standard": "先共情再给分层方案并引导决策",
-                "medium_standard": "能够解释但缺少场景化引导",
-                "worst_standard": "仅强调价格或直接放弃沟通",
                 "score_format": "评分0-5",
-                "comment_requirement": "摘要 + 改进建议",
             }
         ],
     )
@@ -406,14 +402,10 @@ def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkey
     assert detail is not None
     assert len(detail["questions"]) == 1
     question = detail["questions"][0]
-    assert question["ability_dimension"] == "沟通能力"
+    assert question["scenario"] == "咨询场景"
     assert question["scoring_boundary"] == "是否兼顾客户需求与成交目标"
-    assert question["best_standard"] == "先共情再给分层方案并引导决策"
-    assert question["medium_standard"] == "能够解释但缺少场景化引导"
-    assert question["worst_standard"] == "仅强调价格或直接放弃沟通"
     assert question["score_format"] == "评分0-5"
-    assert question["comment_requirement"] == "摘要 + 改进建议"
-    assert question["reference_answer"] == question["best_standard"]
+    assert question["reference_answer"] == "是否兼顾客户需求与成交目标"
 
 
 def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
@@ -459,6 +451,7 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
             ).fetchall()
         }
     assert "ability_dimension" in question_columns
+    assert "scenario" in question_columns
     assert "scoring_boundary" in question_columns
     assert "best_standard" in question_columns
     assert "medium_standard" in question_columns

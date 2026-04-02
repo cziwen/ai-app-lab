@@ -145,6 +145,9 @@ class VoiceBotService(BaseModel):
     responses_adapter: Optional[Any] = None
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
+    segment_history_messages: Dict[str, List[ArkMessage]] = {}
+    question_context_segments: Dict[str, str] = {}
+    active_context_segment: str = ""
 
     asr_buffer: str = ""  # Reservoir asr recognition result
     asr_no_input_duration: int = 0  # Cumulated no live_voice_call recognition duration
@@ -208,6 +211,7 @@ class VoiceBotService(BaseModel):
                 judge=self.interview_judge,
                 global_turn_limit=20,
             )
+            self._build_question_context_segments(flow_questions)
 
     def _log(self, message: str) -> None:
         if self.log_fn:
@@ -217,6 +221,56 @@ class VoiceBotService(BaseModel):
             except Exception as log_err:
                 INFO(f"[VoiceBotService] custom log_fn failed: {log_err}")
         INFO(message)
+
+    def _build_question_context_segments(self, questions: List[Dict[str, Any]]) -> None:
+        self.question_context_segments = {}
+        self.segment_history_messages = {}
+        self.active_context_segment = ""
+        previous_scene = ""
+        current_scene_segment = ""
+
+        for idx, item in enumerate(questions):
+            question_id = str(item.get("question_id", "") or "").strip() or f"q{idx + 1}"
+            evidence = item.get("evidence", {})
+            scenario = str(item.get("scenario", "") or "").strip()
+            if not scenario and isinstance(evidence, dict):
+                scenario = str(evidence.get("scenario", "") or "").strip()
+
+            if scenario:
+                if scenario == previous_scene and current_scene_segment:
+                    segment_id = current_scene_segment
+                else:
+                    segment_id = f"scene:{idx}:{scenario}"
+                    current_scene_segment = segment_id
+            else:
+                segment_id = f"single:{idx}:{question_id}"
+                current_scene_segment = segment_id
+
+            self.question_context_segments[question_id] = segment_id
+            self.segment_history_messages.setdefault(segment_id, [])
+            previous_scene = scenario
+
+    def _activate_context_segment(self, question_id: Optional[str]) -> None:
+        if not question_id:
+            return
+        segment_id = self.question_context_segments.get(str(question_id))
+        if not segment_id:
+            return
+        self.active_context_segment = segment_id
+        self.segment_history_messages.setdefault(segment_id, [])
+
+    def _history_for_current_segment(self) -> List[ArkMessage]:
+        segment_id = self.active_context_segment.strip()
+        if not segment_id:
+            return self.history_messages
+        return self.segment_history_messages.get(segment_id, [])
+
+    def _append_history_message(self, role: str, content: str) -> None:
+        message = ArkMessage(**{"role": role, "content": content})
+        self.history_messages.append(message)
+        segment_id = self.active_context_segment.strip()
+        if segment_id:
+            self.segment_history_messages.setdefault(segment_id, []).append(message)
 
     def _wall_time_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -532,9 +586,7 @@ class VoiceBotService(BaseModel):
         greeting_stream = self._greeting_text_stream(GREETING_TEXT)
         async for payload in self.handle_tts_response(greeting_stream):
             yield WebEvent.from_payload(payload)
-        self.history_messages.append(
-            ArkMessage(**{"role": "assistant", "content": GREETING_TEXT})
-        )
+        self._append_history_message("assistant", GREETING_TEXT)
         self._emit_bot_text(GREETING_TEXT)
 
     async def handler_loop(
@@ -799,7 +851,7 @@ class VoiceBotService(BaseModel):
         """
         Stream chat with the LLM and generate responses.
         """
-        self.history_messages.append(ArkMessage(**{"role": "user", "content": text}))
+        self._append_history_message("user", text)
 
         llm = BaseChatLanguageModel(
             template=VoiceBotPrompt(),
@@ -815,9 +867,7 @@ class VoiceBotService(BaseModel):
                     completion_buffer += chunk.choices[0].delta.content
 
         if completion_buffer:
-            self.history_messages.append(
-                ArkMessage(**{"role": "assistant", "content": completion_buffer})
-            )
+            self._append_history_message("assistant", completion_buffer)
             self._emit_bot_text(completion_buffer)
 
     async def _send_scripted_text(self, text: str) -> AsyncIterable[WebEvent]:
@@ -825,9 +875,7 @@ class VoiceBotService(BaseModel):
         text_stream = self._greeting_text_stream(text)
         async for payload in self.handle_tts_response(text_stream):
             yield WebEvent.from_payload(payload)
-        self.history_messages.append(
-            ArkMessage(**{"role": "assistant", "content": text})
-        )
+        self._append_history_message("assistant", text)
         self._emit_bot_text(text)
 
     def _build_interview_context(
@@ -867,7 +915,7 @@ class VoiceBotService(BaseModel):
         ephemeral user message but NOT persisted in history_messages.
         The LLM's output IS added to history.
         """
-        messages_for_llm = self.history_messages + [
+        messages_for_llm = self._history_for_current_segment() + [
             ArkMessage(**{"role": "user", "content": interview_context})
         ]
         if not self.responses_adapter:
@@ -896,9 +944,7 @@ class VoiceBotService(BaseModel):
                 completion_buffer += delta_text
 
         if completion_buffer:
-            self.history_messages.append(
-                ArkMessage(**{"role": "assistant", "content": completion_buffer})
-            )
+            self._append_history_message("assistant", completion_buffer)
             self._emit_bot_text(completion_buffer)
         self._log_turn_event(
             "interviewer_llm_end",
@@ -930,6 +976,7 @@ class VoiceBotService(BaseModel):
             f"text='{first_question_response.interviewer_text}'"
         )
         if first_question_response.interviewer_text:
+            self._activate_context_segment(first_question_response.question_id)
             async for event in self._send_scripted_text(
                 first_question_response.interviewer_text
             ):
@@ -956,11 +1003,12 @@ class VoiceBotService(BaseModel):
                     candidate_text = asr_recognized.sentence
                     self._log(f"[Interview] Candidate answer: '{candidate_text}'")
                     self._emit_candidate_text(candidate_text)
+                    if flow.current_question_index < len(flow.questions):
+                        current_question_id = flow.questions[flow.current_question_index].question_id
+                        self._activate_context_segment(current_question_id)
 
                     # Add candidate answer to conversation history
-                    self.history_messages.append(
-                        ArkMessage(**{"role": "user", "content": candidate_text})
-                    )
+                    self._append_history_message("user", candidate_text)
 
                     # LLM call #1: InterviewJudge evaluates the answer
                     self._log("[Interview] Calling InterviewJudge (LLM #1)...")
@@ -1018,6 +1066,7 @@ class VoiceBotService(BaseModel):
 
                     # Get next interviewer message if flow state needs one
                     next_interviewer_text = ""
+                    next_response: Optional[FlowResponse] = None
                     if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
                         next_response = await flow.produce_interviewer_message()
                         next_interviewer_text = next_response.interviewer_text
@@ -1038,6 +1087,11 @@ class VoiceBotService(BaseModel):
                             self._emit_interview_completed()
                             self._log("[Interview] Interview ended")
                             return
+
+                    next_question_id = (
+                        next_response.question_id if next_response else answer_response.question_id
+                    )
+                    self._activate_context_segment(next_question_id)
 
                     # LLM call #2: Generate natural interviewer speech
                     interview_context = self._build_interview_context(

@@ -20,6 +20,7 @@ export type JobDetail = {
   updated_at: string;
   questions: Array<{
     id: number;
+    scenario: string;
     question: string;
     reference_answer: string;
     ability_dimension: string;
@@ -64,6 +65,7 @@ export type InterviewDetail = {
   selected_questions?: Array<{
     sort_order: number;
     question_id: number;
+    scenario?: string;
     question: string;
     max_followups: number;
   }>;

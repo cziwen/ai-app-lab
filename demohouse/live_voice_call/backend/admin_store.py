@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS job_questions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_uid TEXT NOT NULL,
+  scenario TEXT NOT NULL DEFAULT '',
   question TEXT NOT NULL,
   reference_answer TEXT NOT NULL,
   ability_dimension TEXT NOT NULL DEFAULT '',
@@ -348,6 +349,10 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     if "ability_dimension" not in question_columns:
         conn.execute(
             "ALTER TABLE job_questions ADD COLUMN ability_dimension TEXT NOT NULL DEFAULT ''"
+        )
+    if "scenario" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN scenario TEXT NOT NULL DEFAULT ''"
         )
     if "scoring_boundary" not in question_columns:
         conn.execute(
@@ -658,13 +663,16 @@ def create_job(
     for item in questions:
         if isinstance(item, dict):
             question = (item.get("question") or "").strip()
+            scoring_boundary = (item.get("scoring_boundary") or "").strip()
             best_standard = (item.get("best_standard") or "").strip()
+            reference_answer = best_standard or scoring_boundary
             normalized_questions.append(
                 {
+                    "scenario": (item.get("scenario") or "").strip(),
                     "question": question,
-                    "reference_answer": best_standard,
+                    "reference_answer": reference_answer,
                     "ability_dimension": (item.get("ability_dimension") or "").strip(),
-                    "scoring_boundary": (item.get("scoring_boundary") or "").strip(),
+                    "scoring_boundary": scoring_boundary,
                     "best_standard": best_standard,
                     "medium_standard": (item.get("medium_standard") or "").strip(),
                     "worst_standard": (item.get("worst_standard") or "").strip(),
@@ -682,6 +690,7 @@ def create_job(
             reference_answer = str(item[1]).strip()
             normalized_questions.append(
                 {
+                    "scenario": "",
                     "question": question,
                     "reference_answer": reference_answer,
                     "ability_dimension": "",
@@ -711,14 +720,15 @@ def create_job(
             conn.execute(
                 """
                 INSERT INTO job_questions (
-                    job_uid, question, reference_answer, ability_dimension, scoring_boundary,
+                    job_uid, scenario, question, reference_answer, ability_dimension, scoring_boundary,
                     best_standard, medium_standard, worst_standard, output_format,
                     score_format, comment_requirement, sort_order
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_uid,
+                    question_payload["scenario"],
                     question_payload["question"],
                     question_payload["reference_answer"],
                     question_payload["ability_dimension"],
@@ -796,6 +806,7 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
             """
             SELECT
                 id,
+                scenario,
                 question,
                 reference_answer,
                 ability_dimension,
@@ -826,6 +837,7 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
         "questions": [
             {
                 "id": int(q["id"]),
+                "scenario": q["scenario"],
                 "question": q["question"],
                 "reference_answer": q["reference_answer"],
                 "ability_dimension": q["ability_dimension"],
@@ -873,6 +885,7 @@ def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.
         """
         SELECT
             id,
+            scenario,
             question,
             reference_answer,
             ability_dimension,
@@ -1242,6 +1255,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
                 {
                     "sort_order": index + 1,
                     "question_id": qid,
+                    "scenario": str(question["scenario"] or "").strip(),
                     "question": question["question"],
                     "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
                 }
@@ -1385,6 +1399,7 @@ def _keywords_from_reference(reference: str) -> List[str]:
 def _build_question_evidence(question_row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "must_cover": _keywords_from_reference(question_row["reference_answer"]),
+        "scenario": question_row["scenario"],
         "ability_dimension": question_row["ability_dimension"],
         "scoring_boundary": question_row["scoring_boundary"],
         "best_standard": question_row["best_standard"],
@@ -1433,6 +1448,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             selected_questions.append(
                 {
                     "question_id": f"q{qid}",
+                    "scenario": str(q["scenario"] or "").strip(),
                     "main_question": q["question"],
                     "evidence": _build_question_evidence(q),
                     "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
@@ -1444,6 +1460,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                 selected_questions.append(
                     {
                         "question_id": f"q{int(q['id'])}",
+                        "scenario": str(q["scenario"] or "").strip(),
                         "main_question": q["question"],
                         "evidence": _build_question_evidence(q),
                         "max_followups": followup_limits.get(
