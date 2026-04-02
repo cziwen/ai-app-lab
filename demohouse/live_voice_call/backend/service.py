@@ -493,37 +493,84 @@ class VoiceBotService(BaseModel):
         snapshots: List[QuestionAnswerSnapshot] = (
             self.interview_flow.export_question_answer_snapshots()
         )
-        items: List[Dict[str, Any]] = []
+        if not snapshots:
+            return []
+
+        segments: List[Dict[str, Any]] = []
+        previous_scene = ""
         for snapshot in snapshots:
             evidence = snapshot.evidence or {}
+            scene = str(evidence.get("scenario", "") or "").strip()
+            should_start_new_segment = False
+            if scene:
+                should_start_new_segment = (not segments) or (scene != previous_scene)
+            else:
+                should_start_new_segment = True
+
+            if should_start_new_segment:
+                segments.append(
+                    {
+                        "scene": scene,
+                        "questions": [],
+                        "candidate_answers": [],
+                        "scoring_boundary": "",
+                        "score_format": "",
+                        "ability_dimension": "",
+                        "comment_requirement": "",
+                    }
+                )
+            current_segment = segments[-1]
+            current_segment["questions"].append(str(snapshot.question or "").strip())
+            current_segment["candidate_answers"].extend(snapshot.candidate_answers or [])
+            if not current_segment["scoring_boundary"]:
+                current_segment["scoring_boundary"] = str(
+                    evidence.get("scoring_boundary", "") or ""
+                ).strip()
+            if not current_segment["score_format"]:
+                current_segment["score_format"] = str(
+                    evidence.get("score_format", "") or ""
+                ).strip()
+            if not current_segment["ability_dimension"]:
+                current_segment["ability_dimension"] = str(
+                    evidence.get("ability_dimension", "") or ""
+                ).strip()
+            if not current_segment["comment_requirement"]:
+                current_segment["comment_requirement"] = str(
+                    evidence.get("comment_requirement", "") or ""
+                ).strip()
+            previous_scene = scene
+
+        items: List[Dict[str, Any]] = []
+        for idx, segment in enumerate(segments, start=1):
+            scene = str(segment.get("scene", "") or "").strip()
+            questions = [q for q in segment.get("questions", []) if str(q or "").strip()]
+            candidate_answers = [
+                str(answer or "").strip()
+                for answer in segment.get("candidate_answers", [])
+                if str(answer or "").strip()
+            ]
+            if scene:
+                question_text = f"[场景] {scene}\n" + "\n".join(
+                    f"{i + 1}. {q}" for i, q in enumerate(questions)
+                )
+            else:
+                question_text = "\n".join(questions)
             items.append(
                 {
-                    "question_id": snapshot.question_id,
-                    "sort_order": snapshot.sort_order,
-                    "question": snapshot.question,
-                    "ability_dimension": str(
-                        evidence.get("ability_dimension", "") or ""
-                    ).strip(),
-                    "scoring_boundary": str(
-                        evidence.get("scoring_boundary", "") or ""
-                    ).strip(),
-                    "best_standard": str(
-                        evidence.get("best_standard", "") or ""
-                    ).strip(),
-                    "medium_standard": str(
-                        evidence.get("medium_standard", "") or ""
-                    ).strip(),
-                    "worst_standard": str(
-                        evidence.get("worst_standard", "") or ""
-                    ).strip(),
-                    "score_format": str(
-                        evidence.get("score_format", "") or ""
-                    ).strip(),
+                    "question_id": f"scene-{idx}",
+                    "sort_order": idx,
+                    "question": question_text.strip(),
+                    "ability_dimension": str(segment.get("ability_dimension", "") or "").strip(),
+                    "scoring_boundary": str(segment.get("scoring_boundary", "") or "").strip(),
+                    "best_standard": "",
+                    "medium_standard": "",
+                    "worst_standard": "",
+                    "score_format": str(segment.get("score_format", "") or "").strip(),
                     "comment_requirement": str(
-                        evidence.get("comment_requirement", "") or ""
+                        segment.get("comment_requirement", "") or ""
                     ).strip(),
-                    "candidate_answers": snapshot.candidate_answers,
-                    "aggregated_answer": snapshot.aggregated_answer,
+                    "candidate_answers": candidate_answers,
+                    "aggregated_answer": "\n".join(candidate_answers).strip(),
                 }
             )
         return items

@@ -243,6 +243,9 @@ export const AdminJobsPage = () => {
             />
 
             <label htmlFor="job-csv">题库 CSV</label>
+            <p className="admin-form-hint">
+              规则：场景首问需填写“评分标准/最大分数”，同场景子问这两列必须留空（空值表示子问，不是继承）。
+            </p>
             <input
               id="job-csv"
               type="file"
@@ -303,6 +306,7 @@ export const AdminJobsPage = () => {
                       <tr>
                         <th>#</th>
                         <th>场景</th>
+                        <th>类型</th>
                         <th>题目</th>
                         <th>评分标准</th>
                         <th>最大分数</th>
@@ -313,6 +317,7 @@ export const AdminJobsPage = () => {
                         <tr key={item.id}>
                           <td>{index + 1}</td>
                           <td>{item.scenario || '无'}</td>
+                          <td>{item.score_format ? '场景首问' : '场景子问'}</td>
                           <td>{item.question}</td>
                           <td>{item.scoring_boundary || '无'}</td>
                           <td>{item.score_format || '无'}</td>

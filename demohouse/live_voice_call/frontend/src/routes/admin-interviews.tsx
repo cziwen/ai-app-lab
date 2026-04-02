@@ -224,6 +224,32 @@ export const AdminInterviewsPage = () => {
     return <AdminLoadingPage />;
   }
 
+  const groupedSelectedQuestions = (() => {
+    const groups: Array<{ key: string; scene: string; items: NonNullable<InterviewDetail['selected_questions']> }> = [];
+    const items = interviewDetail?.selected_questions || [];
+    let currentScene = '';
+    let segmentIndex = 0;
+    for (const item of items) {
+      const scene = (item.scenario || '').trim();
+      if (scene && scene !== currentScene) {
+        currentScene = scene;
+        segmentIndex += 1;
+        groups.push({ key: `${segmentIndex}-${scene}`, scene, items: [item] });
+        continue;
+      }
+      if (!groups.length) {
+        segmentIndex += 1;
+        groups.push({ key: `${segmentIndex}-默认`, scene: scene || '默认', items: [item] });
+      } else {
+        groups[groups.length - 1].items.push(item);
+      }
+      if (!scene) {
+        currentScene = '';
+      }
+    }
+    return groups;
+  })();
+
   return (
     <AdminShell
       activeTab="interviews"
@@ -439,13 +465,25 @@ export const AdminInterviewsPage = () => {
               <section>
                 <h3 className="admin-detail-title">抽中问题</h3>
                 {!!interviewDetail.selected_questions?.length && (
-                  <ol className="admin-qa-list">
-                    {interviewDetail.selected_questions.map(item => (
-                      <li key={`${item.sort_order}-${item.question}`}>
-                        {item.question}（追问上限: {item.max_followups}）
-                      </li>
+                  <div className="admin-qa-list">
+                    {groupedSelectedQuestions.map(group => (
+                      <div key={group.key}>
+                        <p>
+                          <strong>场景：</strong>
+                          {group.scene}
+                        </p>
+                        <ol>
+                          {group.items.map((item, subIndex) => (
+                            <li key={`${item.sort_order}-${item.question}`}>
+                              {item.question}
+                              {subIndex === 0 ? '（场景首问）' : '（场景子问）'}
+                              {'，'}追问上限: {item.max_followups}
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
                     ))}
-                  </ol>
+                  </div>
                 )}
                 {!interviewDetail.selected_questions?.length && <p>暂无抽题数据</p>}
               </section>

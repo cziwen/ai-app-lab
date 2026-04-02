@@ -55,7 +55,7 @@ def test_stream_interview_llm_chat_uses_responses_adapter_and_persists_history()
     asyncio.run(_run())
 
 
-def test_build_interview_score_inputs_maps_snapshot_fields():
+def test_build_interview_score_inputs_aggregates_scene_segment_fields():
     class _FakeFlow:
         def export_question_answer_snapshots(self):
             return [
@@ -91,11 +91,80 @@ def test_build_interview_score_inputs_maps_snapshot_fields():
     payloads = svc.build_interview_score_inputs()
     assert len(payloads) == 1
     item = payloads[0]
-    assert item["question_id"] == "q1"
+    assert item["question_id"] == "scene-1"
     assert item["ability_dimension"] == "项目管理"
     assert item["score_format"] == "评分0-5"
     assert item["comment_requirement"] == "摘要 + 改进建议"
-    assert item["aggregated_answer"] == "我负责拆解目标\\n最终提升转化率"
+    assert item["aggregated_answer"] == "我负责拆解目标\n最终提升转化率"
+    assert item["question"].startswith("请介绍项目")
+
+
+def test_build_interview_score_inputs_groups_by_contiguous_scene_segments():
+    class _FakeFlow:
+        def export_question_answer_snapshots(self):
+            return [
+                QuestionAnswerSnapshot(
+                    question_id="q1",
+                    sort_order=1,
+                    question="项目背景是什么？",
+                    evidence={"scenario": "项目复盘", "scoring_boundary": "关注背景", "score_format": "12"},
+                    candidate_answers=["回答1"],
+                    aggregated_answer="回答1",
+                ),
+                QuestionAnswerSnapshot(
+                    question_id="q2",
+                    sort_order=2,
+                    question="你的职责是什么？",
+                    evidence={"scenario": "项目复盘"},
+                    candidate_answers=["回答2"],
+                    aggregated_answer="回答2",
+                ),
+                QuestionAnswerSnapshot(
+                    question_id="q3",
+                    sort_order=3,
+                    question="如何止血？",
+                    evidence={"scenario": "线上故障", "scoring_boundary": "关注排障", "score_format": "10"},
+                    candidate_answers=["回答3"],
+                    aggregated_answer="回答3",
+                ),
+                QuestionAnswerSnapshot(
+                    question_id="q4",
+                    sort_order=4,
+                    question="再次出现如何预防？",
+                    evidence={"scenario": "线上故障"},
+                    candidate_answers=["回答4"],
+                    aggregated_answer="回答4",
+                ),
+                QuestionAnswerSnapshot(
+                    question_id="q5",
+                    sort_order=5,
+                    question="再次谈项目复盘",
+                    evidence={"scenario": "项目复盘", "scoring_boundary": "关注复盘深度", "score_format": "8"},
+                    candidate_answers=["回答5"],
+                    aggregated_answer="回答5",
+                ),
+            ]
+
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+    )
+    svc.interview_flow = _FakeFlow()
+
+    payloads = svc.build_interview_score_inputs()
+    assert [item["question_id"] for item in payloads] == ["scene-1", "scene-2", "scene-3"]
+    assert payloads[0]["aggregated_answer"] == "回答1\n回答2"
+    assert payloads[0]["score_format"] == "12"
+    assert payloads[1]["aggregated_answer"] == "回答3\n回答4"
+    assert payloads[1]["score_format"] == "10"
+    assert payloads[2]["aggregated_answer"] == "回答5"
+    assert payloads[2]["score_format"] == "8"
 
 
 def test_stream_interview_llm_chat_uses_contiguous_scene_context_windows():

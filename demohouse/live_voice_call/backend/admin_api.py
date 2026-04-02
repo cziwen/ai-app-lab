@@ -96,6 +96,9 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
         )
 
     rows: List[Dict[str, str]] = []
+    current_scene = ""
+    current_scene_index = 0
+    scene_requires_rubric = False
     for row_index, row in enumerate(reader, start=2):
         if not row or all(not str(cell).strip() for cell in row):
             continue
@@ -108,26 +111,63 @@ def parse_question_csv(upload: UploadFile) -> List[Dict[str, str]]:
 
         scenario = normalized_row[0]
         question = normalized_row[1]
+        scoring_boundary = normalized_row[2]
+        score_format = normalized_row[3]
 
         if not question:
-            continue
+            raise HTTPException(status_code=400, detail=f"CSV 第{row_index}行“问题”不能为空")
 
-        max_score, scale_error = parse_score_scale(normalized_row[3])
-        if max_score is None:
+        is_new_scene = bool(scenario)
+        if is_new_scene:
+            current_scene = scenario
+            current_scene_index += 1
+            scene_requires_rubric = True
+        elif not current_scene:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"CSV 第{row_index}行“最大分数”格式无效：{normalized_row[3] or '(空)'}；"
-                    f"{scale_error or '请使用 5/5分/0-5/0~5/0～5分'}"
-                ),
+                detail=f"CSV 第{row_index}行“场景”为空，且前面没有可延续的场景",
             )
+
+        if scene_requires_rubric:
+            if not scoring_boundary:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CSV 第{row_index}行“评分标准”不能为空（场景首问必填）",
+                )
+            if not score_format:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CSV 第{row_index}行“最大分数”不能为空（场景首问必填）",
+                )
+            max_score, scale_error = parse_score_scale(score_format)
+            if max_score is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"CSV 第{row_index}行“最大分数”格式无效：{score_format or '(空)'}；"
+                        f"{scale_error or '请使用 5/5分/0-5/0~5/0～5分'}"
+                    ),
+                )
+            scene_requires_rubric = False
+        else:
+            if scoring_boundary:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CSV 第{row_index}行“评分标准”必须留空（场景子问不允许填写）",
+                )
+            if score_format:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CSV 第{row_index}行“最大分数”必须留空（场景子问不允许填写）",
+                )
 
         rows.append(
             {
-                "scenario": scenario,
+                "scenario": current_scene,
+                "scene_segment": f"scene-{current_scene_index}",
                 "question": question,
-                "scoring_boundary": normalized_row[2],
-                "score_format": normalized_row[3],
+                "scoring_boundary": scoring_boundary,
+                "score_format": score_format,
             }
         )
 
