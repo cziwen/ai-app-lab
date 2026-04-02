@@ -158,6 +158,8 @@ class VoiceBotService(BaseModel):
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
     asr_force_finalize_requested: bool = False
     asr_last_partial_sentence: str = ""
+    asr_stale_connect_id: str = ""
+    asr_drop_stale_packets: bool = False
     emit_asr_partial_events: bool = False
     current_turn_id: Optional[str] = None
     turn_timestamps_ms: Optional[Dict[str, int]] = None
@@ -245,6 +247,32 @@ class VoiceBotService(BaseModel):
             f"since_last_reset_ms={since_last_ms}"
         )
 
+    def _should_drop_stale_asr_packet(self, stream_connect_id: str) -> bool:
+        if not self.asr_drop_stale_packets:
+            return False
+
+        current_connect_id = (stream_connect_id or "").strip()
+        if not current_connect_id:
+            return False
+
+        stale_connect_id = (self.asr_stale_connect_id or "").strip()
+        if stale_connect_id and current_connect_id == stale_connect_id:
+            self._log(
+                "ASR_STALE_PACKET_DROPPED "
+                f"stale_connect_id={stale_connect_id} "
+                f"current_connect_id={current_connect_id}"
+            )
+            return True
+
+        self._log(
+            "ASR_STALE_GUARD_CLEARED "
+            f"stale_connect_id={stale_connect_id or '-'} "
+            f"current_connect_id={current_connect_id}"
+        )
+        self.asr_stale_connect_id = ""
+        self.asr_drop_stale_packets = False
+        return False
+
     async def _finalize_asr_turn_if_silent(self) -> Optional[SentenceRecognizedPayload]:
         if self.state != StateIdle:
             return None
@@ -268,6 +296,14 @@ class VoiceBotService(BaseModel):
         sentence = self.asr_buffer
         self._log(
             f"ASR_TURN_END reason={reason} silence_ms={silence_ms} text_len={len(sentence)}"
+        )
+        stale_connect_id = str(getattr(self.asr_client, "connect_id", "") or "")
+        self.asr_stale_connect_id = stale_connect_id
+        self.asr_drop_stale_packets = True
+        self._log(
+            "ASR_STALE_GUARD_ENABLED "
+            f"stale_connect_id={stale_connect_id or '-'} "
+            f"reason={reason}"
         )
         self._reset_asr_buffer_state()
         if self.asr_client:
@@ -670,6 +706,10 @@ class VoiceBotService(BaseModel):
 
             if self.state != StateIdle:
                 self._log("service is InProgress, will ignore the newer asr response")
+                continue
+            if self._should_drop_stale_asr_packet(
+                getattr(response, "stream_connect_id", "") or ""
+            ):
                 continue
             if not response.result or not response.result.text:
                 continue

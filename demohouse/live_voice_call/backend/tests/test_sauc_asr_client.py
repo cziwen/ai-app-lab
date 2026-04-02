@@ -80,7 +80,8 @@ def test_map_payload_to_response_keeps_result_text_utterances_and_duration():
         {
             "result": {"text": "hello", "utterances": [{"text": "hello"}]},
             "audio_info": {"duration": 345},
-        }
+        },
+        stream_connect_id="conn-123",
     )
     assert mapped is not None
     assert mapped.result is not None
@@ -88,6 +89,7 @@ def test_map_payload_to_response_keeps_result_text_utterances_and_duration():
     assert mapped.result.text == "hello"
     assert mapped.result.utterances == [{"text": "hello"}]
     assert mapped.audio.duration == 345
+    assert mapped.stream_connect_id == "conn-123"
 
 
 def test_send_audio_connection_closed_resets_client_state(monkeypatch):

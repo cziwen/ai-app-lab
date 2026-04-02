@@ -64,6 +64,7 @@ class SaucASRFullServerResponse:
     result: Optional[SaucASRResult] = None
     audio: Optional[SaucASRAudio] = None
     payload: Dict[str, Any] = field(default_factory=dict)
+    stream_connect_id: str = ""
 
 
 @dataclass
@@ -419,7 +420,10 @@ class SaucASRClient:
                                     f"logid={self.tt_logid or '-'}"
                                 )
                             if frame.payload_obj:
-                                mapped = self._map_payload(frame.payload_obj)
+                                mapped = self._map_payload(
+                                    frame.payload_obj,
+                                    stream_connect_id=self.connect_id,
+                                )
                                 if mapped is not None:
                                     yield mapped
                             if frame.is_last_package:
@@ -461,7 +465,7 @@ class SaucASRClient:
                 # Keep connection warm for the next stream unless it was closed externally.
 
     def _map_payload(
-        self, payload_obj: Dict[str, Any]
+        self, payload_obj: Dict[str, Any], *, stream_connect_id: str = ""
     ) -> Optional[SaucASRFullServerResponse]:
         result_obj = payload_obj.get("result")
         if not isinstance(result_obj, dict):
@@ -486,6 +490,7 @@ class SaucASRClient:
             result=SaucASRResult(text=text, utterances=utterances),
             audio=SaucASRAudio(duration=duration),
             payload=payload_obj,
+            stream_connect_id=stream_connect_id or "",
         )
 
     def _assert_config(self) -> None:

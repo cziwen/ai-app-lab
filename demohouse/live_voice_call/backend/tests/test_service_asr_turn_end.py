@@ -8,6 +8,7 @@ class _FakeASRClient:
     def __init__(self):
         self.inited = True
         self.close_calls = 0
+        self.connect_id = "old-conn"
 
     async def close(self):
         self.close_calls += 1
@@ -30,10 +31,11 @@ def _make_service(fake_asr):
     return svc, logs
 
 
-def _asr_response(text: str, duration: int = 0):
+def _asr_response(text: str, duration: int = 0, stream_connect_id: str = ""):
     return SaucASRFullServerResponse(
         result=SaucASRResult(text=text, utterances=[]),
         audio=SaucASRAudio(duration=duration),
+        stream_connect_id=stream_connect_id,
     )
 
 
@@ -305,5 +307,59 @@ def test_emit_partial_recognition_events_before_final_sentence(monkeypatch):
         assert second.sentence == "你好"
         assert isinstance(third, service.SentenceRecognizedPayload)
         assert third.sentence == "你好"
+
+    asyncio.run(_run())
+
+
+def test_drop_stale_packets_after_turn_finalize_until_new_connect_id(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_force_finalize_requested = True
+
+        async def _responses():
+            yield _asr_response("上一题答案", 100, stream_connect_id="old-conn")
+            await asyncio.sleep(0.01)
+            yield _asr_response("上一题尾包", 120, stream_connect_id="old-conn")
+            await asyncio.sleep(0.01)
+            yield _asr_response("下一题答案", 140, stream_connect_id="new-conn")
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        first = await asyncio.wait_for(out_iter.__anext__(), timeout=0.3)
+        assert isinstance(first, service.SentenceRecognizedPayload)
+        assert first.sentence == "上一题答案"
+
+        svc.asr_force_finalize_requested = True
+        second = await asyncio.wait_for(out_iter.__anext__(), timeout=0.3)
+        assert isinstance(second, service.SentenceRecognizedPayload)
+        assert second.sentence == "下一题答案"
+        assert any("ASR_STALE_PACKET_DROPPED" in line for line in logs)
+        assert any("ASR_STALE_GUARD_CLEARED" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_stale_guard_compatible_when_response_connect_id_missing(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_stale_connect_id = "old-conn"
+        svc.asr_drop_stale_packets = True
+        svc.asr_force_finalize_requested = True
+
+        async def _responses():
+            yield _asr_response("兼容路径文本", 100, stream_connect_id="")
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.3)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "兼容路径文本"
 
     asyncio.run(_run())
