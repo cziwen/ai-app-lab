@@ -602,6 +602,12 @@ Time  Direction  Event                  Payload
 │   ├─ 触发 finalize                                      │
 │   ├─ 返回 SentenceRecognizedPayload                     │
 │   └─ 关闭 ASR 流                                        │
+│                                                          │
+│ 跨题尾包隔离（连接代次）：                               │
+│ - finalize 时记录旧 connect_id，开启守卫               │
+│ - 若 stream_connect_id == 旧 connect_id：丢弃尾包      │
+│ - 若 stream_connect_id 切到新 connect_id：清守卫并继续 │
+│ - 若 stream_connect_id 缺失：走兼容路径（不阻塞）      │
 └────────────────┬─────────────────────────────────────────┘
                  │
                  ▼
@@ -610,6 +616,12 @@ Time  Direction  Event                  Payload
                  ▼
          传递给 InterviewFlow 处理
 ```
+
+补充说明（回归判定）：
+
+- 观察到 `ASR_STALE_PACKET_DROPPED`，说明旧连接尾包已被隔离。
+- 不应出现短时间连续大量 `ASR_STREAM_RESET reason=source_exhausted`。
+- 下一题 `SentenceRecognized` 应来自新连接音频，不复用上一题文本。
 
 ### 面试官音频处理链
 

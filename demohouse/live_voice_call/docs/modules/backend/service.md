@@ -301,6 +301,27 @@ async def handle_asr_response(asr_responses) -> AsyncIterable[SentenceRecognized
             self.asr_last_growth_mono_ms = self._mono_ms()
 ```
 
+#### 跨题尾包隔离（连接代次守卫）
+
+为避免「第 N 题尾包」在第 N+1 题被错误消费，`VoiceBotService` 在 ASR 处理链中引入了连接代次守卫（不改 WebSocket 协议，不改 InterviewFlow 主状态机）：
+
+- `asr_stale_connect_id`：记录上一轮 finalize 时的 ASR 连接 ID（旧连接）。
+- `asr_drop_stale_packets`：是否启用旧连接丢包守卫。
+
+工作方式：
+
+1. 在 `_finalize_asr_turn_if_silent()` 中，`close()` 前记录 `asr_client.connect_id` 到 `asr_stale_connect_id`，并启用 `asr_drop_stale_packets`。
+2. 在 `handle_asr_response()` 中，每个包先检查 `response.stream_connect_id`：
+   - 若守卫开启且 `stream_connect_id == asr_stale_connect_id`：直接丢弃（上一题尾包）。
+   - 若守卫开启且 `stream_connect_id != asr_stale_connect_id`：清守卫并正常处理（进入新题连接）。
+   - 若 `stream_connect_id` 为空：走兼容路径，不强制丢弃，避免异常环境卡死。
+
+关键日志：
+
+- `ASR_STALE_GUARD_ENABLED`：finalize 后启用守卫。
+- `ASR_STALE_PACKET_DROPPED`：丢弃旧连接包。
+- `ASR_STALE_GUARD_CLEARED`：收到新连接包后清守卫。
+
 **静音检测逻辑**（`_finalize_asr_turn_if_silent()`）：
 
 ```python

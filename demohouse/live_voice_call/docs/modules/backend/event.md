@@ -36,6 +36,21 @@ class WebEvent(BaseModel):
     data: Optional[bytes]          # 二进制数据（如音频）
 ```
 
+### 内部 ASR 响应对象（非 WebSocket 协议）
+
+`SaucASRFullServerResponse` 是后端内部对象，不直接下发给前端。该对象新增了内部字段：
+
+```python
+class SaucASRFullServerResponse:
+    result: Optional[SaucASRResult]
+    audio: Optional[SaucASRAudio]
+    payload: Dict[str, Any]
+    stream_connect_id: str = ""  # ASR 连接代次标识
+```
+
+用途：在 `service.handle_asr_response()` 中做跨题尾包隔离（旧连接包丢弃）。
+注意：这不是 `WebEvent` 字段，不影响前端 `event/payload/data` 协议。
+
 ### Payload 类型
 
 #### 1. BotReadyPayload
