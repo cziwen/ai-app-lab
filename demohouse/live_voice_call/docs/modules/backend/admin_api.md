@@ -4,7 +4,7 @@
 
 提供管理后台的 FastAPI 应用，包括认证、岗位管理、面试管理和音频下载等 RESTful API。
 
-## 核心API端点
+## 核心 API 端点
 
 ### 认证相关
 - `POST /api/admin/auth/login` - 管理员登录，返回 session cookie
@@ -22,105 +22,111 @@
 - `POST /api/admin/interviews` - 创建面试
 - `GET /api/admin/interviews/{token}` - 查询面试详情
 - `DELETE /api/admin/interviews/{token}` - 删除面试
-- `GET /api/admin/interviews/{token}/audio/{track}` - 下载音频（track=candidate|interviewer）
+- `GET /api/admin/interviews/{token}/audio/{track}` - 下载音频（`track=candidate|interviewer`）
 
 ### 公开访问
 - `GET /api/public/interviews/{token}/access` - 验证面试链接有效性（无需认证）
 
 ## 认证机制
 
-### Session Cookie认证
+### Session Cookie 认证
 
 ```python
-ADMIN_SESSION_COOKIE = "admin_session"  # Cookie名称
+ADMIN_SESSION_COOKIE = "admin_session"
 ```
 
-**登录流程**：
-```
-1. POST /api/admin/auth/login
-   Body: {"username": "admin", "password": "xxx"}
-2. 验证用户名密码
-3. 创建session token（UUID）
-4. 设置Cookie：admin_session=<token>; HttpOnly; SameSite=lax
-5. 返回 {"ok": True}
-```
+登录成功后写入 `HttpOnly` Cookie，并通过 `require_admin` 依赖保护管理端接口。
 
-**认证依赖**：
-```python
-def require_admin(request: Request) -> Dict[str, Any]:
-    token = request.cookies.get(ADMIN_SESSION_COOKIE)
-    admin = get_admin_by_session(token)
-    if not admin:
-        raise HTTPException(status_code=401, detail="未登录或登录已过期")
-    return admin
-```
+## CORS 配置
 
-### CORS配置
-
-```python
-# 环境变量 ADMIN_CORS_ORIGINS，逗号分隔
+```bash
 ADMIN_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 ```
 
-## CSV题库格式
+## 题库 CSV v2（唯一支持格式）
 
-### 表头定义
+### 表头（固定 4 列）
 
-```python
-CSV_TEMPLATE_COLUMNS = [
-    "问题",            # 必填
-    "能力维度",        # 选填
-    "评分分界线",      # 选填，用于InterviewJudge
-    "最好标准",        # 选填
-    "中等标准",        # 选填
-    "最差标准",        # 选填
-    "分数",            # 选填
-    "评语要求",        # 选填
-]
+```text
+场景,问题,评分标准,最大分数
 ```
 
-### 解析规则
+后端 `parse_question_csv` 仅接受上述表头。旧 8 列模板会直接返回 `400 CSV 表头不匹配`。
 
-```python
-def parse_question_csv(upload: UploadFile) -> List[Dict]:
-    # 1. 编码检测：utf-8-sig → utf-8 → gbk
-    # 2. 跳过空行和全空白行
-    # 3. 列数自动补齐/截断
-    # 4. 至少包含一行有效问题（问题字段非空）
-```
+### 行级语义（严格校验）
 
-**示例CSV**：
+- `问题`：每行必填。
+- `场景`：可空；空值表示延续当前场景连续段。
+- `评分标准`、`最大分数`：仅场景首问必填。
+- 场景子问（同段后续行）这两列必须为空；若填写直接报错（防歧义）。
+- 首行若 `场景` 为空，直接报错（无法确定可延续场景）。
+
+### 场景段规则
+
+- 行内 `场景` 从空变为非空：开启新场景段。
+- 连续空 `场景` 行：都归属当前场景段。
+- 后续再次出现同名 `场景`：视为新场景段（不回连旧段）。
+
+## 评分口径（与服务层一致）
+
+- LLM3 按“场景连续段”评分，不按 CSV 每一行单独评分。
+- 同一场景段内多个子问的回答会在评分前聚合为一份 `aggregated_answer`。
+- 每个场景段只调用一次评分模型。
+- 评分输出契约固定为：
+  - `numeric_score`
+  - `comment`（需包含得分原因/过程）
+
+### 最大分数解析
+
+`最大分数` 使用 `parse_score_scale` 解析，支持如：
+- `5`
+- `5分`
+- `0-5`
+- `0~5`
+- `0～5分`
+
+解析失败返回 `400` 并附带行号与格式提示。
+
+### 最小可用示例
+
 ```csv
-问题,能力维度,评分分界线,最好标准,中等标准,最差标准,分数,评语要求
-请介绍你的项目经验,项目管理,是否包含目标、动作、结果,清晰完整,基本涵盖,缺失关键要素,0-5分,请说明命中点与改进建议
+场景,问题,评分标准,最大分数
+项目复盘场景,请先介绍项目目标与背景,关注目标/约束/结果是否完整且可追问,5
+,你在这个项目里承担了什么关键职责,,
+,项目最终结果如何，有哪些可量化指标,,
+线上故障场景,描述一次线上故障处理（发现-定位-止血-复盘）,关注排障路径与优先级判断,5
+,如果同类故障再次发生你会如何机制化避免,,
 ```
 
-### 错误码
+完整模板见：`demo_resource/question_bank_v2_template.csv`。
 
-| 状态码 | 错误 | 说明 |
-|-------|------|------|
-| 400 | CSV文件为空 | 上传的文件大小为0 |
-| 400 | CSV编码无法识别 | 非UTF-8/GBK编码 |
-| 400 | CSV缺少表头 | 文件没有第一行 |
-| 400 | CSV表头不匹配 | 列名与模板不一致 |
-| 400 | CSV题库为空 | 没有有效问题行 |
+## 错误码与高频报错
+
+| 状态码 | 错误示例 | 说明 |
+|---|---|---|
+| 400 | `CSV 文件为空` | 上传内容为空 |
+| 400 | `CSV 编码无法识别，请使用 UTF-8` | 非 UTF-8/GBK 编码 |
+| 400 | `CSV 缺少表头` | 文件无首行 |
+| 400 | `CSV 表头不匹配。期望: 场景,问题,评分标准,最大分数` | 非 v2 表头 |
+| 400 | `CSV 第N行“场景”为空，且前面没有可延续的场景` | 首段无法建立 |
+| 400 | `CSV 第N行“评分标准”不能为空（场景首问必填）` | 场景首问缺评分标准 |
+| 400 | `CSV 第N行“最大分数”不能为空（场景首问必填）` | 场景首问缺最大分数 |
+| 400 | `CSV 第N行“评分标准”必须留空（场景子问不允许填写）` | 子问误填评分标准 |
+| 400 | `CSV 第N行“最大分数”必须留空（场景子问不允许填写）` | 子问误填最大分数 |
+| 400 | `CSV 第N行“最大分数”格式无效...` | 分值格式不可解析 |
 
 ## 面试链接生成
 
 ```python
 def build_interview_link(token: str) -> str:
-    domain = os.getenv("INTERVIEW_BASE_DOMAIN") or "http://localhost:8080"
+    domain = os.getenv("INTERVIEW_BASE_DOMAIN")
     return f"{domain.rstrip('/')}/check-in?token={token}"
 ```
 
-**环境变量配置**：
-```bash
-INTERVIEW_BASE_DOMAIN=https://yourdomain.com
-```
-
-## API请求示例
+## API 请求示例
 
 ### 登录
+
 ```bash
 curl -X POST http://localhost:8890/api/admin/auth/login \
   -H "Content-Type: application/json" \
@@ -129,16 +135,18 @@ curl -X POST http://localhost:8890/api/admin/auth/login \
 ```
 
 ### 创建岗位
+
 ```bash
 curl -X POST http://localhost:8890/api/admin/jobs \
   -b cookies.txt \
   -F "name=后端工程师" \
   -F "duties=负责后端开发" \
   -F "requirements=3年经验" \
-  -F "question_bank=@questions.csv"
+  -F "question_bank=@demo_resource/question_bank_v2_template.csv"
 ```
 
 ### 创建面试
+
 ```bash
 curl -X POST http://localhost:8890/api/admin/interviews \
   -b cookies.txt \
@@ -151,51 +159,30 @@ curl -X POST http://localhost:8890/api/admin/interviews \
   }'
 ```
 
-### 下载音频
-```bash
-curl -X GET http://localhost:8890/api/admin/interviews/<token>/audio/candidate \
-  -b cookies.txt \
-  -o candidate.wav
-```
+## 排障建议
 
-## 故障排查
+### 1. 旧模板上传失败
 
-### 1. 登录后立刻掉线
+现象：`CSV 表头不匹配`
 
-**原因**：Cookie被浏览器拦截
-**解决**：
-- 检查CORS配置是否包含前端域名
-- 确认Cookie的SameSite/Secure属性与部署环境匹配
-- 生产环境建议使用HTTPS
+处理：改为 `场景,问题,评分标准,最大分数` 四列表头，并按场景首问/子问规则填写。
 
-### 2. CSV导入失败
+### 2. 子问误填评分字段
 
-**原因**：编码或格式问题
-**解决**：
-```bash
-# 转换为UTF-8编码
-iconv -f gbk -t utf-8 input.csv > output.csv
+现象：`评分标准/最大分数必须留空`
 
-# 检查表头
-head -1 questions.csv
-```
+处理：仅场景首问填写评分配置；子问留空。
 
-### 3. 音频下载404
+### 3. 首行场景为空
 
-**原因**：面试未完成或音频持久化失败
-**解决**：
-```bash
-# 检查面试状态
-curl http://localhost:8890/api/admin/interviews/<token> -b cookies.txt
+现象：`场景为空，且前面没有可延续的场景`
 
-# 检查音频文件
-ls backend/data/storage/audio/<token>/
-```
+处理：第一条必须是场景首问，显式填写 `场景 + 评分标准 + 最大分数`。
 
 ## 相关测试
 
 ```bash
-pytest backend/tests/test_admin_api_auth.py
 pytest backend/tests/test_admin_api_csv.py
+pytest backend/tests/test_admin_api_auth.py
 pytest backend/tests/test_admin_api_interview.py
 ```

@@ -576,6 +576,29 @@ Web端和服务端通过二进制协议进行交互，协议格式如下：
 
 ![img_1.png](assets/img_1.png)
 
+## 面试题库 CSV v2（必读）
+
+当前题库仅支持 4 列 CSV：
+
+```csv
+场景,问题,评分标准,最大分数
+```
+
+推荐直接使用模板文件：
+`demo_resource/question_bank_v2_template.csv`
+
+填写规则：
+- `问题`：每行必填
+- `场景`：可空；空值表示“同一场景的后续子问”
+- `评分标准/最大分数`：仅场景首问可填；子问必须留空（不是继承）
+- 场景切换即新段；同名场景跨段出现也视为新段
+
+运行语义：
+- 面试提问按行推进（子问逐条提问）
+- LLM2 上下文按“场景连续段”隔离共享
+- LLM3 按“场景连续段”整题评分（一段一次调用）
+- 评分返回契约固定为：`numeric_score + comment`
+
 ## 附录
 
 ### 获取 TTS_APP_ID、TTS_ACCESS_TOKEN、ASR_APP_ID、ASR_ACCESS_TOKEN、ASR_RESOURCE_ID？
