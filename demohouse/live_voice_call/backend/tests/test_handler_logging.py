@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import admin_store
 import handler
+import service
 
 
 class _FakeExpiryIndex:
@@ -480,3 +482,51 @@ def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatc
     assert any('"stage": "question"' in line for line in captured_lines)
     assert any('"stage": "success"' in line for line in captured_lines)
     assert any('"raw_output_preview": "raw-preview"' in line for line in captured_lines)
+
+
+def test_backend_log_includes_segment_context_length_and_stats_line(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    _reset_handler_loggers(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+    token = _create_interview_fixture()
+
+    interview_logger = handler._get_interview_logger(token, "backend")
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        session_id=token,
+        log_fn=interview_logger.info,
+    )
+    svc._start_turn()
+    svc._log(
+        "[Interview] LLM #2 context stats: "
+        "segment_id=scene:0:项目复盘 context_len=40 segment_context_len=88"
+    )
+    svc._log_turn_event(
+        "interviewer_llm_start",
+        extra={
+            "context_len": 40,
+            "segment_context_len": 88,
+            "segment_id": "scene:0:项目复盘",
+        },
+    )
+    handler._release_interview_loggers_for_token(token)
+
+    log_file = tmp_path / "data" / "storage" / "interview_logs" / token / "backend.log"
+    content = log_file.read_text(encoding="utf-8")
+    assert "[Interview] LLM #2 context stats:" in content
+    assert "segment_context_len=88" in content
+
+    match = re.search(r"\[TurnTrace\]\s+(\{.*\"event\": \"interviewer_llm_start\".*\})", content)
+    assert match is not None
+    payload = json.loads(match.group(1))
+    extra = payload["extra"]
+    assert isinstance(extra["context_len"], int)
+    assert isinstance(extra["segment_context_len"], int)

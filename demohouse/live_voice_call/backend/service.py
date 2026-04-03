@@ -961,6 +961,13 @@ class VoiceBotService(BaseModel):
 
         return "\n".join(parts)
 
+    def _calc_segment_context_char_len(self, interview_context: str) -> int:
+        history_messages = self._history_for_current_segment()
+        total = len(interview_context or "")
+        for message in history_messages:
+            total += len(str(getattr(message, "content", "") or ""))
+        return total
+
     async def stream_interview_llm_chat(
         self, interview_context: str
     ) -> AsyncIterable[str]:
@@ -1154,12 +1161,24 @@ class VoiceBotService(BaseModel):
                         next_question_or_followup=next_interviewer_text,
                         flow_state=flow.state,
                     )
+                    segment_id = self.active_context_segment.strip() or "-"
+                    segment_context_len = self._calc_segment_context_char_len(interview_context)
                     self._log(
                         f"[Interview] Calling Interviewer LLM (LLM #2) with context:\n{interview_context}"
                     )
+                    self._log(
+                        "[Interview] LLM #2 context stats: "
+                        f"segment_id={segment_id} "
+                        f"context_len={len(interview_context)} "
+                        f"segment_context_len={segment_context_len}"
+                    )
                     self._log_turn_event(
                         "interviewer_llm_start",
-                        extra={"context_len": len(interview_context)},
+                        extra={
+                            "context_len": len(interview_context),
+                            "segment_context_len": segment_context_len,
+                            "segment_id": segment_id,
+                        },
                     )
 
                     try:

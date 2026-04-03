@@ -340,3 +340,66 @@ def test_build_interview_context_wrap_up_still_works():
     )
 
     assert "[指令] 面试即将结束，请做结束语。" in context
+
+
+def test_calc_segment_context_char_len_accumulates_followups_and_scene_subquestions():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+        interview_questions=[
+            {"question_id": "q1", "main_question": "Q1", "scenario": "项目复盘"},
+            {"question_id": "q2", "main_question": "Q2", "scenario": "项目复盘"},
+            {"question_id": "q3", "main_question": "Q3", "scenario": "故障处理"},
+        ],
+    )
+    svc._build_question_context_segments(svc.interview_questions or [])
+
+    svc._activate_context_segment("q1")
+    svc._append_history_message("user", "回答-主问题")
+    base_len = svc._calc_segment_context_char_len("本轮上下文")
+    assert base_len == len("回答-主问题") + len("本轮上下文")
+
+    svc._append_history_message("assistant", "追问-请补充细节")
+    followup_len = svc._calc_segment_context_char_len("本轮上下文")
+    assert followup_len > base_len
+
+    svc._activate_context_segment("q2")
+    scene_len = svc._calc_segment_context_char_len("场景子问题上下文")
+    assert scene_len >= followup_len
+
+    svc._activate_context_segment("q3")
+    isolated_len = svc._calc_segment_context_char_len("新场景上下文")
+    assert isolated_len == len("新场景上下文")
+
+
+def test_calc_segment_context_char_len_non_scene_questions_do_not_cross_contaminate():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+        interview_questions=[
+            {"question_id": "q1", "main_question": "Q1", "scenario": ""},
+            {"question_id": "q2", "main_question": "Q2", "scenario": ""},
+        ],
+    )
+    svc._build_question_context_segments(svc.interview_questions or [])
+
+    svc._activate_context_segment("q1")
+    svc._append_history_message("user", "Q1-回答")
+    q1_len = svc._calc_segment_context_char_len("Q1-context")
+    assert q1_len == len("Q1-回答") + len("Q1-context")
+
+    svc._activate_context_segment("q2")
+    q2_len = svc._calc_segment_context_char_len("Q2-context")
+    assert q2_len == len("Q2-context")

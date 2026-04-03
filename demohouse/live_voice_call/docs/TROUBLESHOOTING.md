@@ -518,29 +518,19 @@ voiceBotService.setAudioRouteMode('web-audio-fallback');
 **排查步骤**:
 
 ```bash
-# 1. 获取 Turn Trace 日志
+# 1. 获取 TurnTrace JSON 日志（按 event 过滤）
 token="INT-xxx"
-grep "TurnTrace" backend/data/storage/interview_logs/$token/backend.log
+log_path="backend/data/storage/interview_logs/$token/backend.log"
+grep "TurnTrace" "$log_path" | grep '"event": "turn_latency_breakdown"'
 
-# 输出示例:
-# [TurnTrace] turn_id=a1b2c3 judge_ms=3500 llm2_ttft_ms=2800
-#             rec_to_first_sentence_ms=9200 status=success
+# 2. 分析各阶段耗时（当前日志为 JSON，不再是 key=value）
+grep "TurnTrace" "$log_path" | grep '"event": "turn_latency_breakdown"' | grep -o '"judge_ms": [0-9]*'
+grep "TurnTrace" "$log_path" | grep '"event": "turn_latency_breakdown"' | grep -o '"llm2_ttft_ms": [0-9]*'
+grep "TurnTrace" "$log_path" | grep '"event": "turn_latency_breakdown"' | grep -o '"rec_to_first_sentence_ms": [0-9]*'
 
-# 2. 分析各阶段耗时
-# - judge_ms: Judge LLM 评估
-# - llm2_ttft_ms: LLM2 首 token
-# - rec_to_first_sentence_ms: 总延迟 (用户感知)
-
-# 3. 定位瓶颈
-if [ judge_ms > 3000 ]; then
-  echo "瓶颈: Judge LLM"
-  # 解决方案: 禁用思维链, 降低 reasoning_effort
-fi
-
-if [ llm2_ttft_ms > 2000 ]; then
-  echo "瓶颈: LLM2 首 token"
-  # 解决方案: 增加 LLM 并发数, 优化 Prompt
-fi
+# 3. 单题上下文长度（用于判断上下文是否膨胀）
+grep "LLM #2 context stats" "$log_path"
+grep "TurnTrace" "$log_path" | grep '"event": "interviewer_llm_start"' | grep '"segment_context_len"'
 ```
 
 **快速修复**:
@@ -650,6 +640,8 @@ docker compose up -d backend
 
 ## 日志分析指南
 
+建议先执行下面的“最小命令集（复制即用）”，确认会话状态、关键耗时和错误类型；只有需要深挖时再看后面的详细章节。
+
 ### 日志文件位置
 
 ```
@@ -665,11 +657,48 @@ backend/data/storage/interview_logs/
     └── frontend.log
 ```
 
+### 最小关键日志视图（grep 速查）
+
+1. 服务器级（全局状态）: `logs/backend-*.log`
+2. 单面试级（单 token 轨迹）: `backend/data/storage/interview_logs/$token/backend.log`
+3. 错误级（快速定位异常）: `ERROR|Exception|ASR_INIT|LLM.*error`
+
+### 最小命令集（复制即用）
+
+```bash
+# Step 1) 先定位 token（最近开始/结束的会话）
+grep "event=interview.started" logs/backend-*.log | tail -20
+grep "event=interview.closed" logs/backend-*.log | tail -20
+
+# Step 2) 指定 token 看单场关键日志
+token="INT-xxx"
+log_path="backend/data/storage/interview_logs/$token/backend.log"
+
+# 2.1 Judge 决策 + LLM2 调用 + TurnTrace 关键事件
+grep "Judge result:" "$log_path"
+grep "LLM #2 context stats" "$log_path"
+grep "TurnTrace" "$log_path" | grep '"event": "interviewer_llm_start"'
+grep "TurnTrace" "$log_path" | grep '"event": "turn_latency_breakdown"'
+
+# 2.2 单题上下文长度（新增）
+grep "LLM #2 context stats" "$log_path" | tail -20
+grep "TurnTrace" "$log_path" | grep '"event": "interviewer_llm_start"' | grep '"segment_context_len"'
+
+# Step 3) 最后看错误
+grep -i "ERROR\|Exception" "$log_path"
+grep "ASR_INIT" "$log_path"
+grep "LLM.*error\|LLM.*timeout" "$log_path"
+```
+
+单题上下文长度字段说明：
+- `context_len`: 当轮传给 LLM2 的“指令文本”长度。
+- `segment_context_len`: 当前问题/场景段累计上下文长度（包含追问与同场景子问题历史）。
+
 ### 服务器日志 (backend-*.log)
 
 **用途**: 全局事件、配置、面试会话管理
 
-**关键日志**:
+**关键日志（按需）**:
 
 ```bash
 # 1. 服务启动
@@ -696,7 +725,7 @@ grep "interview_persist" logs/backend-*.log
 
 **用途**: 单场面试的完整执行轨迹
 
-**关键日志**:
+**关键日志（按需）**:
 
 ```bash
 token="INT-xxx"
@@ -713,12 +742,15 @@ grep "Judge result:" $log_path
 
 # 4. LLM2 生成
 grep "Interviewer LLM:" $log_path
+grep "LLM #2 context stats" $log_path
 
 # 5. TTS 播放
 grep "TTS:" $log_path
 
 # 6. 性能指标
 grep "TurnTrace" $log_path
+grep "TurnTrace" $log_path | grep '"event": "turn_latency_breakdown"'
+grep "TurnTrace" $log_path | grep '"event": "interviewer_llm_start"'
 
 # 7. 错误日志
 grep "ERROR\|Exception" $log_path
@@ -773,7 +805,7 @@ echo "=== Interview Diagnosis: $TOKEN ==="
 echo -e "\n[Basic Info]"
 echo "Start time: $(grep "Interview session started" $BACKEND_LOG | head -1 | awk '{print $1, $2}')"
 echo "End time: $(grep "Interview session" $BACKEND_LOG | tail -1 | awk '{print $1, $2}')"
-echo "Total turns: $(grep "TurnTrace" $BACKEND_LOG | wc -l)"
+echo "Total turns: $(grep "TurnTrace" "$BACKEND_LOG" | grep '"event": "turn_latency_breakdown"' | wc -l)"
 
 # 2. 完成状态
 echo -e "\n[Status]"
@@ -786,9 +818,10 @@ fi
 # 3. 性能指标
 echo -e "\n[Performance]"
 echo "Average latency:"
-grep "TurnTrace" $BACKEND_LOG | \
-  grep -oP 'rec_to_first_sentence_ms=\K\d+' | \
-  awk '{sum+=$1; if($1>max) max=$1} END {print "  Avg:", sum/NR "ms, Max:", max "ms"}'
+grep "TurnTrace" "$BACKEND_LOG" | \
+  grep '"event": "turn_latency_breakdown"' | \
+  grep -o '"rec_to_first_sentence_ms": [0-9]*' | \
+  awk '{sum+=$2; if($2>max) max=$2} END {if (NR==0) {print "  no data"} else {print "  Avg:", sum/NR "ms, Max:", max "ms"}}'
 
 # 4. 错误统计
 echo -e "\n[Errors]"
@@ -799,10 +832,14 @@ fi
 
 # 5. 异常轮次
 echo -e "\n[Slow Turns (>8s)]"
-grep "TurnTrace" $BACKEND_LOG | \
-  awk '{for(i=1;i<=NF;i++) if($i~"rec_to_first_sentence_ms") val=$i; for(i=1;i<=NF;i++) if($i~"turn_id") tid=$i}
-       split(val,a,"="); split(tid,b,"=");
-       if(a[2]>8000) print "  Turn", b[2], ":", a[2] "ms"'
+grep "TurnTrace" "$BACKEND_LOG" | \
+  grep '"event": "turn_latency_breakdown"' | \
+  awk '{
+      tid=""; lat="";
+      if (match($0, /"turn_id": "[^"]+"/)) { tid=substr($0, RSTART+12, RLENGTH-13) }
+      if (match($0, /"rec_to_first_sentence_ms": [0-9]+/)) { lat=substr($0, RSTART+28, RLENGTH-28) }
+      if (lat != "" && lat+0 > 8000) print "  Turn " tid ": " lat "ms"
+  }'
 
 # 6. ASR 问题
 echo -e "\n[ASR Issues]"
@@ -831,18 +868,18 @@ for token in $TOKEN1 $TOKEN2; do
     echo -e "\n[$token]"
 
     # 平均延迟
-    avg=$(grep "TurnTrace" $log | grep -oP 'rec_to_first_sentence_ms=\K\d+' | \
-      awk '{sum+=$1} END {print sum/NR}')
+    avg=$(grep "TurnTrace" "$log" | grep '"event": "turn_latency_breakdown"' | \
+      grep -o '"rec_to_first_sentence_ms": [0-9]*' | awk '{sum+=$2} END {if (NR==0) print "N/A"; else print sum/NR}')
     echo "Avg latency: ${avg}ms"
 
     # Judge 延迟
-    judge_avg=$(grep "TurnTrace" $log | grep -oP 'judge_ms=\K\d+' | \
-      awk '{sum+=$1} END {print sum/NR}')
+    judge_avg=$(grep "TurnTrace" "$log" | grep '"event": "turn_latency_breakdown"' | \
+      grep -o '"judge_ms": [0-9]*' | awk '{sum+=$2} END {if (NR==0) print "N/A"; else print sum/NR}')
     echo "Judge avg: ${judge_avg}ms"
 
     # LLM2 TTFT
-    ttft_avg=$(grep "TurnTrace" $log | grep -oP 'llm2_ttft_ms=\K\d+' | \
-      awk '{sum+=$1} END {print sum/NR}')
+    ttft_avg=$(grep "TurnTrace" "$log" | grep '"event": "turn_latency_breakdown"' | \
+      grep -o '"llm2_ttft_ms": [0-9]*' | awk '{sum+=$2} END {if (NR==0) print "N/A"; else print sum/NR}')
     echo "LLM2 TTFT avg: ${ttft_avg}ms"
 done
 ```
@@ -885,8 +922,8 @@ grep -l "ERROR.*ASR_INIT_UNAVAILABLE" backend/data/storage/interview_logs/*/back
 
 # 3. 查询慢面试 (平均延迟 > 6s)
 for log in backend/data/storage/interview_logs/*/backend.log; do
-    avg=$(grep "TurnTrace" $log | grep -oP 'rec_to_first_sentence_ms=\K\d+' | \
-      awk '{sum+=$1} END {print sum/NR}')
+    avg=$(grep "TurnTrace" "$log" | grep '"event": "turn_latency_breakdown"' | \
+      grep -o '"rec_to_first_sentence_ms": [0-9]*' | awk '{sum+=$2} END {if (NR==0) print "0"; else print sum/NR}')
     if [ $(echo "$avg > 6000" | bc) -eq 1 ]; then
         echo "$log: ${avg}ms"
     fi
