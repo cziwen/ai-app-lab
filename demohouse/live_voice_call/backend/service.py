@@ -939,7 +939,15 @@ class VoiceBotService(BaseModel):
             parts.append(f"[评估结果] 覆盖度得分: {decision.coverage_score:.2f}")
 
             if decision.move_forward:
-                parts.append("[指令] 候选人回答充分，请先简要肯定，然后自然过渡到下一个问题。")
+                forced_move_reasons = {"follow_up_limit_reached", "global_turn_limit_reached"}
+                if decision.reason in forced_move_reasons:
+                    parts.append(
+                        "[指令] 现在需要进入下一题，请中性过渡，不评价回答质量，不夸赞。"
+                    )
+                else:
+                    parts.append(
+                        "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后进入下一题。"
+                    )
             elif decision.need_follow_up:
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
                 if decision.follow_up_question:

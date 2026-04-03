@@ -3,6 +3,7 @@ import asyncio
 from arkitect.core.component.llm.model import ArkMessage
 
 from interview_flow import QuestionAnswerSnapshot
+from interview_judge import Decision
 import service
 
 
@@ -263,3 +264,79 @@ def test_stream_interview_llm_chat_treats_empty_scene_as_per_question_window():
         assert texts[-1] == "继续第二题"
 
     asyncio.run(_run())
+
+
+def test_build_interview_context_move_forward_with_followup_limit_uses_neutral_transition():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        move_forward=True,
+        need_follow_up=False,
+        follow_up_question="",
+        reason="follow_up_limit_reached",
+        coverage_score=0.31,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你介绍一个你主导的项目。",
+        flow_state=service.ASK_QUESTION,
+    )
+
+    assert "中性过渡，不评价回答质量，不夸赞" in context
+    assert "候选人回答已覆盖关键点" not in context
+
+
+def test_build_interview_context_move_forward_with_semantic_enough_allows_brief_ack():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        move_forward=True,
+        need_follow_up=False,
+        follow_up_question="",
+        reason="semantic_enough_coverage",
+        coverage_score=0.86,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你讲讲最困难的一次技术决策。",
+        flow_state=service.ASK_QUESTION,
+    )
+
+    assert "候选人回答已覆盖关键点，可用一句简短肯定后进入下一题" in context
+    assert "中性过渡，不评价回答质量，不夸赞" not in context
+
+
+def test_build_interview_context_wrap_up_still_works():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    context = svc._build_interview_context(
+        decision=None,
+        next_question_or_followup="",
+        flow_state=service.WRAP_UP,
+    )
+
+    assert "[指令] 面试即将结束，请做结束语。" in context
