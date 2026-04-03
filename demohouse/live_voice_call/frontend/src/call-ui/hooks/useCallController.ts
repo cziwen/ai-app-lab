@@ -149,7 +149,6 @@ export const useCallController = (): CallController => {
     setUserAudioLevel(0);
     setCamOn(false);
     setShareOn(false);
-    setElapsedSec(0);
   }, [recStop, releaseSessionMedia, setBotAudioLevel, setUserAudioLevel]);
 
   const startAutoFinishFlow = useCallback(() => {
@@ -180,6 +179,7 @@ export const useCallController = (): CallController => {
     setEndPhase('idle');
     setEndCountdownSec(null);
     cleanupCaptureResources();
+    setElapsedSec(0);
     notifyClientHangup();
     shutdownSession();
     navigate(`/hangup-result${location.search}`);
@@ -188,18 +188,19 @@ export const useCallController = (): CallController => {
     location.search,
     navigate,
     notifyClientHangup,
+    setElapsedSec,
     shutdownSession,
   ]);
 
   useEffect(() => {
-    if (mode !== 'real' || endingRef.current) {
+    if (mode !== 'real' || !wsConnected || endingRef.current) {
       return;
     }
     const timer = window.setInterval(() => {
       setElapsedSec(prev => prev + 1);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [mode]);
+  }, [mode, wsConnected]);
 
   useEffect(() => {
     if (
