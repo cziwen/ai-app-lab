@@ -28,6 +28,7 @@ from admin_store import (
     list_interviews,
     list_jobs,
     revoke_admin_session,
+    update_job,
     verify_admin_credentials,
 )
 
@@ -287,9 +288,47 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail="岗位不存在")
         return {"job": detail}
 
+    @app.put("/api/admin/jobs/{job_uid}")
+    async def put_job(
+        job_uid: str,
+        name: str = Form(...),
+        duties: str = Form(...),
+        requirements: str = Form(...),
+        notes: Optional[str] = Form(default=None),
+        expected_updated_at: str = Form(...),
+        question_bank: Optional[UploadFile] = File(default=None),
+        _admin: Dict[str, Any] = Depends(require_admin),
+    ) -> Dict[str, Any]:
+        rows = parse_question_csv(question_bank) if question_bank else None
+        try:
+            job = update_job(
+                job_uid=job_uid,
+                name=name.strip(),
+                duties=duties.strip(),
+                requirements=requirements.strip(),
+                notes=(notes or "").strip() or None,
+                expected_updated_at=expected_updated_at.strip(),
+                csv_filename=question_bank.filename if question_bank else None,
+                questions=rows,
+            )
+        except ValueError as e:
+            if str(e) == "job_not_found":
+                raise HTTPException(status_code=404, detail="岗位不存在")
+            if str(e) == "job_conflict":
+                raise HTTPException(status_code=409, detail="岗位已被他人更新，请刷新后重试")
+            if str(e) == "invalid_expected_updated_at":
+                raise HTTPException(status_code=400, detail="expected_updated_at 不能为空")
+            raise
+        return {"job": job}
+
     @app.delete("/api/admin/jobs/{job_uid}")
     async def remove_job(job_uid: str, _admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-        ok = delete_job_cascade(job_uid)
+        try:
+            ok = delete_job_cascade(job_uid)
+        except ValueError as e:
+            if str(e) == "job_has_interviews":
+                raise HTTPException(status_code=409, detail="该岗位已有面试记录，不能删除")
+            raise
         if not ok:
             raise HTTPException(status_code=404, detail="岗位不存在")
         return {"ok": True}

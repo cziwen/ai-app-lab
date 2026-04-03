@@ -84,6 +84,96 @@ def test_create_interview_invalid_required_checkins_returns_400(monkeypatch, tmp
     assert "required_checkins" in response.json().get("detail", "")
 
 
+def test_update_job_endpoint_updates_text_fields(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="前端工程师",
+        duties="负责开发",
+        requirements="熟悉 TypeScript",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("请介绍项目", "背景 职责 结果")],
+    )
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None
+
+    response = client.put(
+        f"/api/admin/jobs/{job['job_uid']}",
+        data={
+            "name": "前端工程师(高级)",
+            "duties": "负责架构与开发",
+            "requirements": "熟悉 TypeScript 与工程化",
+            "notes": "更新说明",
+            "expected_updated_at": detail["updated_at"],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()["job"]
+    assert payload["name"] == "前端工程师(高级)"
+    assert payload["question_bank_version"] == 1
+
+
+def test_update_job_endpoint_returns_409_on_stale_updated_at(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("请介绍项目", "背景 职责 结果")],
+    )
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None
+
+    first = client.put(
+        f"/api/admin/jobs/{job['job_uid']}",
+        data={
+            "name": "后端工程师v2",
+            "duties": "负责开发v2",
+            "requirements": "熟悉 Python",
+            "notes": "",
+            "expected_updated_at": detail["updated_at"],
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.put(
+        f"/api/admin/jobs/{job['job_uid']}",
+        data={
+            "name": "后端工程师v3",
+            "duties": "负责开发v3",
+            "requirements": "熟悉 Python",
+            "notes": "",
+            "expected_updated_at": detail["updated_at"],
+        },
+    )
+    assert second.status_code == 409
+    assert "刷新后重试" in second.json().get("detail", "")
+
+
+def test_delete_job_endpoint_returns_409_when_interviews_exist(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("请介绍项目", "背景 职责 结果")],
+    )
+    admin_store.create_interview(
+        candidate_name="张三",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+
+    response = client.delete(f"/api/admin/jobs/{job['job_uid']}")
+    assert response.status_code == 409
+    assert "不能删除" in response.json().get("detail", "")
+
+
 def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path):
     client = _client_with_login(monkeypatch, tmp_path)
     job = admin_store.create_job(

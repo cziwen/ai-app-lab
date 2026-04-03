@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   requirements TEXT NOT NULL,
   notes TEXT,
   csv_filename TEXT,
+  question_bank_version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -176,6 +177,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS job_questions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_uid TEXT NOT NULL,
+  bank_version INTEGER NOT NULL DEFAULT 1,
   scenario TEXT NOT NULL DEFAULT '',
   question TEXT NOT NULL,
   reference_answer TEXT NOT NULL,
@@ -195,6 +197,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   token TEXT PRIMARY KEY,
   candidate_name TEXT NOT NULL,
   job_uid TEXT NOT NULL,
+  question_bank_version INTEGER NOT NULL DEFAULT 1,
   duration_minutes INTEGER NOT NULL DEFAULT 0,
   question_count INTEGER NOT NULL,
   required_checkins TEXT NOT NULL DEFAULT 'speaker,mic',
@@ -254,6 +257,7 @@ CREATE TABLE IF NOT EXISTS interview_question_scores (
   comment TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
 );
+
 """
 
 
@@ -299,6 +303,15 @@ def ensure_storage() -> None:
 
 
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+    job_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    if "question_bank_version" not in job_columns:
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN question_bank_version INTEGER NOT NULL DEFAULT 1"
+        )
+
     interview_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(interviews)").fetchall()
@@ -332,6 +345,10 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     if "completed_reason" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN completed_reason TEXT"
+        )
+    if "question_bank_version" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN question_bank_version INTEGER NOT NULL DEFAULT 1"
         )
     expires_rows = conn.execute(
         "SELECT token, created_at FROM interviews WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
@@ -382,6 +399,17 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE job_questions ADD COLUMN comment_requirement TEXT NOT NULL DEFAULT ''"
         )
+    if "bank_version" not in question_columns:
+        conn.execute(
+            "ALTER TABLE job_questions ADD COLUMN bank_version INTEGER NOT NULL DEFAULT 1"
+        )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_job_questions_job_uid_bank_version_sort_order
+        ON job_questions(job_uid, bank_version, sort_order)
+        """
+    )
 
     question_score_columns = {
         row["name"]
@@ -518,7 +546,12 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA read_uncommitted = OFF")
     return conn
+
+
+def _begin_immediate(conn: sqlite3.Connection) -> None:
+    conn.execute("BEGIN IMMEDIATE")
 
 
 def _generate_hash(password: str, salt: Optional[bytes] = None) -> str:
@@ -649,16 +682,9 @@ def _ensure_unique_interview_token(conn: sqlite3.Connection) -> str:
     raise RuntimeError("failed to generate unique interview token")
 
 
-def create_job(
-    name: str,
-    duties: str,
-    requirements: str,
-    notes: Optional[str],
-    csv_filename: Optional[str],
+def _normalize_job_questions(
     questions: Sequence[Union[Tuple[str, str], Dict[str, str]]],
-) -> Dict[str, object]:
-    now = utc_now_iso()
-
+) -> List[Dict[str, str]]:
     normalized_questions: List[Dict[str, str]] = []
     for item in questions:
         if isinstance(item, dict):
@@ -678,9 +704,7 @@ def create_job(
                     "worst_standard": (item.get("worst_standard") or "").strip(),
                     "output_format": "",
                     "score_format": (item.get("score_format") or "").strip(),
-                    "comment_requirement": (
-                        item.get("comment_requirement") or ""
-                    ).strip(),
+                    "comment_requirement": (item.get("comment_requirement") or "").strip(),
                 }
             )
             continue
@@ -707,27 +731,57 @@ def create_job(
 
         raise ValueError("invalid_question_payload")
 
+    return normalized_questions
+
+
+def create_job(
+    name: str,
+    duties: str,
+    requirements: str,
+    notes: Optional[str],
+    csv_filename: Optional[str],
+    questions: Sequence[Union[Tuple[str, str], Dict[str, str]]],
+) -> Dict[str, object]:
+    now = utc_now_iso()
+    initial_bank_version = 1
+    normalized_questions = _normalize_job_questions(questions)
+
     with get_conn() as conn:
+        _begin_immediate(conn)
         job_uid = _ensure_unique_job_uid(conn)
         conn.execute(
             """
-            INSERT INTO jobs (job_uid, name, duties, requirements, notes, csv_filename, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (
+                job_uid, name, duties, requirements, notes, csv_filename,
+                question_bank_version, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_uid, name, duties, requirements, notes, csv_filename, now, now),
+            (
+                job_uid,
+                name,
+                duties,
+                requirements,
+                notes,
+                csv_filename,
+                initial_bank_version,
+                now,
+                now,
+            ),
         )
         for idx, question_payload in enumerate(normalized_questions):
             conn.execute(
                 """
                 INSERT INTO job_questions (
-                    job_uid, scenario, question, reference_answer, ability_dimension, scoring_boundary,
+                    job_uid, bank_version, scenario, question, reference_answer, ability_dimension, scoring_boundary,
                     best_standard, medium_standard, worst_standard, output_format,
                     score_format, comment_requirement, sort_order
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_uid,
+                    initial_bank_version,
                     question_payload["scenario"],
                     question_payload["question"],
                     question_payload["reference_answer"],
@@ -747,8 +801,107 @@ def create_job(
         "job_uid": job_uid,
         "name": name,
         "question_count": len(normalized_questions),
+        "question_bank_version": initial_bank_version,
         "created_at": now,
+        "updated_at": now,
     }
+
+
+def update_job(
+    job_uid: str,
+    name: str,
+    duties: str,
+    requirements: str,
+    notes: Optional[str],
+    expected_updated_at: str,
+    csv_filename: Optional[str] = None,
+    questions: Optional[Sequence[Union[Tuple[str, str], Dict[str, str]]]] = None,
+) -> Dict[str, object]:
+    if not expected_updated_at.strip():
+        raise ValueError("invalid_expected_updated_at")
+    now = utc_now_iso()
+
+    normalized_questions: Optional[List[Dict[str, str]]] = None
+    if questions is not None:
+        normalized_questions = _normalize_job_questions(questions)
+
+    with get_conn() as conn:
+        _begin_immediate(conn)
+        existing_job = conn.execute(
+            "SELECT question_bank_version FROM jobs WHERE job_uid = ?",
+            (job_uid,),
+        ).fetchone()
+        if not existing_job:
+            raise ValueError("job_not_found")
+
+        if normalized_questions is None:
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET name = ?, duties = ?, requirements = ?, notes = ?, updated_at = ?
+                WHERE job_uid = ? AND updated_at = ?
+                """,
+                (name, duties, requirements, notes, now, job_uid, expected_updated_at),
+            )
+            if updated.rowcount <= 0:
+                raise ValueError("job_conflict")
+        else:
+            next_bank_version = int(existing_job["question_bank_version"] or 1) + 1
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET name = ?, duties = ?, requirements = ?, notes = ?, csv_filename = ?,
+                    question_bank_version = ?, updated_at = ?
+                WHERE job_uid = ? AND updated_at = ?
+                """,
+                (
+                    name,
+                    duties,
+                    requirements,
+                    notes,
+                    csv_filename,
+                    next_bank_version,
+                    now,
+                    job_uid,
+                    expected_updated_at,
+                ),
+            )
+            if updated.rowcount <= 0:
+                raise ValueError("job_conflict")
+
+            for idx, question_payload in enumerate(normalized_questions):
+                conn.execute(
+                    """
+                    INSERT INTO job_questions (
+                        job_uid, bank_version, scenario, question, reference_answer,
+                        ability_dimension, scoring_boundary, best_standard, medium_standard,
+                        worst_standard, output_format, score_format, comment_requirement, sort_order
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_uid,
+                        next_bank_version,
+                        question_payload["scenario"],
+                        question_payload["question"],
+                        question_payload["reference_answer"],
+                        question_payload["ability_dimension"],
+                        question_payload["scoring_boundary"],
+                        question_payload["best_standard"],
+                        question_payload["medium_standard"],
+                        question_payload["worst_standard"],
+                        question_payload["output_format"],
+                        question_payload["score_format"],
+                        question_payload["comment_requirement"],
+                        idx,
+                    ),
+                )
+        conn.commit()
+
+    detail = get_job_detail(job_uid)
+    if not detail:
+        raise ValueError("job_not_found")
+    return detail
 
 
 def list_jobs(search: str, page: int, page_size: int) -> Dict[str, object]:
@@ -767,8 +920,13 @@ def list_jobs(search: str, page: int, page_size: int) -> Dict[str, object]:
         ).fetchone()["c"]
         rows = conn.execute(
             f"""
-            SELECT j.job_uid, j.name, j.created_at,
-                   (SELECT COUNT(*) FROM job_questions q WHERE q.job_uid = j.job_uid) AS question_count
+            SELECT j.job_uid, j.name, j.created_at, j.question_bank_version,
+                   (
+                     SELECT COUNT(*)
+                     FROM job_questions q
+                     WHERE q.job_uid = j.job_uid
+                       AND q.bank_version = j.question_bank_version
+                   ) AS question_count
             FROM jobs j
             {where}
             ORDER BY j.created_at DESC
@@ -802,28 +960,8 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
         ).fetchone()
         if not job:
             return None
-        questions = conn.execute(
-            """
-            SELECT
-                id,
-                scenario,
-                question,
-                reference_answer,
-                ability_dimension,
-                scoring_boundary,
-                best_standard,
-                medium_standard,
-                worst_standard,
-                output_format,
-                score_format,
-                comment_requirement,
-                sort_order
-            FROM job_questions
-            WHERE job_uid = ?
-            ORDER BY sort_order ASC
-            """,
-            (job_uid,),
-        ).fetchall()
+        bank_version = int(job["question_bank_version"] or 1)
+        questions = _load_job_questions(conn, job_uid, bank_version=bank_version)
 
     return {
         "job_uid": job["job_uid"],
@@ -832,6 +970,7 @@ def get_job_detail(job_uid: str) -> Optional[Dict[str, object]]:
         "requirements": job["requirements"],
         "notes": job["notes"],
         "csv_filename": job["csv_filename"],
+        "question_bank_version": bank_version,
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
         "questions": [
@@ -864,27 +1003,39 @@ def _delete_interview_assets(token: str) -> None:
 
 def delete_job_cascade(job_uid: str) -> bool:
     with get_conn() as conn:
-        interview_rows = conn.execute(
-            "SELECT token FROM interviews WHERE job_uid = ?",
-            (job_uid,),
-        ).fetchall()
+        _begin_immediate(conn)
         row = conn.execute("SELECT job_uid FROM jobs WHERE job_uid = ?", (job_uid,)).fetchone()
         if not row:
             return False
+        interview = conn.execute(
+            "SELECT token FROM interviews WHERE job_uid = ? LIMIT 1",
+            (job_uid,),
+        ).fetchone()
+        if interview:
+            raise ValueError("job_has_interviews")
         conn.execute("DELETE FROM jobs WHERE job_uid = ?", (job_uid,))
         conn.commit()
-
-    for interview in interview_rows:
-        _invalidate_interview_cache(interview["token"])
-        _delete_interview_assets(interview["token"])
     return True
 
 
-def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.Row]:
+def _load_job_questions(
+    conn: sqlite3.Connection, job_uid: str, *, bank_version: Optional[int] = None
+) -> List[sqlite3.Row]:
+    resolved_bank_version = bank_version
+    if resolved_bank_version is None:
+        row = conn.execute(
+            "SELECT question_bank_version FROM jobs WHERE job_uid = ?",
+            (job_uid,),
+        ).fetchone()
+        if not row:
+            return []
+        resolved_bank_version = int(row["question_bank_version"] or 1)
+
     return conn.execute(
         """
         SELECT
             id,
+            bank_version,
             scenario,
             question,
             reference_answer,
@@ -898,10 +1049,10 @@ def _load_job_questions(conn: sqlite3.Connection, job_uid: str) -> List[sqlite3.
             comment_requirement,
             sort_order
         FROM job_questions
-        WHERE job_uid = ?
+        WHERE job_uid = ? AND bank_version = ?
         ORDER BY sort_order ASC
         """,
-        (job_uid,),
+        (job_uid, resolved_bank_version),
     ).fetchall()
 
 
@@ -1081,14 +1232,16 @@ def create_interview(
     normalized_checkins = normalize_required_checkins(required_checkins)
     serialized_checkins = serialize_required_checkins(normalized_checkins)
     with get_conn() as conn:
+        _begin_immediate(conn)
         job = conn.execute(
-            "SELECT job_uid, name FROM jobs WHERE job_uid = ?",
+            "SELECT job_uid, name, question_bank_version FROM jobs WHERE job_uid = ?",
             (job_uid,),
         ).fetchone()
         if not job:
             raise ValueError("job_not_found")
 
-        bank = _load_job_questions(conn, job_uid)
+        question_bank_version = int(job["question_bank_version"] or 1)
+        bank = _load_job_questions(conn, job_uid, bank_version=question_bank_version)
         if not bank:
             raise ValueError("job_question_bank_empty")
 
@@ -1104,16 +1257,17 @@ def create_interview(
         conn.execute(
             """
             INSERT INTO interviews (
-                token, candidate_name, job_uid, duration_minutes, question_count, required_checkins,
+                token, candidate_name, job_uid, question_bank_version, duration_minutes, question_count, required_checkins,
                 selected_question_ids, question_followup_limits, notes, status, created_at, updated_at,
                 expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
                 candidate_name,
                 job_uid,
+                question_bank_version,
                 0,
                 question_count,
                 serialized_checkins,
@@ -1140,6 +1294,7 @@ def create_interview(
         "candidate_name": candidate_name,
         "job_uid": job_uid,
         "job_name": job["name"],
+        "question_bank_version": question_bank_version,
         "question_count": question_count,
         "required_checkins": normalized_checkins,
         "question_followups": [
@@ -1244,7 +1399,11 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             if chunk.strip().isdigit()
         ]
         followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
-        question_rows = _load_job_questions(conn, row["job_uid"])
+        question_rows = _load_job_questions(
+            conn,
+            row["job_uid"],
+            bank_version=int(row["question_bank_version"] or 1),
+        )
         by_id = {int(item["id"]): item for item in question_rows}
         selected_questions = []
         for index, qid in enumerate(selected_ids):
@@ -1281,6 +1440,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             "job_uid": row["job_uid"],
             "name": row["job_name"],
         },
+        "question_bank_version": int(row["question_bank_version"] or 1),
         "selected_questions": selected_questions,
         "required_checkins": parse_required_checkins(row["required_checkins"]),
         "scorecard": scorecard,
@@ -1416,7 +1576,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.job_uid, i.status, i.selected_question_ids,
-                   i.question_followup_limits, i.reconnect_deadline_at, i.expires_at,
+                   i.question_bank_version, i.question_followup_limits, i.reconnect_deadline_at, i.expires_at,
                    j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -1430,6 +1590,16 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             return None
         if _is_interview_expired(row["expires_at"], datetime.now(timezone.utc)):
             return None
+        if row["reconnect_deadline_at"]:
+            conn.execute(
+                """
+                UPDATE interviews
+                SET reconnect_deadline_at = ?, updated_at = ?
+                WHERE token = ?
+                """,
+                (None, utc_now_iso(), token),
+            )
+            conn.commit()
 
         selected_ids = [
             int(chunk)
@@ -1437,7 +1607,11 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             if chunk.strip().isdigit()
         ]
         followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
-        questions = _load_job_questions(conn, row["job_uid"])
+        questions = _load_job_questions(
+            conn,
+            row["job_uid"],
+            bank_version=int(row["question_bank_version"] or 1),
+        )
         by_id = {int(item["id"]): item for item in questions}
 
         selected_questions = []

@@ -102,6 +102,244 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     assert all("max_followups" in item for item in interview_detail["selected_questions"])
 
 
+def test_update_job_text_only_keeps_question_bank_version(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="前端工程师",
+        duties="负责前端开发",
+        requirements="熟悉 TypeScript",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍项目", "背景 职责 结果")],
+    )
+    before = admin_store.get_job_detail(job["job_uid"])
+    assert before is not None
+    assert before["question_bank_version"] == 1
+    assert len(before["questions"]) == 1
+
+    updated = admin_store.update_job(
+        job_uid=job["job_uid"],
+        name="前端工程师(高级)",
+        duties="负责前端架构与开发",
+        requirements="熟悉 TypeScript 与工程化",
+        notes="新增职责说明",
+        expected_updated_at=before["updated_at"],
+    )
+    assert updated["question_bank_version"] == 1
+    assert updated["name"] == "前端工程师(高级)"
+    assert len(updated["questions"]) == 1
+
+
+def test_update_job_with_csv_creates_new_bank_version(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责后端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("旧题目A", "旧答案A"), ("旧题目B", "旧答案B")],
+    )
+    before = admin_store.get_job_detail(job["job_uid"])
+    assert before is not None
+    assert before["question_bank_version"] == 1
+
+    updated = admin_store.update_job(
+        job_uid=job["job_uid"],
+        name="后端工程师",
+        duties="负责后端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        expected_updated_at=before["updated_at"],
+        csv_filename="questions_v2.csv",
+        questions=[("新题目A", "新答案A")],
+    )
+    assert updated["question_bank_version"] == 2
+    assert [item["question"] for item in updated["questions"]] == ["新题目A"]
+
+    with admin_store.get_conn() as conn:
+        v1_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM job_questions WHERE job_uid = ? AND bank_version = 1",
+            (job["job_uid"],),
+        ).fetchone()["c"]
+        v2_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM job_questions WHERE job_uid = ? AND bank_version = 2",
+            (job["job_uid"],),
+        ).fetchone()["c"]
+    assert int(v1_count) == 2
+    assert int(v2_count) == 1
+
+
+def test_create_interview_binds_current_bank_version(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("旧题库问题", "旧题库答案")],
+    )
+    interview_v1 = admin_store.create_interview(
+        candidate_name="候选人A",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+
+    detail_before_update = admin_store.get_job_detail(job["job_uid"])
+    assert detail_before_update is not None
+    admin_store.update_job(
+        job_uid=job["job_uid"],
+        name=detail_before_update["name"],
+        duties=detail_before_update["duties"],
+        requirements=detail_before_update["requirements"],
+        notes=detail_before_update["notes"],
+        expected_updated_at=detail_before_update["updated_at"],
+        csv_filename="questions_v2.csv",
+        questions=[("新题库问题", "新题库答案")],
+    )
+
+    interview_v2 = admin_store.create_interview(
+        candidate_name="候选人B",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+
+    v1_detail = admin_store.get_interview_detail(interview_v1["token"])
+    v2_detail = admin_store.get_interview_detail(interview_v2["token"])
+    assert v1_detail is not None
+    assert v2_detail is not None
+    assert v1_detail["question_bank_version"] == 1
+    assert v2_detail["question_bank_version"] == 2
+    assert v1_detail["selected_questions"][0]["question"] == "旧题库问题"
+    assert v2_detail["selected_questions"][0]["question"] == "新题库问题"
+
+
+def test_historical_interview_uses_old_bank_after_job_update(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="算法工程师",
+        duties="负责模型研发",
+        requirements="熟悉机器学习",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("旧问题", "旧答案")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="候选人A",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    before = admin_store.get_job_detail(job["job_uid"])
+    assert before is not None
+
+    admin_store.update_job(
+        job_uid=job["job_uid"],
+        name=before["name"],
+        duties=before["duties"],
+        requirements=before["requirements"],
+        notes=before["notes"],
+        expected_updated_at=before["updated_at"],
+        csv_filename="questions_v2.csv",
+        questions=[("新问题", "新答案")],
+    )
+
+    detail = admin_store.get_interview_detail(interview["token"])
+    session = admin_store.start_interview_session(interview["token"])
+    assert detail is not None
+    assert session is not None
+    assert detail["selected_questions"][0]["question"] == "旧问题"
+    assert session.questions[0]["main_question"] == "旧问题"
+
+
+def test_delete_job_returns_409_when_interviews_exist(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目", "答案")],
+    )
+    admin_store.create_interview(
+        candidate_name="候选人",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+
+    try:
+        admin_store.delete_job_cascade(job["job_uid"])
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "job_has_interviews"
+
+    assert admin_store.get_job_detail(job["job_uid"]) is not None
+
+
+def test_update_job_returns_409_on_stale_expected_updated_at(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目", "答案")],
+    )
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None
+
+    admin_store.update_job(
+        job_uid=job["job_uid"],
+        name="测试岗位v2",
+        duties="职责v2",
+        requirements="要求v2",
+        notes=None,
+        expected_updated_at=detail["updated_at"],
+    )
+    try:
+        admin_store.update_job(
+            job_uid=job["job_uid"],
+            name="测试岗位v3",
+            duties="职责v3",
+            requirements="要求v3",
+            notes=None,
+            expected_updated_at=detail["updated_at"],
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "job_conflict"
+
+
 def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
@@ -434,6 +672,9 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     admin_store.ensure_storage()
 
     with admin_store.get_conn() as conn:
+        job_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
         question_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(job_questions)").fetchall()
         }
@@ -450,6 +691,7 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
                 "PRAGMA table_info(interview_question_scores)"
             ).fetchall()
         }
+    assert "question_bank_version" in job_columns
     assert "ability_dimension" in question_columns
     assert "scenario" in question_columns
     assert "scoring_boundary" in question_columns
@@ -459,9 +701,11 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "output_format" in question_columns
     assert "score_format" in question_columns
     assert "comment_requirement" in question_columns
+    assert "bank_version" in question_columns
     assert "question_followup_limits" in interview_columns
     assert "expires_at" in interview_columns
     assert "completed_reason" in interview_columns
+    assert "question_bank_version" in interview_columns
     assert "status" in scorecard_columns
     assert "overall_score" in scorecard_columns
     assert "total_score" in scorecard_columns

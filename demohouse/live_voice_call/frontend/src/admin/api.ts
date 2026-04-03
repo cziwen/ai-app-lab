@@ -16,6 +16,7 @@ export type JobDetail = {
   requirements: string;
   notes?: string | null;
   csv_filename?: string | null;
+  question_bank_version: number;
   created_at: string;
   updated_at: string;
   questions: Array<{
@@ -160,6 +161,12 @@ export const adminApi = {
   createJob: (form: FormData) =>
     request<{ job: JobListItem }>(`/api/admin/jobs`, {
       method: 'POST',
+      body: form,
+    }),
+
+  updateJob: (jobUid: string, form: FormData) =>
+    request<{ job: JobDetail }>(`/api/admin/jobs/${jobUid}`, {
+      method: 'PUT',
       body: form,
     }),
 
