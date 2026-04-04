@@ -364,9 +364,6 @@ export const AdminJobsPage = () => {
                 <button type="button" onClick={openEditJobModal}>
                   编辑岗位
                 </button>
-                <button type="button" onClick={() => handleDeleteJob(jobDetail.job_uid)}>
-                  删除岗位
-                </button>
               </div>
 
               <section>
@@ -450,7 +447,7 @@ export const AdminJobsPage = () => {
 
               <label htmlFor="edit-job-csv">覆盖题库 CSV（可选）</label>
               <p className="admin-form-hint">
-                不上传则仅更新岗位信息；上传后会生成新题库版本，仅影响后续新建面试。
+                上传后会生成新题库版本，仅影响后续新建面试。
               </p>
               <input
                 id="edit-job-csv"
