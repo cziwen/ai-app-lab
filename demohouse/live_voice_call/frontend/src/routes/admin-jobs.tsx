@@ -63,6 +63,8 @@ export const AdminJobsPage = () => {
   const [loadingJobs, setLoadingJobs] = useState(false);
 
   const [showCreateJob, setShowCreateJob] = useState(false);
+  const [jobModalOpen, setJobModalOpen] = useState(false);
+  const [jobModalMode, setJobModalMode] = useState<'detail' | 'edit'>('detail');
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -72,7 +74,6 @@ export const AdminJobsPage = () => {
   const [jobNotes, setJobNotes] = useState('');
   const [jobFile, setJobFile] = useState<File | null>(null);
   const [creatingJob, setCreatingJob] = useState(false);
-  const [showEditJob, setShowEditJob] = useState(false);
   const [editJobName, setEditJobName] = useState('');
   const [editJobDuties, setEditJobDuties] = useState('');
   const [editJobRequirements, setEditJobRequirements] = useState('');
@@ -100,6 +101,8 @@ export const AdminJobsPage = () => {
   }, [loadingAuth]);
 
   const openJobDetail = async (jobUid: string) => {
+    setJobModalOpen(true);
+    setJobModalMode('detail');
     setDetailLoading(true);
     setJobDetail(null);
     try {
@@ -118,6 +121,8 @@ export const AdminJobsPage = () => {
     }
     try {
       await adminApi.deleteJob(jobUid);
+      setJobModalOpen(false);
+      setJobModalMode('detail');
       setJobDetail(null);
       await loadJobs();
     } catch (e) {
@@ -172,7 +177,18 @@ export const AdminJobsPage = () => {
     setEditJobRequirements(jobDetail.requirements);
     setEditJobNotes(jobDetail.notes || '');
     setEditJobFile(null);
-    setShowEditJob(true);
+    setJobModalMode('edit');
+  };
+
+  const closeJobModal = () => {
+    setJobModalOpen(false);
+    setJobModalMode('detail');
+    setJobDetail(null);
+    setEditJobName('');
+    setEditJobDuties('');
+    setEditJobRequirements('');
+    setEditJobNotes('');
+    setEditJobFile(null);
   };
 
   const handleUpdateJob = async (event: FormEvent) => {
@@ -204,7 +220,7 @@ export const AdminJobsPage = () => {
     try {
       const data = await adminApi.updateJob(jobDetail.job_uid, formData);
       setJobDetail(data.job);
-      setShowEditJob(false);
+      setJobModalMode('detail');
       setEditJobFile(null);
       await loadJobs();
     } catch (e) {
@@ -333,78 +349,13 @@ export const AdminJobsPage = () => {
         </AdminModal>
       )}
 
-      {showEditJob && jobDetail && (
-        <AdminModal title="编辑岗位" onClose={() => setShowEditJob(false)}>
-          <form onSubmit={handleUpdateJob}>
-            <label htmlFor="edit-job-name">岗位名称</label>
-            <input
-              id="edit-job-name"
-              value={editJobName}
-              onChange={event => setEditJobName(event.target.value)}
-              required
-            />
-
-            <label htmlFor="edit-job-duties">岗位描述 - 职责</label>
-            <textarea
-              id="edit-job-duties"
-              value={editJobDuties}
-              onChange={event => setEditJobDuties(event.target.value)}
-              required
-            />
-
-            <label htmlFor="edit-job-requirements">岗位描述 - 要求</label>
-            <textarea
-              id="edit-job-requirements"
-              value={editJobRequirements}
-              onChange={event => setEditJobRequirements(event.target.value)}
-              required
-            />
-
-            <label htmlFor="edit-job-notes">岗位描述 - 补充（可选）</label>
-            <textarea
-              id="edit-job-notes"
-              value={editJobNotes}
-              onChange={event => setEditJobNotes(event.target.value)}
-            />
-
-            <label htmlFor="edit-job-csv">覆盖题库 CSV（可选）</label>
-            <p className="admin-form-hint">
-              不上传则仅更新岗位信息；上传后会生成新题库版本，仅影响后续新建面试。
-            </p>
-            <input
-              id="edit-job-csv"
-              type="file"
-              accept=".csv,text/csv"
-              onChange={event => setEditJobFile(event.target.files?.[0] || null)}
-            />
-
-            <div className="admin-modal-actions">
-              <button type="button" onClick={() => setShowEditJob(false)}>
-                取消
-              </button>
-              <button
-                type="submit"
-                disabled={
-                  updatingJob || !editJobName.trim() || !editJobDuties.trim() || !editJobRequirements.trim()
-                }
-              >
-                {updatingJob ? '保存中...' : '保存修改'}
-              </button>
-            </div>
-          </form>
-        </AdminModal>
-      )}
-
-      {(detailLoading || jobDetail) && (
+      {jobModalOpen && (
         <AdminModal
-          title="岗位详情"
-          onClose={() => {
-            setShowEditJob(false);
-            setJobDetail(null);
-          }}
+          title={jobModalMode === 'detail' ? '岗位详情' : '编辑岗位'}
+          onClose={closeJobModal}
         >
           {detailLoading && <p className="admin-loading">加载详情中...</p>}
-          {!detailLoading && jobDetail && (
+          {!detailLoading && jobDetail && jobModalMode === 'detail' && (
             <article className="admin-detail-article">
               <h2 className="admin-detail-main-title">{jobDetail.name}</h2>
               <p className="admin-detail-subtitle">岗位 UID: {jobDetail.job_uid}</p>
@@ -463,6 +414,65 @@ export const AdminJobsPage = () => {
                 </div>
               </section>
             </article>
+          )}
+          {!detailLoading && jobDetail && jobModalMode === 'edit' && (
+            <form onSubmit={handleUpdateJob}>
+              <label htmlFor="edit-job-name">岗位名称</label>
+              <input
+                id="edit-job-name"
+                value={editJobName}
+                onChange={event => setEditJobName(event.target.value)}
+                required
+              />
+
+              <label htmlFor="edit-job-duties">岗位描述 - 职责</label>
+              <textarea
+                id="edit-job-duties"
+                value={editJobDuties}
+                onChange={event => setEditJobDuties(event.target.value)}
+                required
+              />
+
+              <label htmlFor="edit-job-requirements">岗位描述 - 要求</label>
+              <textarea
+                id="edit-job-requirements"
+                value={editJobRequirements}
+                onChange={event => setEditJobRequirements(event.target.value)}
+                required
+              />
+
+              <label htmlFor="edit-job-notes">岗位描述 - 补充（可选）</label>
+              <textarea
+                id="edit-job-notes"
+                value={editJobNotes}
+                onChange={event => setEditJobNotes(event.target.value)}
+              />
+
+              <label htmlFor="edit-job-csv">覆盖题库 CSV（可选）</label>
+              <p className="admin-form-hint">
+                不上传则仅更新岗位信息；上传后会生成新题库版本，仅影响后续新建面试。
+              </p>
+              <input
+                id="edit-job-csv"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={event => setEditJobFile(event.target.files?.[0] || null)}
+              />
+
+              <div className="admin-modal-actions">
+                <button type="button" onClick={() => setJobModalMode('detail')}>
+                  返回详情
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    updatingJob || !editJobName.trim() || !editJobDuties.trim() || !editJobRequirements.trim()
+                  }
+                >
+                  {updatingJob ? '保存中...' : '保存修改'}
+                </button>
+              </div>
+            </form>
           )}
         </AdminModal>
       )}
