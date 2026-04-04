@@ -317,9 +317,6 @@ export const AdminJobsPage = () => {
             />
 
             <label htmlFor="job-csv">题库 CSV</label>
-            <p className="admin-form-hint">
-              规则：场景首问需填写“评分标准/最大分数”，同场景子问这两列必须留空（空值表示子问，不是继承）。
-            </p>
             <input
               id="job-csv"
               type="file"
