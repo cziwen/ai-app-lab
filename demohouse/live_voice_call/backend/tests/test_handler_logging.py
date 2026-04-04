@@ -65,7 +65,13 @@ def _create_interview_fixture() -> str:
         candidate_name="测试候选人",
         job_uid=job["job_uid"],
         notes=None,
-        question_followups=[{"question_id": first_question_id, "max_followups": 0}],
+        question_followups=[
+            {
+                "question_id": first_question_id,
+                "max_followups": 0,
+                "max_clarifies": 0,
+            }
+        ],
     )
     return interview["token"]
 

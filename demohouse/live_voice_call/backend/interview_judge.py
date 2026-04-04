@@ -10,19 +10,35 @@ from llm_limiter import llm_slot
 
 @dataclass
 class Decision:
-    move_forward: bool
-    need_follow_up: bool
-    follow_up_question: str
+    next_action: str
+    next_prompt: str
     reason: str
     coverage_score: float
+
+    @property
+    def move_forward(self) -> bool:
+        return self.next_action == "next_question"
+
+    @property
+    def need_follow_up(self) -> bool:
+        return self.next_action == "follow_up"
+
+    @property
+    def follow_up_question(self) -> str:
+        if self.next_action != "follow_up":
+            return ""
+        return self.next_prompt
 
 
 JUDGE_INSTRUCTIONS = (
     "你是结构化面试裁决器。只输出一个JSON对象，不要输出任何额外文字。"
-    "JSON字段必须包含：move_forward(bool), need_follow_up(bool), "
-    "follow_up_question(str), reason(str), coverage_score(float 0~1)。"
-    "遵守：当 need_follow_up=true 时，follow_up_question 必须非空；"
-    "当 move_forward=true 时，need_follow_up 必须为 false。"
+    "JSON字段必须包含：next_action(str), next_prompt(str), reason(str), coverage_score(float 0~1)。"
+    "next_action 只能是 next_question/follow_up/clarify 三选一。"
+    "遵守：当 next_action=next_question 时，next_prompt 必须为空字符串；"
+    "当 next_action=follow_up 时，next_prompt 必须是追问句；"
+    "当 next_action=clarify 时，next_prompt 必须是题意澄清，不能新增考察点。"
+    "clarify 仅用于候选人明确表示听不懂、没理解题目、请求解释。"
+    "follow_up 仅用于候选人已经作答但信息不足，需要继续深挖。"
     "评分时只允许参考：题目(question)、评分分界线(scoring_boundary)、候选人回答(candidate_answer)。"
     "禁止参考 must_cover、reference_answer、best_standard、medium_standard、worst_standard。"
 )
@@ -37,7 +53,7 @@ class InterviewJudge:
         llm_reasoning_effort: Optional[str] = None,
         responses_adapter: Optional[ArkResponsesAdapter] = None,
         llm_decider: Optional[
-            Callable[[str, str, int, Optional[Dict[str, Any]]], Awaitable[str]]
+            Callable[[str, str, int, int, Optional[Dict[str, Any]]], Awaitable[str]]
         ] = None,
     ):
         self.coverage_threshold = coverage_threshold
@@ -52,21 +68,29 @@ class InterviewJudge:
         question: str,
         candidate_answer: str,
         follow_up_count: int,
+        clarify_count: int,
         evidence: Optional[Dict[str, Any]] = None,
     ) -> Decision:
         answer = (candidate_answer or "").strip()
 
+        if self._is_clarify_request(answer):
+            return Decision(
+                next_action="clarify",
+                next_prompt="你可以按这个问题理解来回答：请结合实际经历，说明你的具体做法和结果。",
+                reason="candidate_requested_clarification",
+                coverage_score=0.0,
+            )
+
         # Guard: empty/too short answer -> prefer follow-up.
         if len(answer) < 6:
             return Decision(
-                move_forward=False,
-                need_follow_up=True,
-                follow_up_question="请你结合一个具体经历，再展开说明一下。",
+                next_action="follow_up",
+                next_prompt="请你结合一个具体经历，再展开说明一下。",
                 reason="answer_too_short",
                 coverage_score=0.0,
             )
 
-        raw = await self._call_llm(question, answer, follow_up_count, evidence)
+        raw = await self._call_llm(question, answer, follow_up_count, clarify_count, evidence)
         if raw is None:
             return self._fallback_follow_up("llm_unavailable")
 
@@ -81,12 +105,19 @@ class InterviewJudge:
         question: str,
         candidate_answer: str,
         follow_up_count: int,
+        clarify_count: int,
         evidence: Optional[Dict[str, Any]],
     ) -> Optional[str]:
         if self.llm_decider is not None:
-            return await self.llm_decider(
-                question, candidate_answer, follow_up_count, evidence
-            )
+            try:
+                return await self.llm_decider(
+                    question, candidate_answer, follow_up_count, clarify_count, evidence
+                )
+            except TypeError:
+                # Backward-compatible path for legacy custom deciders.
+                return await self.llm_decider(
+                    question, candidate_answer, follow_up_count, evidence
+                )
 
         if not self.llm_endpoint_id:
             return self._heuristic_decision_json(question, candidate_answer, evidence)
@@ -103,9 +134,12 @@ class InterviewJudge:
             "scoring_boundary": self._extract_scoring_boundary(evidence),
             "candidate_answer": candidate_answer,
             "follow_up_count": follow_up_count,
+            "clarify_count": clarify_count,
             "instruction": (
-                "仅基于 question 与 scoring_boundary 评估 candidate_answer 的覆盖度。"
-                "若需要追问，给出一个具体追问。仅返回JSON。"
+                "仅基于 question 与 scoring_boundary 评估 candidate_answer。"
+                "如果是求解释题意，返回 clarify；"
+                "如果回答不足但已作答，返回 follow_up；"
+                "如果已可进入下一题，返回 next_question。仅返回JSON。"
             ),
         }
         async with llm_slot():
@@ -140,9 +174,8 @@ class InterviewJudge:
                 return None
 
     def _normalize(self, payload: Dict[str, Any]) -> Decision:
-        move_forward = bool(payload.get("move_forward", False))
-        need_follow_up = bool(payload.get("need_follow_up", True))
-        follow_up_question = str(payload.get("follow_up_question", "") or "")
+        action = str(payload.get("next_action", "") or "").strip().lower()
+        next_prompt = str(payload.get("next_prompt", "") or "").strip()
         reason = str(payload.get("reason", "llm_decision") or "llm_decision")
 
         try:
@@ -151,36 +184,41 @@ class InterviewJudge:
             coverage_score = 0.0
         coverage_score = max(0.0, min(1.0, coverage_score))
 
-        # Resolve conflicting output deterministically.
-        if move_forward and need_follow_up:
-            if coverage_score >= self.coverage_threshold:
-                need_follow_up = False
+        # Backward compatibility: accept old-format payload from judge model.
+        if not action:
+            move_forward = bool(payload.get("move_forward", False))
+            need_follow_up = bool(payload.get("need_follow_up", False))
+            legacy_follow_up_question = str(payload.get("follow_up_question", "") or "").strip()
+            if move_forward:
+                action = "next_question"
+            elif need_follow_up:
+                action = "follow_up"
             else:
-                move_forward = False
+                action = "follow_up"
+            if not next_prompt:
+                next_prompt = legacy_follow_up_question
 
-        if (not move_forward) and (not need_follow_up):
-            need_follow_up = True
+        if action not in {"next_question", "follow_up", "clarify"}:
+            action = "follow_up"
 
-        if move_forward:
-            need_follow_up = False
-            follow_up_question = ""
-
-        if need_follow_up and not follow_up_question:
-            follow_up_question = "请你补充一个更具体的案例和结果。"
+        if action == "next_question":
+            next_prompt = ""
+        elif action == "follow_up" and not next_prompt:
+            next_prompt = "请你补充一个更具体的案例和结果。"
+        elif action == "clarify" and not next_prompt:
+            next_prompt = "我的意思是：请围绕问题本身，结合你的真实经历来说明。"
 
         return Decision(
-            move_forward=move_forward,
-            need_follow_up=need_follow_up,
-            follow_up_question=follow_up_question,
+            next_action=action,
+            next_prompt=next_prompt,
             reason=reason,
             coverage_score=coverage_score,
         )
 
     def _fallback_follow_up(self, reason: str) -> Decision:
         return Decision(
-            move_forward=False,
-            need_follow_up=True,
-            follow_up_question="我想听到更具体的行动和结果，请再展开一下。",
+            next_action="follow_up",
+            next_prompt="我想听到更具体的行动和结果，请再展开一下。",
             reason=reason,
             coverage_score=0.0,
         )
@@ -188,6 +226,15 @@ class InterviewJudge:
     def _heuristic_decision_json(
         self, question: str, candidate_answer: str, evidence: Optional[Dict[str, Any]]
     ) -> str:
+        if self._is_clarify_request(candidate_answer):
+            decision = {
+                "next_action": "clarify",
+                "next_prompt": "这道题想了解你的实际做法。你可以按“背景-行动-结果”来回答。",
+                "reason": "candidate_requested_clarification",
+                "coverage_score": 0.0,
+            }
+            return json.dumps(decision, ensure_ascii=False)
+
         scoring_boundary = self._extract_scoring_boundary(evidence)
         rubric_keywords = self._extract_keywords(f"{question} {scoring_boundary}".strip())
         answer_keywords = self._extract_keywords(candidate_answer)
@@ -207,17 +254,15 @@ class InterviewJudge:
 
         if coverage >= self.coverage_threshold:
             decision = {
-                "move_forward": True,
-                "need_follow_up": False,
-                "follow_up_question": "",
+                "next_action": "next_question",
+                "next_prompt": "",
                 "reason": "semantic_enough_coverage",
                 "coverage_score": coverage,
             }
         else:
             decision = {
-                "move_forward": False,
-                "need_follow_up": True,
-                "follow_up_question": (
+                "next_action": "follow_up",
+                "next_prompt": (
                     "请围绕这个评价标准补充："
                     f"{scoring_boundary or '你是如何判断并落实关键决策的'}。"
                 ),
@@ -263,3 +308,26 @@ class InterviewJudge:
             if len(picked) >= 16:
                 break
         return picked
+
+    def _is_clarify_request(self, answer: str) -> bool:
+        normalized = (answer or "").strip().replace("？", "?")
+        if not normalized:
+            return False
+        clarify_signals = [
+            "没听懂",
+            "没太听懂",
+            "没理解",
+            "不理解",
+            "什么意思",
+            "什么问题",
+            "怎么理解",
+            "题目是什么",
+            "请解释",
+            "再说一遍",
+            "再解释",
+            "听不清",
+        ]
+        for signal in clarify_signals:
+            if signal in normalized:
+                return True
+        return False

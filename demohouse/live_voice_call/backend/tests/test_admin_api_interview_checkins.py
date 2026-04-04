@@ -55,7 +55,11 @@ def _followups_for_job(job_uid: str):
     detail = admin_store.get_job_detail(job_uid)
     assert detail is not None
     return [
-        {"question_id": int(question["id"]), "max_followups": 0}
+        {
+            "question_id": int(question["id"]),
+            "max_followups": 0,
+            "max_clarifies": 0,
+        }
         for question in detail["questions"]
     ]
 
@@ -198,6 +202,9 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
         "speaker",
         "screen",
     ]
+    selected_questions = detail_response.json()["interview"]["selected_questions"]
+    assert selected_questions
+    assert "max_clarifies" in selected_questions[0]
 
     public_response = client.get(
         f"/api/public/interviews/{interview['token']}/access",
@@ -256,6 +263,36 @@ def test_create_interview_invalid_question_followups_returns_400(monkeypatch, tm
     )
     assert response.status_code == 400
     assert "question_followups" in response.json().get("detail", "")
+
+
+def test_create_interview_missing_max_clarifies_returns_422(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A")],
+    )
+    detail = admin_store.get_job_detail(job["job_uid"])
+    assert detail is not None
+    first_question_id = int(detail["questions"][0]["id"])
+    response = client.post(
+        "/api/admin/interviews",
+        json={
+            "candidate_name": "张三",
+            "job_uid": job["job_uid"],
+            "question_followups": [
+                {
+                    "question_id": first_question_id,
+                    "max_followups": 1,
+                }
+            ],
+            "required_checkins": ["speaker", "mic"],
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_admin_interview_metrics_returns_active_counts(monkeypatch, tmp_path):

@@ -278,9 +278,8 @@ def test_build_interview_context_move_forward_with_followup_limit_uses_neutral_t
     )
 
     decision = Decision(
-        move_forward=True,
-        need_follow_up=False,
-        follow_up_question="",
+        next_action="next_question",
+        next_prompt="",
         reason="follow_up_limit_reached",
         coverage_score=0.31,
     )
@@ -306,9 +305,8 @@ def test_build_interview_context_move_forward_with_semantic_enough_allows_brief_
     )
 
     decision = Decision(
-        move_forward=True,
-        need_follow_up=False,
-        follow_up_question="",
+        next_action="next_question",
+        next_prompt="",
         reason="semantic_enough_coverage",
         coverage_score=0.86,
     )
@@ -320,6 +318,33 @@ def test_build_interview_context_move_forward_with_semantic_enough_allows_brief_
 
     assert "候选人回答已覆盖关键点，可用一句简短肯定后进入下一题" in context
     assert "中性过渡，不评价回答质量，不夸赞" not in context
+
+
+def test_build_interview_context_clarify_uses_clarify_instruction():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        next_action="clarify",
+        next_prompt="这道题是希望你结合真实项目说明个人行动和结果。",
+        reason="candidate_requested_clarification",
+        coverage_score=0.12,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="好的，我解释一下这道题。",
+        flow_state=service.ASK_CLARIFY,
+    )
+
+    assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
+    assert "[澄清说明]" in context
 
 
 def test_build_interview_context_wrap_up_still_works():

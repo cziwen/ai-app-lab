@@ -10,6 +10,7 @@ WAIT_ANSWER = "WAIT_ANSWER"
 EVAL_ANSWER = "EVAL_ANSWER"
 DECIDE = "DECIDE"
 ASK_FOLLOWUP = "ASK_FOLLOWUP"
+ASK_CLARIFY = "ASK_CLARIFY"
 WRAP_UP = "WRAP_UP"
 DONE = "DONE"
 
@@ -21,6 +22,8 @@ class QuestionContext:
     evidence: Dict[str, Any] = field(default_factory=dict)
     max_followups: int = 0
     follow_up_count: int = 0
+    max_clarifies: int = 0
+    clarify_count: int = 0
     coverage_score: float = 0.0
     turns: List[Dict[str, str]] = field(default_factory=list)
     status: str = "pending"  # pending | in_progress | done
@@ -65,6 +68,7 @@ class InterviewFlow:
                 main_question=str(item["main_question"]),
                 evidence=dict(item.get("evidence") or {}),
                 max_followups=max(0, int(item.get("max_followups", 0))),
+                max_clarifies=max(0, int(item.get("max_clarifies", 0))),
             )
             for item in questions
         ]
@@ -74,6 +78,7 @@ class InterviewFlow:
         self.current_question_index = 0
         self.total_candidate_turns = 0
         self.latest_follow_up: str = ""
+        self.latest_clarify: str = ""
 
     @property
     def is_done(self) -> bool:
@@ -94,7 +99,7 @@ class InterviewFlow:
                 state_after=self.state,
                 interviewer_text=(
                     f"你好，欢迎参加面试。本场共{self.total_questions}道题，"
-                    "我会根据你的回答决定是否追问。"
+                    "我会根据你的回答决定是否追问，必要时也会澄清题意。"
                 ),
                 decision=None,
                 question_id=None,
@@ -124,6 +129,19 @@ class InterviewFlow:
                 state_before=before,
                 state_after=self.state,
                 interviewer_text=self.latest_follow_up,
+                decision=None,
+                question_id=q.question_id,
+                transition_trace=trace,
+            )
+
+        if self.state == ASK_CLARIFY:
+            q = self._current_question()
+            trace.append(f"{ASK_CLARIFY} -> {WAIT_ANSWER}")
+            self.state = WAIT_ANSWER
+            return FlowResponse(
+                state_before=before,
+                state_after=self.state,
+                interviewer_text=self.latest_clarify,
                 decision=None,
                 question_id=q.question_id,
                 transition_trace=trace,
@@ -173,9 +191,8 @@ class InterviewFlow:
         # Guard: global limit -> force wrap up.
         if self.total_candidate_turns >= self.global_turn_limit:
             forced = Decision(
-                move_forward=True,
-                need_follow_up=False,
-                follow_up_question="",
+                next_action="next_question",
+                next_prompt="",
                 reason="global_turn_limit_reached",
                 coverage_score=q.coverage_score,
             )
@@ -190,28 +207,48 @@ class InterviewFlow:
                 transition_trace=trace,
             )
 
-        if q.follow_up_count >= q.max_followups:
+        decision = await self.judge.decide(
+            question=q.main_question,
+            candidate_answer=answer,
+            follow_up_count=q.follow_up_count,
+            clarify_count=q.clarify_count,
+            evidence=q.evidence,
+        )
+        if decision.next_action == "follow_up" and q.follow_up_count >= q.max_followups:
             decision = Decision(
-                move_forward=True,
-                need_follow_up=False,
-                follow_up_question="",
+                next_action="next_question",
+                next_prompt="",
                 reason="follow_up_limit_reached",
                 coverage_score=q.coverage_score,
             )
-        else:
-            decision = await self.judge.decide(
-                question=q.main_question,
-                candidate_answer=answer,
-                follow_up_count=q.follow_up_count,
-                evidence=q.evidence,
+        if decision.next_action == "clarify" and q.clarify_count >= q.max_clarifies:
+            decision = Decision(
+                next_action="next_question",
+                next_prompt="",
+                reason="clarify_limit_reached",
+                coverage_score=q.coverage_score,
             )
         q.coverage_score = decision.coverage_score
 
-        if decision.need_follow_up and not decision.move_forward:
+        if decision.next_action == "follow_up":
             q.follow_up_count += 1
-            self.latest_follow_up = decision.follow_up_question
+            self.latest_follow_up = decision.next_prompt
             trace.append(f"{DECIDE} -> {ASK_FOLLOWUP}")
             self.state = ASK_FOLLOWUP
+            return FlowResponse(
+                state_before=before,
+                state_after=self.state,
+                interviewer_text="",
+                decision=decision,
+                question_id=q.question_id,
+                transition_trace=trace,
+            )
+
+        if decision.next_action == "clarify":
+            q.clarify_count += 1
+            self.latest_clarify = decision.next_prompt
+            trace.append(f"{DECIDE} -> {ASK_CLARIFY}")
+            self.state = ASK_CLARIFY
             return FlowResponse(
                 state_before=before,
                 state_after=self.state,

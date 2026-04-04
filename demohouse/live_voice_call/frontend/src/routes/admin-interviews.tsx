@@ -70,6 +70,7 @@ export const AdminInterviewsPage = () => {
     [],
   );
   const [questionFollowupInputs, setQuestionFollowupInputs] = useState<Record<number, string>>({});
+  const [questionClarifyInputs, setQuestionClarifyInputs] = useState<Record<number, string>>({});
   const [interviewNotes, setInterviewNotes] = useState('');
   const [requiredCheckins, setRequiredCheckins] = useState<CheckInKey[]>([
     'speaker',
@@ -137,6 +138,7 @@ export const AdminInterviewsPage = () => {
       if (!selectedJobUid) {
         setSelectedJobQuestions([]);
         setQuestionFollowupInputs({});
+        setQuestionClarifyInputs({});
         return;
       }
       try {
@@ -147,6 +149,12 @@ export const AdminInterviewsPage = () => {
         }));
         setSelectedJobQuestions(questions);
         setQuestionFollowupInputs(
+          questions.reduce<Record<number, string>>((acc, question) => {
+            acc[question.id] = '0';
+            return acc;
+          }, {}),
+        );
+        setQuestionClarifyInputs(
           questions.reduce<Record<number, string>>((acc, question) => {
             acc[question.id] = '0';
             return acc;
@@ -191,14 +199,30 @@ export const AdminInterviewsPage = () => {
     setCreatingInterview(true);
     try {
       const question_followups = selectedJobQuestions.map(question => {
-        const raw = questionFollowupInputs[question.id] ?? '0';
-        const parsed = Number.parseInt(raw, 10);
-        if (!Number.isFinite(parsed) || Number.isNaN(parsed) || parsed < 0 || parsed > 3) {
+        const rawFollowup = questionFollowupInputs[question.id] ?? '0';
+        const parsedFollowup = Number.parseInt(rawFollowup, 10);
+        if (
+          !Number.isFinite(parsedFollowup) ||
+          Number.isNaN(parsedFollowup) ||
+          parsedFollowup < 0 ||
+          parsedFollowup > 3
+        ) {
           throw new Error(`题目「${question.question}」的追问次数必须是 0-3 的整数`);
+        }
+        const rawClarify = questionClarifyInputs[question.id] ?? '0';
+        const parsedClarify = Number.parseInt(rawClarify, 10);
+        if (
+          !Number.isFinite(parsedClarify) ||
+          Number.isNaN(parsedClarify) ||
+          parsedClarify < 0 ||
+          parsedClarify > 3
+        ) {
+          throw new Error(`题目「${question.question}」的澄清次数必须是 0-3 的整数`);
         }
         return {
           question_id: question.id,
-          max_followups: parsed,
+          max_followups: parsedFollowup,
+          max_clarifies: parsedClarify,
         };
       });
       await adminApi.createInterview({
@@ -336,24 +360,45 @@ export const AdminInterviewsPage = () => {
               ))}
             </select>
 
-            <label>逐题追问次数（0-3）</label>
+            <label>逐题追问/澄清次数（0-3）</label>
             <div className="admin-qa-list">
               {selectedJobQuestions.map(item => (
                 <div key={item.id} className="admin-followup-row">
                   <p>{item.question}</p>
-                  <input
-                    type="number"
-                    min={0}
-                    max={3}
-                    value={questionFollowupInputs[item.id] ?? '0'}
-                    onChange={event =>
-                      setQuestionFollowupInputs(prev => ({
-                        ...prev,
-                        [item.id]: event.target.value,
-                      }))
-                    }
-                    required
-                  />
+                  <div className="admin-action-row">
+                    <label>
+                      追问
+                      <input
+                        type="number"
+                        min={0}
+                        max={3}
+                        value={questionFollowupInputs[item.id] ?? '0'}
+                        onChange={event =>
+                          setQuestionFollowupInputs(prev => ({
+                            ...prev,
+                            [item.id]: event.target.value,
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      澄清
+                      <input
+                        type="number"
+                        min={0}
+                        max={3}
+                        value={questionClarifyInputs[item.id] ?? '0'}
+                        onChange={event =>
+                          setQuestionClarifyInputs(prev => ({
+                            ...prev,
+                            [item.id]: event.target.value,
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                  </div>
                 </div>
               ))}
               {!selectedJobQuestions.length && <p>当前岗位题库为空，无法创建面试。</p>}
@@ -478,6 +523,7 @@ export const AdminInterviewsPage = () => {
                               {item.question}
                               {subIndex === 0 ? '（场景首问）' : '（场景子问）'}
                               {'，'}追问上限: {item.max_followups}
+                              {'，'}澄清上限: {item.max_clarifies}
                             </li>
                           ))}
                         </ol>

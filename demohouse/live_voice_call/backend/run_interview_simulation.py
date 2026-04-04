@@ -5,7 +5,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from interview_flow import ASK_FOLLOWUP, ASK_QUESTION, DONE, INTRO, WAIT_ANSWER, WRAP_UP, InterviewFlow
+from interview_flow import (
+    ASK_CLARIFY,
+    ASK_FOLLOWUP,
+    ASK_QUESTION,
+    DONE,
+    INTRO,
+    WAIT_ANSWER,
+    WRAP_UP,
+    InterviewFlow,
+)
 from interview_judge import InterviewJudge
 
 DEFAULT_LLM1_ENDPOINT_ID = "ep-m-20260315140910-pfztd"
@@ -16,18 +25,21 @@ QUESTIONS: List[Dict[str, Any]] = [
         "main_question": "请用1分钟做自我介绍，重点说与你申请岗位相关的经历。",
         "evidence": {"scoring_boundary": "是否清晰说明岗位相关经历，并体现与岗位匹配度"},
         "max_followups": 2,
+        "max_clarifies": 2,
     },
     {
         "question_id": "q2",
         "main_question": "请介绍一个你主导的项目，说明目标、你的动作和结果。",
         "evidence": {"scoring_boundary": "是否完整覆盖项目目标、个人关键动作和可验证结果"},
         "max_followups": 2,
+        "max_clarifies": 2,
     },
     {
         "question_id": "q3",
         "main_question": "当你遇到复杂问题时，通常如何拆解并推动解决？",
         "evidence": {"scoring_boundary": "是否体现问题拆解方法、推进机制和复盘意识"},
         "max_followups": 2,
+        "max_clarifies": 2,
     },
 ]
 
@@ -76,7 +88,7 @@ async def main() -> int:
     while not flow.is_done and safety_loops < 100:
         safety_loops += 1
 
-        if flow.state in {INTRO, ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP}:
+        if flow.state in {INTRO, ASK_QUESTION, ASK_FOLLOWUP, ASK_CLARIFY, WRAP_UP}:
             out = await flow.produce_interviewer_message()
             if out.interviewer_text:
                 lines.append(
@@ -99,13 +111,12 @@ async def main() -> int:
             if decision is not None:
                 lines.append(
                     "[Decision] "
-                    f"move_forward={decision.move_forward} "
-                    f"need_follow_up={decision.need_follow_up} "
+                    f"next_action={decision.next_action} "
                     f"coverage={decision.coverage_score:.2f} "
                     f"reason={decision.reason}"
                 )
-                if decision.follow_up_question:
-                    lines.append(f"[FollowUpQuestion] {decision.follow_up_question}")
+                if decision.next_prompt:
+                    lines.append(f"[NextPrompt] {decision.next_prompt}")
             for t in result.transition_trace:
                 lines.append(f"  transition: {t}")
             continue

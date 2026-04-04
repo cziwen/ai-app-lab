@@ -196,6 +196,7 @@ class LoginBody(BaseModel):
 class QuestionFollowupBody(BaseModel):
     question_id: int = Field(ge=1)
     max_followups: int = Field(ge=0, le=3)
+    max_clarifies: int = Field(ge=0, le=3)
 
 
 class CreateInterviewBody(BaseModel):
@@ -384,7 +385,7 @@ def create_admin_app(
             if str(e) == "invalid_question_followups":
                 raise HTTPException(
                     status_code=400,
-                    detail="question_followups 必须完整覆盖岗位题目，且 max_followups 取值范围为 0-3",
+                    detail="question_followups 必须完整覆盖岗位题目，且 max_followups/max_clarifies 取值范围为 0-3",
                 )
             raise
         interview["interview_link"] = build_interview_link(interview["token"])

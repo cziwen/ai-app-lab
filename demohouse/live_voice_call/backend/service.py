@@ -29,6 +29,7 @@ from arkitect.core.component.tts.constants import (
 from arkitect.telemetry.logger import INFO
 from event import *
 from interview_flow import (
+    ASK_CLARIFY,
     ASK_FOLLOWUP,
     ASK_QUESTION,
     DONE,
@@ -938,8 +939,12 @@ class VoiceBotService(BaseModel):
             parts.append(f"[评估结果] 评判理由: {decision.reason}")
             parts.append(f"[评估结果] 覆盖度得分: {decision.coverage_score:.2f}")
 
-            if decision.move_forward:
-                forced_move_reasons = {"follow_up_limit_reached", "global_turn_limit_reached"}
+            if decision.next_action == "next_question":
+                forced_move_reasons = {
+                    "follow_up_limit_reached",
+                    "clarify_limit_reached",
+                    "global_turn_limit_reached",
+                }
                 if decision.reason in forced_move_reasons:
                     parts.append(
                         "[指令] 现在需要进入下一题，请中性过渡，不评价回答质量，不夸赞。"
@@ -948,10 +953,16 @@ class VoiceBotService(BaseModel):
                     parts.append(
                         "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后进入下一题。"
                     )
-            elif decision.need_follow_up:
+            elif decision.next_action == "follow_up":
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
-                if decision.follow_up_question:
-                    parts.append(f"[追问方向] {decision.follow_up_question}")
+                if decision.next_prompt:
+                    parts.append(f"[追问方向] {decision.next_prompt}")
+            elif decision.next_action == "clarify":
+                parts.append(
+                    "[指令] 候选人对题意有疑惑，请仅做题意澄清，不要新增考察维度，也不要转成追问。"
+                )
+                if decision.next_prompt:
+                    parts.append(f"[澄清说明] {decision.next_prompt}")
 
         if next_question_or_followup:
             parts.append(f"[下一步内容] {next_question_or_followup}")
@@ -1093,10 +1104,10 @@ class VoiceBotService(BaseModel):
                             f"[Interview] Judge result: "
                             f"{answer_response.state_before}->{answer_response.state_after} "
                             f"q={answer_response.question_id} "
-                            f"move_forward={decision.move_forward} "
-                            f"need_follow_up={decision.need_follow_up} "
+                            f"next_action={decision.next_action} "
                             f"coverage={decision.coverage_score:.2f} "
-                            f"reason={decision.reason}"
+                            f"reason={decision.reason} "
+                            f"next_prompt='{decision.next_prompt}'"
                         )
                     else:
                         self._log(
@@ -1129,7 +1140,7 @@ class VoiceBotService(BaseModel):
                     # Get next interviewer message if flow state needs one
                     next_interviewer_text = ""
                     next_response: Optional[FlowResponse] = None
-                    if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, WRAP_UP):
+                    if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, ASK_CLARIFY, WRAP_UP):
                         next_response = await flow.produce_interviewer_message()
                         next_interviewer_text = next_response.interviewer_text
                         self._log(

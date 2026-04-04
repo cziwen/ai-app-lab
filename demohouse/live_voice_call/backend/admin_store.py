@@ -51,6 +51,7 @@ DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
 FOLLOWUP_MIN = 0
 FOLLOWUP_MAX = 3
 DEFAULT_QUESTION_MAX_FOLLOWUPS = 0
+DEFAULT_QUESTION_MAX_CLARIFIES = 0
 INTERVIEW_TOKEN_TTL_HOURS = 24
 INTERVIEW_EXPIRY_KEY_PREFIX = (os.getenv("INTERVIEW_EXPIRY_KEY_PREFIX") or "interview:expiry").strip()
 INTERVIEW_EXPIRY_SWEEP_SECONDS = max(
@@ -203,6 +204,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   required_checkins TEXT NOT NULL DEFAULT 'speaker,mic',
   selected_question_ids TEXT NOT NULL,
   question_followup_limits TEXT NOT NULL DEFAULT '',
+  question_clarify_limits TEXT NOT NULL DEFAULT '',
   notes TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -337,6 +339,13 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             "UPDATE interviews SET question_followup_limits = '' WHERE question_followup_limits IS NULL"
+        )
+    if "question_clarify_limits" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN question_clarify_limits TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "UPDATE interviews SET question_clarify_limits = '' WHERE question_clarify_limits IS NULL"
         )
     if "expires_at" not in interview_columns:
         conn.execute(
@@ -479,33 +488,43 @@ def parse_required_checkins(raw: Optional[str]) -> List[str]:
 def _normalize_question_followups(
     question_followups: Optional[Sequence[Dict[str, Any]]],
     question_ids: Sequence[int],
-) -> Dict[int, int]:
+) -> Tuple[Dict[int, int], Dict[int, int]]:
     expected_ids = list(question_ids)
     expected_set = set(expected_ids)
     if question_followups is None:
-        return {qid: DEFAULT_QUESTION_MAX_FOLLOWUPS for qid in expected_ids}
+        return (
+            {qid: DEFAULT_QUESTION_MAX_FOLLOWUPS for qid in expected_ids},
+            {qid: DEFAULT_QUESTION_MAX_CLARIFIES for qid in expected_ids},
+        )
     if isinstance(question_followups, str):
         raise ValueError("invalid_question_followups")
 
-    parsed: Dict[int, int] = {}
+    parsed_followups: Dict[int, int] = {}
+    parsed_clarifies: Dict[int, int] = {}
     for item in question_followups:
         if not isinstance(item, dict):
             raise ValueError("invalid_question_followups")
         raw_qid = item.get("question_id")
-        raw_limit = item.get("max_followups")
+        raw_followup_limit = item.get("max_followups")
+        raw_clarify_limit = item.get("max_clarifies")
         if not isinstance(raw_qid, int) or raw_qid <= 0:
             raise ValueError("invalid_question_followups")
-        if not isinstance(raw_limit, int):
+        if not isinstance(raw_followup_limit, int):
             raise ValueError("invalid_question_followups")
-        if raw_limit < FOLLOWUP_MIN or raw_limit > FOLLOWUP_MAX:
+        if raw_followup_limit < FOLLOWUP_MIN or raw_followup_limit > FOLLOWUP_MAX:
             raise ValueError("invalid_question_followups")
-        if raw_qid in parsed:
+        if not isinstance(raw_clarify_limit, int):
             raise ValueError("invalid_question_followups")
-        parsed[raw_qid] = raw_limit
+        if raw_clarify_limit < FOLLOWUP_MIN or raw_clarify_limit > FOLLOWUP_MAX:
+            raise ValueError("invalid_question_followups")
+        if raw_qid in parsed_followups:
+            raise ValueError("invalid_question_followups")
+        parsed_followups[raw_qid] = raw_followup_limit
+        parsed_clarifies[raw_qid] = raw_clarify_limit
 
-    if set(parsed.keys()) != expected_set:
+    if set(parsed_followups.keys()) != expected_set:
         raise ValueError("invalid_question_followups")
-    return parsed
+    return parsed_followups, parsed_clarifies
 
 
 def _serialize_question_followups(question_followups: Dict[int, int]) -> str:
@@ -513,8 +532,13 @@ def _serialize_question_followups(question_followups: Dict[int, int]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _parse_question_followups(raw: Optional[str], question_ids: Sequence[int]) -> Dict[int, int]:
-    defaults = {qid: DEFAULT_QUESTION_MAX_FOLLOWUPS for qid in question_ids}
+def _parse_question_limits(
+    raw: Optional[str],
+    question_ids: Sequence[int],
+    *,
+    default_limit: int,
+) -> Dict[int, int]:
+    defaults = {qid: default_limit for qid in question_ids}
     if not raw:
         return defaults
     try:
@@ -528,15 +552,31 @@ def _parse_question_followups(raw: Optional[str], question_ids: Sequence[int]) -
     for key, value in payload.items():
         try:
             qid = int(str(key).strip())
-            max_followups = int(value)
+            limit = int(value)
         except (TypeError, ValueError):
             continue
         if qid not in defaults:
             continue
-        if max_followups < FOLLOWUP_MIN or max_followups > FOLLOWUP_MAX:
+        if limit < FOLLOWUP_MIN or limit > FOLLOWUP_MAX:
             continue
-        parsed[qid] = max_followups
-    return {qid: parsed.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS) for qid in question_ids}
+        parsed[qid] = limit
+    return {qid: parsed.get(qid, default_limit) for qid in question_ids}
+
+
+def _parse_question_followups(raw: Optional[str], question_ids: Sequence[int]) -> Dict[int, int]:
+    return _parse_question_limits(
+        raw,
+        question_ids,
+        default_limit=DEFAULT_QUESTION_MAX_FOLLOWUPS,
+    )
+
+
+def _parse_question_clarifies(raw: Optional[str], question_ids: Sequence[int]) -> Dict[int, int]:
+    return _parse_question_limits(
+        raw,
+        question_ids,
+        default_limit=DEFAULT_QUESTION_MAX_CLARIFIES,
+    )
 
 
 def get_conn() -> sqlite3.Connection:
@@ -1247,21 +1287,25 @@ def create_interview(
 
         selected_ids = [int(item["id"]) for item in bank]
         question_count = len(selected_ids)
-        normalized_question_followups = _normalize_question_followups(
+        (
+            normalized_question_followups,
+            normalized_question_clarifies,
+        ) = _normalize_question_followups(
             question_followups=question_followups,
             question_ids=selected_ids,
         )
         serialized_question_followups = _serialize_question_followups(normalized_question_followups)
+        serialized_question_clarifies = _serialize_question_followups(normalized_question_clarifies)
 
         token = _ensure_unique_interview_token(conn)
         conn.execute(
             """
             INSERT INTO interviews (
                 token, candidate_name, job_uid, question_bank_version, duration_minutes, question_count, required_checkins,
-                selected_question_ids, question_followup_limits, notes, status, created_at, updated_at,
+                selected_question_ids, question_followup_limits, question_clarify_limits, notes, status, created_at, updated_at,
                 expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -1273,6 +1317,7 @@ def create_interview(
                 serialized_checkins,
                 ",".join(str(i) for i in selected_ids),
                 serialized_question_followups,
+                serialized_question_clarifies,
                 notes,
                 INTERVIEW_STATUS_PENDING,
                 now,
@@ -1298,7 +1343,11 @@ def create_interview(
         "question_count": question_count,
         "required_checkins": normalized_checkins,
         "question_followups": [
-            {"question_id": qid, "max_followups": normalized_question_followups[qid]}
+            {
+                "question_id": qid,
+                "max_followups": normalized_question_followups[qid],
+                "max_clarifies": normalized_question_clarifies[qid],
+            }
             for qid in selected_ids
         ],
         "notes": notes,
@@ -1399,6 +1448,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             if chunk.strip().isdigit()
         ]
         followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
+        clarify_limits = _parse_question_clarifies(row["question_clarify_limits"], selected_ids)
         question_rows = _load_job_questions(
             conn,
             row["job_uid"],
@@ -1417,6 +1467,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
                     "scenario": str(question["scenario"] or "").strip(),
                     "question": question["question"],
                     "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
+                    "max_clarifies": clarify_limits.get(qid, DEFAULT_QUESTION_MAX_CLARIFIES),
                 }
             )
         scorecard = _load_interview_scorecard_in_conn(conn, token)
@@ -1576,7 +1627,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
         row = conn.execute(
             """
             SELECT i.token, i.candidate_name, i.job_uid, i.status, i.selected_question_ids,
-                   i.question_bank_version, i.question_followup_limits, i.reconnect_deadline_at, i.expires_at,
+                   i.question_bank_version, i.question_followup_limits, i.question_clarify_limits, i.reconnect_deadline_at, i.expires_at,
                    j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -1607,6 +1658,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             if chunk.strip().isdigit()
         ]
         followup_limits = _parse_question_followups(row["question_followup_limits"], selected_ids)
+        clarify_limits = _parse_question_clarifies(row["question_clarify_limits"], selected_ids)
         questions = _load_job_questions(
             conn,
             row["job_uid"],
@@ -1626,6 +1678,7 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                     "main_question": q["question"],
                     "evidence": _build_question_evidence(q),
                     "max_followups": followup_limits.get(qid, DEFAULT_QUESTION_MAX_FOLLOWUPS),
+                    "max_clarifies": clarify_limits.get(qid, DEFAULT_QUESTION_MAX_CLARIFIES),
                 }
             )
 
@@ -1639,6 +1692,9 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
                         "evidence": _build_question_evidence(q),
                         "max_followups": followup_limits.get(
                             int(q["id"]), DEFAULT_QUESTION_MAX_FOLLOWUPS
+                        ),
+                        "max_clarifies": clarify_limits.get(
+                            int(q["id"]), DEFAULT_QUESTION_MAX_CLARIFIES
                         ),
                     }
                 )

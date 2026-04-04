@@ -5,8 +5,8 @@ from interview_judge import InterviewJudge
 
 async def _always_followup(*args, **kwargs):
     return (
-        '{"move_forward": false, "need_follow_up": true, '
-        '"follow_up_question": "请补充细节", "reason": "mock", "coverage_score": 0.3}'
+        '{"next_action": "follow_up", "next_prompt": "请补充细节", '
+        '"reason": "mock", "coverage_score": 0.3}'
     )
 
 
@@ -16,8 +16,8 @@ async def _broken_json(*args, **kwargs):
 
 async def _conflicting_json(*args, **kwargs):
     return (
-        '{"move_forward": true, "need_follow_up": true, '
-        '"follow_up_question": "继续追问", "reason": "conflict", "coverage_score": 0.9}'
+        '{"next_action": "invalid", "next_prompt": "继续追问", '
+        '"reason": "conflict", "coverage_score": 0.9}'
     )
 
 
@@ -25,10 +25,12 @@ def test_empty_answer_prefers_followup():
     async def _run():
         judge = InterviewJudge(llm_decider=_always_followup)
         decision = await judge.decide(
-            question="介绍一个项目", candidate_answer="嗯", follow_up_count=0
+            question="介绍一个项目",
+            candidate_answer="嗯",
+            follow_up_count=0,
+            clarify_count=0,
         )
-        assert decision.move_forward is False
-        assert decision.need_follow_up is True
+        assert decision.next_action == "follow_up"
         assert decision.reason == "answer_too_short"
 
     asyncio.run(_run())
@@ -41,9 +43,9 @@ def test_llm_parse_failure_fallback():
             question="介绍一个项目",
             candidate_answer="我负责过需求分析和上线",
             follow_up_count=0,
+            clarify_count=0,
         )
-        assert decision.move_forward is False
-        assert decision.need_follow_up is True
+        assert decision.next_action == "follow_up"
         assert decision.reason == "llm_parse_failure"
 
     asyncio.run(_run())
@@ -56,15 +58,14 @@ def test_decide_output_contract():
             question="介绍一个项目",
             candidate_answer="我负责需求分析、开发和上线复盘",
             follow_up_count=0,
+            clarify_count=0,
         )
-        assert isinstance(decision.move_forward, bool)
-        assert isinstance(decision.need_follow_up, bool)
-        assert isinstance(decision.follow_up_question, str)
+        assert decision.next_action in {"next_question", "follow_up", "clarify"}
+        assert isinstance(decision.next_prompt, str)
         assert isinstance(decision.reason, str)
         assert 0.0 <= decision.coverage_score <= 1.0
-        assert decision.move_forward is True
-        assert decision.need_follow_up is False
-        assert decision.follow_up_question == ""
+        assert decision.next_action == "follow_up"
+        assert decision.next_prompt == "继续追问"
 
     asyncio.run(_run())
 
@@ -79,10 +80,10 @@ def test_semantic_heuristic_uses_question_and_scoring_boundary():
                 "然后确认客户是否认可，并跟进执行结果。"
             ),
             follow_up_count=0,
+            clarify_count=0,
             evidence={"scoring_boundary": "是否先厘清事实再给可执行方案"},
         )
-        assert decision.move_forward is True
-        assert decision.need_follow_up is False
+        assert decision.next_action == "next_question"
         assert decision.coverage_score >= 0.2
 
     asyncio.run(_run())
@@ -95,14 +96,14 @@ def test_semantic_heuristic_does_not_use_reference_or_best_standard():
             question="你如何处理客户投诉？",
             candidate_answer="我主要强调高净值、私域和成交转化。",
             follow_up_count=0,
+            clarify_count=0,
             evidence={
                 "scoring_boundary": "是否先厘清事实再给可执行方案",
                 "reference_answer": "高净值、私域、成交转化",
                 "best_standard": "高净值、私域、成交转化",
             },
         )
-        assert decision.move_forward is False
-        assert decision.need_follow_up is True
+        assert decision.next_action == "follow_up"
         assert decision.reason == "semantic_need_more_detail"
 
     asyncio.run(_run())
@@ -116,8 +117,8 @@ def test_responses_adapter_path_uses_endpoint_and_thinking():
         async def complete_text(self, **kwargs):
             self.calls.append(kwargs)
             return (
-                '{"move_forward": true, "need_follow_up": false, '
-                '"follow_up_question": "", "reason": "ok", "coverage_score": 0.9}'
+                '{"next_action": "next_question", "next_prompt": "", '
+                '"reason": "ok", "coverage_score": 0.9}'
             )
 
     async def _run():
@@ -132,13 +133,30 @@ def test_responses_adapter_path_uses_endpoint_and_thinking():
             question="介绍项目",
             candidate_answer="我负责拆解目标、推进开发并复盘结果。",
             follow_up_count=0,
+            clarify_count=0,
             evidence={"scoring_boundary": "目标、动作、结果"},
         )
-        assert decision.move_forward is True
+        assert decision.next_action == "next_question"
         assert adapter.calls
         call = adapter.calls[0]
         assert call["model"] == "ep-judge"
         assert call["thinking_type"] == "enabled"
         assert call["reasoning_effort"] == "minimal"
+
+    asyncio.run(_run())
+
+
+def test_clarify_request_prefers_clarify_action():
+    async def _run():
+        judge = InterviewJudge(llm_decider=_always_followup)
+        decision = await judge.decide(
+            question="介绍一个你做过的项目",
+            candidate_answer="这道题我没太听懂，能解释一下吗？",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+        assert decision.next_action == "clarify"
+        assert decision.reason == "candidate_requested_clarification"
+        assert decision.next_prompt
 
     asyncio.run(_run())

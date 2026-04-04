@@ -69,6 +69,7 @@ export type InterviewDetail = {
     scenario?: string;
     question: string;
     max_followups: number;
+    max_clarifies: number;
   }>;
   required_checkins: CheckInKey[];
   interview_link: string;
@@ -188,7 +189,11 @@ export const adminApi = {
   createInterview: (payload: {
     candidate_name: string;
     job_uid: string;
-    question_followups: Array<{ question_id: number; max_followups: number }>;
+    question_followups: Array<{
+      question_id: number;
+      max_followups: number;
+      max_clarifies: number;
+    }>;
     notes?: string;
     required_checkins?: CheckInKey[];
   }) =>

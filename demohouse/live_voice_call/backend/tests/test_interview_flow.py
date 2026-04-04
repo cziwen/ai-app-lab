@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import List
 
 from interview_flow import (
+    ASK_CLARIFY,
     ASK_FOLLOWUP,
     ASK_QUESTION,
     DONE,
@@ -14,9 +15,24 @@ from interview_judge import Decision
 
 
 QUESTIONS = [
-    {"question_id": "q1", "main_question": "请做一个简短自我介绍。", "max_followups": 2},
-    {"question_id": "q2", "main_question": "介绍一个你主导的项目。", "max_followups": 2},
-    {"question_id": "q3", "main_question": "讲讲你如何处理复杂问题。", "max_followups": 2},
+    {
+        "question_id": "q1",
+        "main_question": "请做一个简短自我介绍。",
+        "max_followups": 2,
+        "max_clarifies": 2,
+    },
+    {
+        "question_id": "q2",
+        "main_question": "介绍一个你主导的项目。",
+        "max_followups": 2,
+        "max_clarifies": 2,
+    },
+    {
+        "question_id": "q3",
+        "main_question": "讲讲你如何处理复杂问题。",
+        "max_followups": 2,
+        "max_clarifies": 2,
+    },
 ]
 
 
@@ -24,7 +40,14 @@ QUESTIONS = [
 class SequenceJudge:
     decisions: List[Decision]
 
-    async def decide(self, question, candidate_answer, follow_up_count, evidence=None):
+    async def decide(
+        self,
+        question,
+        candidate_answer,
+        follow_up_count,
+        clarify_count,
+        evidence=None,
+    ):
         if not self.decisions:
             raise RuntimeError("no more decisions")
         return self.decisions.pop(0)
@@ -37,6 +60,8 @@ async def _bootstrap_to_wait(flow: InterviewFlow):
         await flow.produce_interviewer_message()
     elif flow.state == ASK_FOLLOWUP:
         await flow.produce_interviewer_message()
+    elif flow.state == ASK_CLARIFY:
+        await flow.produce_interviewer_message()
     assert flow.state == WAIT_ANSWER
 
 
@@ -44,9 +69,9 @@ def test_happy_path_all_move_forward():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
             ]
         )
         flow = InterviewFlow(questions=QUESTIONS, judge=judge)
@@ -67,10 +92,10 @@ def test_followup_loop_then_move_forward():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(False, True, "请补充你的职责", "need_more", 0.3),
-                Decision(True, False, "", "enough", 0.8),
-                Decision(True, False, "", "ok", 0.8),
-                Decision(True, False, "", "ok", 0.8),
+                Decision("follow_up", "请补充你的职责", "need_more", 0.3),
+                Decision("next_question", "", "enough", 0.8),
+                Decision("next_question", "", "ok", 0.8),
+                Decision("next_question", "", "ok", 0.8),
             ]
         )
         flow = InterviewFlow(questions=QUESTIONS, judge=judge)
@@ -86,15 +111,38 @@ def test_followup_loop_then_move_forward():
     asyncio.run(_run())
 
 
+def test_clarify_loop_then_move_forward():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[
+                Decision("clarify", "我补充一下题意：请重点说你的个人行动和结果。", "clarify", 0.2),
+                Decision("next_question", "", "enough", 0.8),
+                Decision("next_question", "", "ok", 0.8),
+                Decision("next_question", "", "ok", 0.8),
+            ]
+        )
+        flow = InterviewFlow(questions=QUESTIONS, judge=judge)
+
+        await _bootstrap_to_wait(flow)
+        first = await flow.receive_candidate_answer("这题我没听懂")
+        assert first.state_after == ASK_CLARIFY
+
+        await _bootstrap_to_wait(flow)
+        second = await flow.receive_candidate_answer("我负责拆解需求并推进上线")
+        assert second.state_after == ASK_QUESTION
+
+    asyncio.run(_run())
+
+
 def test_max_followups_forces_move_forward():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(False, True, "再具体一点", "mock", 0.1),
-                Decision(False, True, "还是不够具体", "mock", 0.1),
-                Decision(False, True, "请补充结果", "mock", 0.1),
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
+                Decision("follow_up", "再具体一点", "mock", 0.1),
+                Decision("follow_up", "还是不够具体", "mock", 0.1),
+                Decision("follow_up", "请补充结果", "mock", 0.1),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
             ]
         )
         flow = InterviewFlow(questions=QUESTIONS, judge=judge)
@@ -116,13 +164,52 @@ def test_max_followups_forces_move_forward():
     asyncio.run(_run())
 
 
+def test_max_clarifies_forces_move_forward():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[
+                Decision("clarify", "这题是想了解你的真实经历。", "mock", 0.1),
+                Decision("clarify", "继续澄清", "mock", 0.1),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+            ]
+        )
+        one_question = [
+            {
+                "question_id": "q1",
+                "main_question": "请做一个简短自我介绍。",
+                "max_followups": 2,
+                "max_clarifies": 1,
+            },
+            {
+                "question_id": "q2",
+                "main_question": "介绍一个你主导的项目。",
+                "max_followups": 2,
+                "max_clarifies": 2,
+            },
+        ]
+        flow = InterviewFlow(questions=one_question, judge=judge)
+
+        await _bootstrap_to_wait(flow)
+        r1 = await flow.receive_candidate_answer("这题我不太理解")
+        assert r1.state_after == ASK_CLARIFY
+
+        await _bootstrap_to_wait(flow)
+        r2 = await flow.receive_candidate_answer("我还是没懂")
+        assert r2.state_after == ASK_QUESTION
+        assert r2.decision is not None
+        assert r2.decision.reason == "clarify_limit_reached"
+
+    asyncio.run(_run())
+
+
 def test_last_question_wraps_up():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
             ]
         )
         flow = InterviewFlow(questions=QUESTIONS, judge=judge)
@@ -138,9 +225,7 @@ def test_last_question_wraps_up():
 
 def test_global_turn_limit_forces_wrap_up():
     async def _run():
-        judge = SequenceJudge(
-            decisions=[Decision(False, True, "追问", "mock", 0.2)]
-        )
+        judge = SequenceJudge(decisions=[Decision("follow_up", "追问", "mock", 0.2)])
         flow = InterviewFlow(questions=QUESTIONS, judge=judge, global_turn_limit=1)
 
         await _bootstrap_to_wait(flow)
@@ -154,11 +239,14 @@ def test_global_turn_limit_forces_wrap_up():
 
 def test_intro_mentions_dynamic_question_count():
     async def _run():
-        judge = SequenceJudge(
-            decisions=[Decision(True, False, "", "ok", 0.9)]
-        )
+        judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])
         one_question = [
-            {"question_id": "q1", "main_question": "请做一个简短自我介绍。", "max_followups": 0}
+            {
+                "question_id": "q1",
+                "main_question": "请做一个简短自我介绍。",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            }
         ]
         flow = InterviewFlow(questions=one_question, judge=judge)
 
@@ -172,14 +260,24 @@ def test_export_question_answer_snapshots_aggregates_answers_per_question():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(False, True, "继续补充结果", "need_more", 0.3),
-                Decision(True, False, "", "enough", 0.8),
-                Decision(True, False, "", "ok", 0.9),
+                Decision("follow_up", "继续补充结果", "need_more", 0.3),
+                Decision("next_question", "", "enough", 0.8),
+                Decision("next_question", "", "ok", 0.9),
             ]
         )
         questions = [
-            {"question_id": "q1", "main_question": "介绍项目", "max_followups": 2},
-            {"question_id": "q2", "main_question": "介绍协作", "max_followups": 0},
+            {
+                "question_id": "q1",
+                "main_question": "介绍项目",
+                "max_followups": 2,
+                "max_clarifies": 2,
+            },
+            {
+                "question_id": "q2",
+                "main_question": "介绍协作",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
         ]
         flow = InterviewFlow(questions=questions, judge=judge)
 

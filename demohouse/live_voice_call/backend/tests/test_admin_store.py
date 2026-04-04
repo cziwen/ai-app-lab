@@ -46,11 +46,20 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _FakeExpiryIndex())
 
 
-def _followups_for_job(job_uid: str, *, max_followups: int = 0):
+def _followups_for_job(
+    job_uid: str,
+    *,
+    max_followups: int = 0,
+    max_clarifies: int = 0,
+):
     detail = admin_store.get_job_detail(job_uid)
     assert detail is not None
     return [
-        {"question_id": int(question["id"]), "max_followups": max_followups}
+        {
+            "question_id": int(question["id"]),
+            "max_followups": max_followups,
+            "max_clarifies": max_clarifies,
+        }
         for question in detail["questions"]
     ]
 
@@ -100,6 +109,7 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
         "question" in item and item["question"] for item in interview_detail["selected_questions"]
     )
     assert all("max_followups" in item for item in interview_detail["selected_questions"])
+    assert all("max_clarifies" in item for item in interview_detail["selected_questions"])
 
 
 def test_update_job_text_only_keeps_question_bank_version(monkeypatch, tmp_path):
@@ -450,6 +460,7 @@ def test_start_interview_session_uses_selected_questions_only(monkeypatch, tmp_p
     assert len(session.questions) == 2
     assert all(item["question_id"] != "intro_fixed" for item in session.questions)
     assert all("max_followups" in item for item in session.questions)
+    assert all("max_clarifies" in item for item in session.questions)
     assert all("must_cover" in item["evidence"] for item in session.questions)
 
 
@@ -614,6 +625,35 @@ def test_question_followups_out_of_range_raises(monkeypatch, tmp_path):
         assert str(exc) == "invalid_question_followups"
 
 
+def test_question_clarifies_out_of_range_raises(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目1", "答案1")],
+    )
+
+    followups = _followups_for_job(job["job_uid"])
+    followups[0]["max_clarifies"] = 4
+    try:
+        admin_store.create_interview(
+            candidate_name="候选人",
+            job_uid=job["job_uid"],
+            notes=None,
+            question_followups=followups,
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "invalid_question_followups"
+
+
 def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
@@ -703,6 +743,7 @@ def test_schema_migration_adds_question_rubric_columns(monkeypatch, tmp_path):
     assert "comment_requirement" in question_columns
     assert "bank_version" in question_columns
     assert "question_followup_limits" in interview_columns
+    assert "question_clarify_limits" in interview_columns
     assert "expires_at" in interview_columns
     assert "completed_reason" in interview_columns
     assert "question_bank_version" in interview_columns
