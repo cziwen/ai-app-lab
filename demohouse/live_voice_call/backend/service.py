@@ -989,10 +989,34 @@ class VoiceBotService(BaseModel):
         if next_question_or_followup:
             parts.append(f"[下一步内容] {next_question_or_followup}")
 
+        if flow_state == ASK_QUESTION:
+            parts.append(
+                "[题干保真要求] 你可以口语化表达[下一步内容]，但必须保留全部关键信息："
+                "活动名/业务名词、全部数字、比较关系、主体对象。"
+                "禁止省略、合并、替换任何关键数字或条件。"
+            )
+
+        if flow_state == ASK_CLARIFY:
+            parts.append(
+                "[题意澄清要求] 若候选人是在请求重复题目或没听清，先复述题干关键信息，再做一句简短解释；"
+                "解释不得新增考察点。"
+            )
+
         if flow_state == WRAP_UP:
             parts.append("[指令] 面试即将结束，请做结束语。")
 
         return "\n".join(parts)
+
+    def _flow_state_origin(self, flow_state: str) -> str:
+        if flow_state == ASK_QUESTION:
+            return "bank_question"
+        if flow_state == ASK_FOLLOWUP:
+            return "follow_up"
+        if flow_state == ASK_CLARIFY:
+            return "clarify"
+        if flow_state == WRAP_UP:
+            return "wrap_up"
+        return "unknown"
 
     def _calc_segment_context_char_len(self, interview_context: str) -> int:
         history_messages = self._history_for_current_segment()
@@ -1194,6 +1218,9 @@ class VoiceBotService(BaseModel):
                         next_question_or_followup=next_interviewer_text,
                         flow_state=flow.state,
                     )
+                    origin = self._flow_state_origin(flow.state)
+                    prompt_constrained = flow.state in (ASK_QUESTION, ASK_CLARIFY)
+                    question_delivery_mode = "prompt_constrained_paraphrase"
                     segment_id = self.active_context_segment.strip() or "-"
                     segment_context_len = self._calc_segment_context_char_len(interview_context)
                     self._log(
@@ -1201,6 +1228,9 @@ class VoiceBotService(BaseModel):
                     )
                     self._log(
                         "[Interview] LLM #2 context stats: "
+                        f"origin={origin} "
+                        f"question_delivery_mode={question_delivery_mode} "
+                        f"prompt_constrained={prompt_constrained} "
                         f"segment_id={segment_id} "
                         f"context_len={len(interview_context)} "
                         f"segment_context_len={segment_context_len}"
@@ -1211,6 +1241,9 @@ class VoiceBotService(BaseModel):
                             "context_len": len(interview_context),
                             "segment_context_len": segment_context_len,
                             "segment_id": segment_id,
+                            "origin": origin,
+                            "question_delivery_mode": question_delivery_mode,
+                            "prompt_constrained": prompt_constrained,
                         },
                     )
 

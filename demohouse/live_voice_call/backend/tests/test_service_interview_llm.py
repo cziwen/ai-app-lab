@@ -4,6 +4,7 @@ from arkitect.core.component.llm.model import ArkMessage
 
 from interview_flow import QuestionAnswerSnapshot
 from interview_judge import Decision
+from prompt import INTERVIEWER_SYSTEM_PROMPT
 import service
 
 
@@ -365,6 +366,82 @@ def test_build_interview_context_wrap_up_still_works():
     )
 
     assert "[指令] 面试即将结束，请做结束语。" in context
+
+
+def test_interviewer_system_prompt_contains_question_fidelity_rules():
+    assert "必须保留全部关键信息" in INTERVIEWER_SYSTEM_PROMPT
+    assert "不得省略、合并、替换任何关键数字或条件" in INTERVIEWER_SYSTEM_PROMPT
+    assert "优先复述题干关键信息，再做简短解释" in INTERVIEWER_SYSTEM_PROMPT
+
+
+def test_build_interview_context_ask_question_injects_fidelity_requirements():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    context = svc._build_interview_context(
+        decision=Decision(
+            next_action="next_question",
+            next_prompt="",
+            reason="semantic_enough_coverage",
+            coverage_score=0.8,
+        ),
+        next_question_or_followup="“满500送100”活动后，总销售额增长30%，但客单价从580降到520，可能原因是什么？",
+        flow_state=service.ASK_QUESTION,
+    )
+
+    assert "[题干保真要求]" in context
+    assert "必须保留全部关键信息" in context
+    assert "禁止省略、合并、替换任何关键数字或条件" in context
+
+
+def test_build_interview_context_ask_clarify_injects_repeat_first_requirements():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    context = svc._build_interview_context(
+        decision=Decision(
+            next_action="clarify",
+            next_prompt="题目是分析活动后的销售额和客单价变化。",
+            reason="candidate_requested_clarification",
+            coverage_score=0.0,
+        ),
+        next_question_or_followup="我再解释一下这道题。",
+        flow_state=service.ASK_CLARIFY,
+    )
+
+    assert "[题意澄清要求]" in context
+    assert "先复述题干关键信息，再做一句简短解释" in context
+    assert "解释不得新增考察点" in context
+
+
+def test_flow_state_origin_mapping():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+    assert svc._flow_state_origin(service.ASK_QUESTION) == "bank_question"
+    assert svc._flow_state_origin(service.ASK_FOLLOWUP) == "follow_up"
+    assert svc._flow_state_origin(service.ASK_CLARIFY) == "clarify"
+    assert svc._flow_state_origin(service.WRAP_UP) == "wrap_up"
 
 
 def test_calc_segment_context_char_len_accumulates_followups_and_scene_subquestions():
