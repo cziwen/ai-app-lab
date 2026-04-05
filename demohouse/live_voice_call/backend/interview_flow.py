@@ -73,12 +73,32 @@ class InterviewFlow:
             for item in questions
         ]
         self.total_questions = len(self.questions)
+        self.total_scenarios = self._count_scenarios(questions)
 
         self.state = INTRO
         self.current_question_index = 0
         self.total_candidate_turns = 0
         self.latest_follow_up: str = ""
         self.latest_clarify: str = ""
+
+    @staticmethod
+    def _count_scenarios(questions: List[Dict[str, Any]]) -> int:
+        count = 0
+        previous_scene = ""
+        for item in questions:
+            scenario = str(item.get("scenario", "") or "").strip()
+            evidence = item.get("evidence")
+            if not scenario and isinstance(evidence, dict):
+                scenario = str(evidence.get("scenario", "") or "").strip()
+
+            if scenario:
+                if scenario != previous_scene:
+                    count += 1
+            else:
+                # Empty scenario is treated as a standalone segment per question.
+                count += 1
+            previous_scene = scenario
+        return count
 
     @property
     def is_done(self) -> bool:
@@ -98,8 +118,8 @@ class InterviewFlow:
                 state_before=before,
                 state_after=self.state,
                 interviewer_text=(
-                    f"你好，欢迎参加面试。本场共{self.total_questions}道题，"
-                    "我会根据你的回答决定是否追问，必要时也会澄清题意。"
+                    f"你好，欢迎参加面试。本场共{self.total_scenarios}个场景，"
+                    "我会围绕每个场景视情况逐步提问，必要时也会澄清题意。"
                 ),
                 decision=None,
                 question_id=None,

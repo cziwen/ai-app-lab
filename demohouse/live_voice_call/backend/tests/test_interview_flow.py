@@ -237,7 +237,7 @@ def test_global_turn_limit_forces_wrap_up():
     asyncio.run(_run())
 
 
-def test_intro_mentions_dynamic_question_count():
+def test_intro_mentions_dynamic_scenario_count():
     async def _run():
         judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])
         one_question = [
@@ -251,7 +251,93 @@ def test_intro_mentions_dynamic_question_count():
         flow = InterviewFlow(questions=one_question, judge=judge)
 
         intro = await flow.produce_interviewer_message()
-        assert "本场共1道题" in intro.interviewer_text
+        assert "本场共1个场景" in intro.interviewer_text
+
+    asyncio.run(_run())
+
+
+def test_intro_counts_consecutive_same_scene_as_one_scenario():
+    async def _run():
+        judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])
+        questions = [
+            {
+                "question_id": "q1",
+                "main_question": "介绍项目背景",
+                "scenario": "项目复盘",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+            {
+                "question_id": "q2",
+                "main_question": "介绍你在项目中的职责",
+                "scenario": "项目复盘",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+        ]
+        flow = InterviewFlow(questions=questions, judge=judge)
+
+        intro = await flow.produce_interviewer_message()
+        assert "本场共1个场景" in intro.interviewer_text
+
+    asyncio.run(_run())
+
+
+def test_intro_counts_empty_scene_per_question():
+    async def _run():
+        judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])
+        questions = [
+            {
+                "question_id": "q1",
+                "main_question": "问题1",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+            {
+                "question_id": "q2",
+                "main_question": "问题2",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+        ]
+        flow = InterviewFlow(questions=questions, judge=judge)
+
+        intro = await flow.produce_interviewer_message()
+        assert "本场共2个场景" in intro.interviewer_text
+
+    asyncio.run(_run())
+
+
+def test_intro_counts_non_consecutive_same_scene_as_new_segment():
+    async def _run():
+        judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])
+        questions = [
+            {
+                "question_id": "q1",
+                "main_question": "项目问题A",
+                "scenario": "项目复盘",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+            {
+                "question_id": "q2",
+                "main_question": "故障问题B",
+                "scenario": "故障处理",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+            {
+                "question_id": "q3",
+                "main_question": "项目问题C",
+                "scenario": "项目复盘",
+                "max_followups": 0,
+                "max_clarifies": 0,
+            },
+        ]
+        flow = InterviewFlow(questions=questions, judge=judge)
+
+        intro = await flow.produce_interviewer_message()
+        assert "本场共3个场景" in intro.interviewer_text
 
     asyncio.run(_run())
 
