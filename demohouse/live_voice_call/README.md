@@ -38,7 +38,7 @@
 2. **面试流程控制**
    - **状态机设计**：INTRO → ASK_QUESTION → WAIT_ANSWER → EVAL_ANSWER → DECIDE → (循环/结束)
    - **智能决策**：根据覆盖度评分自动决定是否追问（阈值 0.7）
-   - **追问限制**：每题最多 2 次追问，全局最多 20 轮对话
+   - **轮次限制**：全局候选人发言轮次默认 300（`INTERVIEW_GLOBAL_TURN_LIMIT` 可配置）
 
 3. **并发控制系统**
    - **准入控制**：限制同时进行的面试数量（默认 5 个）
@@ -122,6 +122,7 @@
 
     # 并发控制
     export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数
+    export INTERVIEW_GLOBAL_TURN_LIMIT=300  # 全局候选人发言轮次上限
     export INTERVIEW_OCCUPANCY_TTL_SECONDS=30      # token 占用 TTL（秒）
     export INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS=10  # 占用续期间隔（秒）
     export INTERVIEW_EXPIRY_SWEEP_SECONDS=10       # 过期 token 扫描周期（秒）

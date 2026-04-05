@@ -49,6 +49,7 @@ from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient, SaucASRFullServer
 StateInProgress = "InProgress"
 StateIdle = "Idle"
 DEFAULT_ASR_SILENCE_TIMEOUT_MS = 8000
+DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 
 
 def _load_asr_silence_timeout_ms() -> int:
@@ -69,6 +70,27 @@ def _load_asr_silence_timeout_ms() -> int:
             f"value={DEFAULT_ASR_SILENCE_TIMEOUT_MS}"
         )
         return DEFAULT_ASR_SILENCE_TIMEOUT_MS
+    return parsed
+
+
+def _load_interview_global_turn_limit() -> int:
+    raw_value = (os.getenv("INTERVIEW_GLOBAL_TURN_LIMIT") or "").strip()
+    if not raw_value:
+        return DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "INTERVIEW_GLOBAL_TURN_LIMIT invalid, fallback to default "
+            f"value={DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT}"
+        )
+        return DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT
+    if parsed <= 0:
+        INFO(
+            "INTERVIEW_GLOBAL_TURN_LIMIT must be positive, fallback to default "
+            f"value={DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT}"
+        )
+        return DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT
     return parsed
 
 
@@ -210,7 +232,7 @@ class VoiceBotService(BaseModel):
             self.interview_flow = InterviewFlow(
                 questions=flow_questions,
                 judge=self.interview_judge,
-                global_turn_limit=20,
+                global_turn_limit=_load_interview_global_turn_limit(),
             )
             self._build_question_context_segments(flow_questions)
 

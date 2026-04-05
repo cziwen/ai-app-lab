@@ -428,3 +428,37 @@ def test_calc_segment_context_char_len_non_scene_questions_do_not_cross_contamin
     svc._activate_context_segment("q2")
     q2_len = svc._calc_segment_context_char_len("Q2-context")
     assert q2_len == len("Q2-context")
+
+
+def test_load_interview_global_turn_limit_default(monkeypatch):
+    monkeypatch.delenv("INTERVIEW_GLOBAL_TURN_LIMIT", raising=False)
+    assert service._load_interview_global_turn_limit() == 300
+
+
+def test_load_interview_global_turn_limit_invalid_fallback(monkeypatch):
+    monkeypatch.setenv("INTERVIEW_GLOBAL_TURN_LIMIT", "abc")
+    assert service._load_interview_global_turn_limit() == 300
+    monkeypatch.setenv("INTERVIEW_GLOBAL_TURN_LIMIT", "0")
+    assert service._load_interview_global_turn_limit() == 300
+    monkeypatch.setenv("INTERVIEW_GLOBAL_TURN_LIMIT", "-1")
+    assert service._load_interview_global_turn_limit() == 300
+
+
+def test_voice_bot_service_init_uses_interview_global_turn_limit_env(monkeypatch):
+    async def _run():
+        monkeypatch.setenv("INTERVIEW_GLOBAL_TURN_LIMIT", "300")
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+        )
+        await svc.init()
+        assert svc.interview_flow is not None
+        assert svc.interview_flow.global_turn_limit == 300
+
+    asyncio.run(_run())
