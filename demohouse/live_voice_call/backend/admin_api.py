@@ -1,7 +1,11 @@
 import asyncio
 import csv
+import hashlib
 import io
+import logging
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -12,6 +16,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from score_scale import parse_score_scale
 
+from admin_login_guard import AdminLoginGuard, load_admin_login_guard_config
 from admin_store import (
     ADMIN_SESSION_COOKIE,
     create_admin_session,
@@ -38,6 +43,7 @@ CSV_TEMPLATE_COLUMNS = [
     "评分标准",
     "最大分数",
 ]
+ADMIN_AUTH_LOGGER = logging.getLogger("admin.auth")
 
 
 def _load_cors_origins() -> List[str]:
@@ -188,6 +194,55 @@ def _session_cookie_params() -> Dict[str, Any]:
     }
 
 
+def _extract_client_ip(request: Request) -> str:
+    x_forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+    if x_forwarded_for:
+        first = x_forwarded_for.split(",", 1)[0].strip()
+        if first:
+            return first
+    if request.client and request.client.host:
+        return request.client.host
+    return "-"
+
+
+def _resolve_request_id(request: Request) -> str:
+    incoming = (request.headers.get("x-request-id") or "").strip()
+    if incoming:
+        return incoming
+    return uuid.uuid4().hex
+
+
+def _hash_username(username: str) -> str:
+    normalized = (username or "").strip().lower().encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()[:16]
+
+
+def _log_login_event(
+    *,
+    outcome: str,
+    ip: str,
+    username_hash: str,
+    fail_count_ip: int,
+    fail_count_userip: int,
+    lock_seconds: int,
+    retry_after: int,
+    latency_ms: int,
+    request_id: str,
+) -> None:
+    ADMIN_AUTH_LOGGER.info(
+        "event=admin_auth_login outcome=%s ip=%s username_hash=%s fail_count_ip=%s fail_count_userip=%s lock_seconds=%s retry_after=%s latency_ms=%s request_id=%s",
+        outcome,
+        ip,
+        username_hash,
+        fail_count_ip,
+        fail_count_userip,
+        lock_seconds,
+        retry_after,
+        latency_ms,
+        request_id,
+    )
+
+
 class LoginBody(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
@@ -209,8 +264,10 @@ class CreateInterviewBody(BaseModel):
 
 def create_admin_app(
     active_interview_metrics_provider: Optional[Callable[[], Dict[str, int]]] = None,
+    login_guard: Optional[AdminLoginGuard] = None,
 ) -> FastAPI:
     ensure_default_admin()
+    auth_guard = login_guard or AdminLoginGuard(load_admin_login_guard_config())
 
     app = FastAPI(title="AI Interview Admin API", version="1.0.0")
     app.add_middleware(
@@ -233,12 +290,68 @@ def create_admin_app(
         return {"status": "ok"}
 
     @app.post("/api/admin/auth/login")
-    async def login(body: LoginBody, response: Response) -> Dict[str, Any]:
-        admin_id = verify_admin_credentials(body.username.strip(), body.password)
+    async def login(body: LoginBody, request: Request, response: Response) -> Dict[str, Any]:
+        started = time.monotonic()
+        username = body.username.strip()
+        ip = _extract_client_ip(request)
+        request_id = _resolve_request_id(request)
+        username_hash = _hash_username(username)
+
+        fail_count_ip, fail_count_userip = auth_guard.get_failure_counts(username, ip)
+        locked, retry_after = auth_guard.is_locked(username, ip)
+        if locked:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            _log_login_event(
+                outcome="locked",
+                ip=ip,
+                username_hash=username_hash,
+                fail_count_ip=fail_count_ip,
+                fail_count_userip=fail_count_userip,
+                lock_seconds=retry_after,
+                retry_after=retry_after,
+                latency_ms=latency_ms,
+                request_id=request_id,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="请求过于频繁，请稍后重试",
+                headers={"Retry-After": str(max(1, retry_after))},
+            )
+
+        admin_id = verify_admin_credentials(username, body.password)
         if not admin_id:
+            fail_count_ip, fail_count_userip, lock_seconds = auth_guard.record_failure(
+                username, ip
+            )
+            latency_ms = int((time.monotonic() - started) * 1000)
+            _log_login_event(
+                outcome="invalid_credentials",
+                ip=ip,
+                username_hash=username_hash,
+                fail_count_ip=fail_count_ip,
+                fail_count_userip=fail_count_userip,
+                lock_seconds=lock_seconds,
+                retry_after=0,
+                latency_ms=latency_ms,
+                request_id=request_id,
+            )
             raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+        auth_guard.clear_success(username, ip)
         session_token = create_admin_session(admin_id)
         response.set_cookie(ADMIN_SESSION_COOKIE, session_token, **_session_cookie_params())
+        latency_ms = int((time.monotonic() - started) * 1000)
+        _log_login_event(
+            outcome="success",
+            ip=ip,
+            username_hash=username_hash,
+            fail_count_ip=0,
+            fail_count_userip=0,
+            lock_seconds=0,
+            retry_after=0,
+            latency_ms=latency_ms,
+            request_id=request_id,
+        )
         return {"ok": True}
 
     @app.post("/api/admin/auth/logout")

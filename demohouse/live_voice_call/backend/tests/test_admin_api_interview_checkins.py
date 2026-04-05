@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import admin_api
+import admin_login_guard
 import admin_store
 
 
@@ -20,6 +22,92 @@ class _FakeExpiryIndex:
 
     def due_tokens(self, now_ms=None, *, limit=200):
         return []
+
+
+class _FakeRedisPipeline:
+    def __init__(self, redis):
+        self.redis = redis
+        self.ops = []
+
+    def incr(self, key: str):
+        self.ops.append(("incr", key))
+        return self
+
+    def expire(self, key: str, seconds: int):
+        self.ops.append(("expire", key, seconds))
+        return self
+
+    def execute(self):
+        results = []
+        for op in self.ops:
+            if op[0] == "incr":
+                results.append(self.redis.incr(op[1]))
+            elif op[0] == "expire":
+                results.append(self.redis.expire(op[1], op[2]))
+        self.ops = []
+        return results
+
+
+class _FakeRedis:
+    def __init__(self):
+        self._values = {}
+        self._expires_at = {}
+
+    def _sweep(self, key: str):
+        expires_at = self._expires_at.get(key)
+        if expires_at is None:
+            return
+        if time.time() >= expires_at:
+            self._values.pop(key, None)
+            self._expires_at.pop(key, None)
+
+    def pipeline(self):
+        return _FakeRedisPipeline(self)
+
+    def incr(self, key: str):
+        self._sweep(key)
+        current = int(self._values.get(key, "0"))
+        current += 1
+        self._values[key] = str(current)
+        return current
+
+    def expire(self, key: str, seconds: int):
+        self._sweep(key)
+        if key not in self._values:
+            return 0
+        self._expires_at[key] = time.time() + max(0, int(seconds))
+        return 1
+
+    def setex(self, key: str, seconds: int, value: str):
+        self._values[key] = str(value)
+        self._expires_at[key] = time.time() + max(0, int(seconds))
+        return True
+
+    def ttl(self, key: str):
+        self._sweep(key)
+        if key not in self._values:
+            return -2
+        expires_at = self._expires_at.get(key)
+        if expires_at is None:
+            return -1
+        return max(0, int(expires_at - time.time()))
+
+    def mget(self, *keys):
+        values = []
+        for key in keys:
+            self._sweep(key)
+            values.append(self._values.get(key))
+        return values
+
+    def delete(self, *keys):
+        deleted = 0
+        for key in keys:
+            self._sweep(key)
+            if key in self._values:
+                deleted += 1
+                self._values.pop(key, None)
+                self._expires_at.pop(key, None)
+        return deleted
 
 
 def _setup_tmp_store(monkeypatch, tmp_path: Path):
@@ -49,6 +137,19 @@ def _client_with_login(monkeypatch, tmp_path: Path) -> TestClient:
     )
     assert response.status_code == 200
     return client
+
+
+def _setup_login_guard_env(monkeypatch, fake_redis: _FakeRedis, *, lock_start=5, lock_max=60):
+    monkeypatch.setenv("REDIS_URL", "redis://test")
+    monkeypatch.setenv("ADMIN_LOGIN_LOCK_START", str(lock_start))
+    monkeypatch.setenv("ADMIN_LOGIN_LOCK_MAX_SECONDS", str(lock_max))
+    monkeypatch.setenv("ADMIN_LOGIN_FAIL_WINDOW_SECONDS", "900")
+    monkeypatch.setenv("ADMIN_LOGIN_GUARD_PREFIX", "admin:login:guard")
+    monkeypatch.setattr(
+        admin_login_guard.Redis,
+        "from_url",
+        lambda *args, **kwargs: fake_redis,
+    )
 
 
 def _followups_for_job(job_uid: str):
@@ -347,3 +448,64 @@ def test_build_interview_link_requires_domain(monkeypatch):
         admin_api.build_interview_link("INT-abc123")
     assert exc.value.status_code == 500
     assert exc.value.detail == "INTERVIEW_BASE_DOMAIN missing"
+
+
+def test_admin_login_guard_returns_429_with_retry_after(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    fake_redis = _FakeRedis()
+    _setup_login_guard_env(monkeypatch, fake_redis, lock_start=5, lock_max=60)
+
+    app = admin_api.create_admin_app()
+    client = TestClient(app)
+    headers = {"X-Forwarded-For": "203.0.113.7"}
+    for _ in range(5):
+        response = client.post(
+            "/api/admin/auth/login",
+            json={"username": "admin", "password": "wrong"},
+            headers=headers,
+        )
+        assert response.status_code == 401
+
+    locked = client.post(
+        "/api/admin/auth/login",
+        json={"username": "admin", "password": "wrong"},
+        headers=headers,
+    )
+    assert locked.status_code == 429
+    assert int(locked.headers["Retry-After"]) >= 1
+
+
+def test_admin_login_guard_lock_preempts_credential_check(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+
+    class _AlwaysLockedGuard:
+        def get_failure_counts(self, username: str, ip: str):
+            return 9, 9
+
+        def is_locked(self, username: str, ip: str):
+            return True, 7
+
+        def record_failure(self, username: str, ip: str):
+            raise AssertionError("record_failure should not run while locked")
+
+        def clear_success(self, username: str, ip: str):
+            raise AssertionError("clear_success should not run while locked")
+
+    def _unexpected_verify(*args, **kwargs):
+        raise AssertionError("verify_admin_credentials should not be called")
+
+    monkeypatch.setattr(admin_api, "verify_admin_credentials", _unexpected_verify)
+    app = admin_api.create_admin_app(login_guard=_AlwaysLockedGuard())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/admin/auth/login",
+        json={"username": "admin", "password": "password123"},
+        headers={"X-Forwarded-For": "198.51.100.8"},
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"
