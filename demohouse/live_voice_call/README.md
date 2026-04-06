@@ -331,6 +331,52 @@ docker compose down
 - 候选人面试链接基址通过 `INTERVIEW_BASE_DOMAIN` 配置（只填域名，例如 `https://smartinterview.cn`）
 - 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认同源地址）
 
+## 准入与错误码行为（当前版本）
+
+当前并发控制采用 `InterviewOccupancy` 的快速准入模型，不走排队事件链路：
+
+- 准入成功：继续面试
+- 同 token 重复占用：返回 `BotError`，`code=TOKEN_ALREADY_WAITING`，并关闭连接
+- 并发满载：返回 `BotError`，`code=INTERVIEW_CAPACITY_FULL`，并关闭连接
+- 服务异常：返回 `BotError`，`code=SERVICE_UNAVAILABLE`，并关闭连接
+- token 无效：返回 `BotError`，`code=INVALID_TOKEN`，并关闭连接
+
+说明：当前版本不使用历史排队事件。
+
+## 测试与验证
+
+### 最小本地回归集
+
+建议优先运行以下 3 个测试覆盖核心链路：
+
+```shell
+cd demohouse/live_voice_call/backend
+PYTHONPATH=. pytest -q -o addopts='' \
+  tests/test_interview_flow.py \
+  tests/test_service_interview_llm.py \
+  tests/test_handler_connection_close_source.py
+```
+
+### Prompt 质量 Live QA（按需手工）
+
+`test_prompt_quality_live_api.py` 默认跳过；仅在需要做真实端点评估时开启：
+
+```shell
+cd demohouse/live_voice_call/backend
+RUN_LIVE_PROMPT_QA=1 \
+PROMPT_QA_CSV=/abs/path/to/job.csv \
+PROMPT_QA_STRICT=1 \
+pytest -q -o addopts='' tests/test_prompt_quality_live_api.py
+```
+
+可选环境变量：
+
+- `PROMPT_QA_LIMIT`：限制抽样题目数
+- `PROMPT_QA_OUTPUT`：指定报告输出路径
+- `PROMPT_QA_STRICT`：`1` 时启用严格失败规则（缺失数字/首句不含完整题干即失败）
+- `RUN_LIVE_PROMPT_QA`：`1` 时才执行 live QA
+- `PROMPT_QA_CSV`：题库 CSV 绝对路径
+
 ## WebSocket交互协议说明
 
 ### 协议格式
