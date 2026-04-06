@@ -432,10 +432,10 @@ def test_build_interview_context_wrap_up_still_works():
 
 def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "必须采用两段式表达" in INTERVIEWER_SYSTEM_PROMPT
-    assert "第一句先完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
+    assert "第一句必须逐字复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
     assert "第二句可选口语化引导" in INTERVIEWER_SYSTEM_PROMPT
-    assert "必须保留全部关键信息" in INTERVIEWER_SYSTEM_PROMPT
-    assert "不得省略、合并、替换任何关键数字或条件" in INTERVIEWER_SYSTEM_PROMPT
+    assert "不得把具体题干泛化为“这个问题/这个话题”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "必须保留题干中的全部前提、条件、对象、数字和对比关系" in INTERVIEWER_SYSTEM_PROMPT
     assert "先完整复述题干，再做一句简短解释" in INTERVIEWER_SYSTEM_PROMPT
     assert "只有收到“切换到新场景”指令时，才可以说“进入下一题/下一个场景”" in INTERVIEWER_SYSTEM_PROMPT
     assert "继续当前场景后续问题" in INTERVIEWER_SYSTEM_PROMPT
