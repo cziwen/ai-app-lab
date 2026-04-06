@@ -431,13 +431,20 @@ def test_build_interview_context_wrap_up_still_works():
 
 
 def test_interviewer_system_prompt_contains_question_fidelity_rules():
+    assert "提问状态（主问题、子问题、追问、澄清提问）下只能提问" in INTERVIEWER_SYSTEM_PROMPT
+    assert "禁止表达个人观点、结论、建议" in INTERVIEWER_SYSTEM_PROMPT
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
     assert "任何提问都只输出对[下一步内容]的完整表达" in INTERVIEWER_SYSTEM_PROMPT
+    assert "末尾必须以问号（？或?）结束" in INTERVIEWER_SYSTEM_PROMPT
     assert "默认禁止追加任何题干外句子" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止把具体题干泛化为“这个问题/这个话题”" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止省略任何前提条件、对象、阈值数字、比较关系、因果关系" in INTERVIEWER_SYSTEM_PROMPT
     assert "只做完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止追加题干外追问，禁止替候选人回答" in INTERVIEWER_SYSTEM_PROMPT
+    assert "“我觉得”“我认为”“我更偏向”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "“你可以”“你应该”“建议你”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "“其实就是”“本质上是”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "必须先重写为纯问句再输出" in INTERVIEWER_SYSTEM_PROMPT
     assert "可选中性过渡" not in INTERVIEWER_SYSTEM_PROMPT
     assert "适当使用过渡词和连接词" not in INTERVIEWER_SYSTEM_PROMPT
 
