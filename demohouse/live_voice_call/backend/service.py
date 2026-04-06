@@ -953,6 +953,7 @@ class VoiceBotService(BaseModel):
         decision: Optional[Decision],
         next_question_or_followup: str,
         flow_state: str,
+        is_scene_transition: bool = False,
     ) -> str:
         """Build the interview context string for the main interviewer LLM."""
         parts = []
@@ -968,13 +969,23 @@ class VoiceBotService(BaseModel):
                     "global_turn_limit_reached",
                 }
                 if decision.reason in forced_move_reasons:
-                    parts.append(
-                        "[指令] 现在需要进入下一题，请中性过渡，不评价回答质量，不夸赞。"
-                    )
+                    if is_scene_transition:
+                        parts.append(
+                            "[指令] 现在需要切换到新场景，请用中性过渡进入下一个场景，不评价回答质量，不夸赞。"
+                        )
+                    else:
+                        parts.append(
+                            "[指令] 继续当前场景的后续问题，请中性衔接，不评价回答质量，不夸赞，不要说“进入下一题”。"
+                        )
                 else:
-                    parts.append(
-                        "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后进入下一题。"
-                    )
+                    if is_scene_transition:
+                        parts.append(
+                            "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后切换到下一个场景。"
+                        )
+                    else:
+                        parts.append(
+                            "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后直接承接当前场景的后续问题，不要说“进入下一题”。"
+                        )
             elif decision.next_action == "follow_up":
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
                 if decision.next_prompt:
@@ -1006,6 +1017,17 @@ class VoiceBotService(BaseModel):
             parts.append("[指令] 面试即将结束，请做结束语。")
 
         return "\n".join(parts)
+
+    def _is_scene_transition_between_questions(
+        self, current_question_id: Optional[str], next_question_id: Optional[str]
+    ) -> bool:
+        if not current_question_id or not next_question_id:
+            return False
+        current_segment = self.question_context_segments.get(str(current_question_id), "").strip()
+        next_segment = self.question_context_segments.get(str(next_question_id), "").strip()
+        if not current_segment or not next_segment:
+            return False
+        return current_segment != next_segment
 
     def _flow_state_origin(self, flow_state: str) -> str:
         if flow_state == ASK_QUESTION:
@@ -1210,6 +1232,16 @@ class VoiceBotService(BaseModel):
                     next_question_id = (
                         next_response.question_id if next_response else answer_response.question_id
                     )
+                    is_scene_transition = False
+                    if (
+                        decision
+                        and decision.next_action == "next_question"
+                        and flow.state == ASK_QUESTION
+                    ):
+                        is_scene_transition = self._is_scene_transition_between_questions(
+                            current_question_id=answer_response.question_id,
+                            next_question_id=next_question_id,
+                        )
                     self._activate_context_segment(next_question_id)
 
                     # LLM call #2: Generate natural interviewer speech
@@ -1217,6 +1249,7 @@ class VoiceBotService(BaseModel):
                         decision=decision,
                         next_question_or_followup=next_interviewer_text,
                         flow_state=flow.state,
+                        is_scene_transition=is_scene_transition,
                     )
                     origin = self._flow_state_origin(flow.state)
                     prompt_constrained = flow.state in (ASK_QUESTION, ASK_CLARIFY)

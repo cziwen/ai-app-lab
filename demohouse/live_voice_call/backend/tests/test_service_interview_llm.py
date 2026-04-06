@@ -267,7 +267,7 @@ def test_stream_interview_llm_chat_treats_empty_scene_as_per_question_window():
     asyncio.run(_run())
 
 
-def test_build_interview_context_move_forward_with_followup_limit_uses_neutral_transition():
+def test_build_interview_context_forced_move_same_scene_uses_neutral_bridge_without_next_question():
     svc = service.VoiceBotService(
         ark_api_key="ark-key",
         llm1_endpoint_id="ep-judge",
@@ -288,13 +288,45 @@ def test_build_interview_context_move_forward_with_followup_limit_uses_neutral_t
         decision=decision,
         next_question_or_followup="请你介绍一个你主导的项目。",
         flow_state=service.ASK_QUESTION,
+        is_scene_transition=False,
     )
 
     assert "中性过渡，不评价回答质量，不夸赞" in context
+    assert "不要说“进入下一题”" in context
     assert "候选人回答已覆盖关键点" not in context
 
 
-def test_build_interview_context_move_forward_with_semantic_enough_allows_brief_ack():
+def test_build_interview_context_forced_move_cross_scene_allows_neutral_scene_switch():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        next_action="next_question",
+        next_prompt="",
+        reason="global_turn_limit_reached",
+        coverage_score=0.31,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你介绍一个你主导的项目。",
+        flow_state=service.ASK_QUESTION,
+        is_scene_transition=True,
+    )
+
+    assert "中性过渡" in context
+    assert "切换到新场景" in context
+    assert "进入下一个场景" in context
+    assert "候选人回答已覆盖关键点" not in context
+
+
+def test_build_interview_context_semantic_enough_same_scene_uses_ack_without_next_question():
     svc = service.VoiceBotService(
         ark_api_key="ark-key",
         llm1_endpoint_id="ep-judge",
@@ -315,9 +347,39 @@ def test_build_interview_context_move_forward_with_semantic_enough_allows_brief_
         decision=decision,
         next_question_or_followup="请你讲讲最困难的一次技术决策。",
         flow_state=service.ASK_QUESTION,
+        is_scene_transition=False,
     )
 
-    assert "候选人回答已覆盖关键点，可用一句简短肯定后进入下一题" in context
+    assert "候选人回答已覆盖关键点，可用一句简短肯定后直接承接当前场景的后续问题" in context
+    assert "不要说“进入下一题”" in context
+    assert "中性过渡，不评价回答质量，不夸赞" not in context
+
+
+def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        next_action="next_question",
+        next_prompt="",
+        reason="semantic_enough_coverage",
+        coverage_score=0.86,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你讲讲最困难的一次技术决策。",
+        flow_state=service.ASK_QUESTION,
+        is_scene_transition=True,
+    )
+
+    assert "候选人回答已覆盖关键点，可用一句简短肯定后切换到下一个场景" in context
     assert "中性过渡，不评价回答质量，不夸赞" not in context
 
 
@@ -375,6 +437,8 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "必须保留全部关键信息" in INTERVIEWER_SYSTEM_PROMPT
     assert "不得省略、合并、替换任何关键数字或条件" in INTERVIEWER_SYSTEM_PROMPT
     assert "先完整复述题干，再做一句简短解释" in INTERVIEWER_SYSTEM_PROMPT
+    assert "只有收到“切换到新场景”指令时，才可以说“进入下一题/下一个场景”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "继续当前场景后续问题" in INTERVIEWER_SYSTEM_PROMPT
 
 
 def test_build_interview_context_ask_question_injects_fidelity_requirements():
@@ -445,6 +509,29 @@ def test_flow_state_origin_mapping():
     assert svc._flow_state_origin(service.ASK_FOLLOWUP) == "follow_up"
     assert svc._flow_state_origin(service.ASK_CLARIFY) == "clarify"
     assert svc._flow_state_origin(service.WRAP_UP) == "wrap_up"
+
+
+def test_is_scene_transition_between_questions_uses_segment_mapping():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+        interview_questions=[
+            {"question_id": "q1", "main_question": "Q1", "scenario": "项目复盘"},
+            {"question_id": "q2", "main_question": "Q2", "scenario": "项目复盘"},
+            {"question_id": "q3", "main_question": "Q3", "scenario": "故障处理"},
+        ],
+    )
+    svc._build_question_context_segments(svc.interview_questions or [])
+
+    assert svc._is_scene_transition_between_questions("q1", "q2") is False
+    assert svc._is_scene_transition_between_questions("q2", "q3") is True
+    assert svc._is_scene_transition_between_questions("q3", "q404") is False
 
 
 def test_calc_segment_context_char_len_accumulates_followups_and_scene_subquestions():
