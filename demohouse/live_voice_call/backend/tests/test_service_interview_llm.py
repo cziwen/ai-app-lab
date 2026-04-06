@@ -431,6 +431,18 @@ def test_build_interview_context_wrap_up_still_works():
 
 
 def test_interviewer_system_prompt_contains_question_fidelity_rules():
+    assert "保真改写协议（最高优先级）" in INTERVIEWER_SYSTEM_PROMPT
+    assert (
+        "信息点必须全保留：主体、场景背景、前提条件、动作要求、全部数字与单位、阈值、比较关系、因果关系"
+        in INTERVIEWER_SYSTEM_PROMPT
+    )
+    assert "禁止只保留末尾问题句（如“你更站哪边？”）" in INTERVIEWER_SYSTEM_PROMPT
+    assert "对立观点/立场对照类前置背景（如“有人说…也有人说…”）属于必保留信息" in INTERVIEWER_SYSTEM_PROMPT
+    assert "示例：错误“你更站哪边？”，正确“有人说…也有人说…，你更站哪边？”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "当口语化与保真冲突时，始终保真优先" in INTERVIEWER_SYSTEM_PROMPT
+    assert "执行流程（仅内部思考，不要输出这些步骤）" in INTERVIEWER_SYSTEM_PROMPT
+    assert "先抽取信息点清单，再口语化改写，最后逐项自检" in INTERVIEWER_SYSTEM_PROMPT
+    assert "若漏任一点，回退为完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
     assert "提问状态（主问题、子问题、追问、澄清提问）下只能提问" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止表达个人观点、结论、建议" in INTERVIEWER_SYSTEM_PROMPT
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
@@ -473,7 +485,42 @@ def test_build_interview_context_ask_question_injects_fidelity_requirements():
 
     assert "[题干保真要求]" in context
     assert "必须保留全部关键信息" in context
+    assert "主体对象、场景背景、前提条件、动作要求" in context
+    assert "若[下一步内容]含“背景说明+提问要求”，两部分必须都保留" in context
+    assert "禁止只输出问题尾句" in context
+    assert "若含对立观点前置背景（如“有人说…也有人说…”），该背景必须完整保留" in context
     assert "禁止省略、合并、替换任何关键数字或条件" in context
+
+
+def test_build_interview_context_ask_question_requires_background_and_question_both_retained():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    prompt_with_background = (
+        "互联网公司会按连续七天没登录做流失预警，线下店没有登录数据。"
+        "你会用哪三个具体信号判断顾客可能要流失？"
+    )
+    context = svc._build_interview_context(
+        decision=Decision(
+            next_action="next_question",
+            next_prompt="",
+            reason="semantic_enough_coverage",
+            coverage_score=0.8,
+        ),
+        next_question_or_followup=prompt_with_background,
+        flow_state=service.ASK_QUESTION,
+    )
+
+    assert f"[下一步内容] {prompt_with_background}" in context
+    assert "若[下一步内容]含“背景说明+提问要求”，两部分必须都保留" in context
+    assert "禁止只输出问题尾句" in context
 
 
 def test_build_interview_context_ask_clarify_injects_repeat_first_requirements():
