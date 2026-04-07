@@ -294,6 +294,7 @@ def test_build_interview_context_forced_move_same_scene_uses_neutral_bridge_with
     assert "中性过渡，不评价回答质量，不夸赞" in context
     assert "不要说“进入下一题”" in context
     assert "候选人回答已覆盖关键点" not in context
+    assert "可在问句前加最多1句极短承接语" in context
 
 
 def test_build_interview_context_forced_move_cross_scene_allows_neutral_scene_switch():
@@ -381,6 +382,34 @@ def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch
 
     assert "候选人回答已覆盖关键点，可用一句简短肯定后切换到下一个场景" in context
     assert "中性过渡，不评价回答质量，不夸赞" not in context
+    assert "可在问句前加最多1句极短承接语" in context
+
+
+def test_build_interview_context_followup_injects_expression_style():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+
+    decision = Decision(
+        next_action="follow_up",
+        next_prompt="请你展开说一下关键决策依据。",
+        reason="semantic_need_more_detail",
+        coverage_score=0.45,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你展开说一下关键决策依据。",
+        flow_state=service.ASK_FOLLOWUP,
+    )
+
+    assert "[追问方向]" in context
+    assert "先用1句简短承接候选人上一轮，再聚焦追问" in context
 
 
 def test_build_interview_context_clarify_uses_clarify_instruction():
@@ -408,6 +437,7 @@ def test_build_interview_context_clarify_uses_clarify_instruction():
 
     assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
     assert "[澄清说明]" in context
+    assert "复述题干关键点 -> 一句解释 -> 确认问句" in context
 
 
 def test_build_interview_context_wrap_up_still_works():
@@ -448,7 +478,9 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
     assert "任何提问都只输出对[下一步内容]的完整表达" in INTERVIEWER_SYSTEM_PROMPT
     assert "末尾必须以问号（？或?）结束" in INTERVIEWER_SYSTEM_PROMPT
-    assert "默认禁止追加任何题干外句子" in INTERVIEWER_SYSTEM_PROMPT
+    assert "允许在提问前追加最多1句极短过渡语" in INTERVIEWER_SYSTEM_PROMPT
+    assert "过渡语只能出现在问句前" in INTERVIEWER_SYSTEM_PROMPT
+    assert "推荐短过渡白名单" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止把具体题干泛化为“这个问题/这个话题”" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止省略任何前提条件、对象、阈值数字、比较关系、因果关系" in INTERVIEWER_SYSTEM_PROMPT
     assert "只做完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
@@ -457,8 +489,7 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "“你可以”“你应该”“建议你”" in INTERVIEWER_SYSTEM_PROMPT
     assert "“其实就是”“本质上是”" in INTERVIEWER_SYSTEM_PROMPT
     assert "必须先重写为纯问句再输出" in INTERVIEWER_SYSTEM_PROMPT
-    assert "可选中性过渡" not in INTERVIEWER_SYSTEM_PROMPT
-    assert "适当使用过渡词和连接词" not in INTERVIEWER_SYSTEM_PROMPT
+    assert "建议不超过14字" in INTERVIEWER_SYSTEM_PROMPT
 
 
 def test_build_interview_context_ask_question_injects_fidelity_requirements():

@@ -986,16 +986,25 @@ class VoiceBotService(BaseModel):
                         parts.append(
                             "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后直接承接当前场景的后续问题，不要说“进入下一题”。"
                         )
+                parts.append(
+                    "[表达风格] 可在问句前加最多1句极短承接语（建议不超过14字），语气中性或轻肯定；随后完整表达[下一步内容]，不得新增信息。"
+                )
             elif decision.next_action == "follow_up":
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
                 if decision.next_prompt:
                     parts.append(f"[追问方向] {decision.next_prompt}")
+                parts.append(
+                    "[表达风格] 先用1句简短承接候选人上一轮，再聚焦追问；承接语不得新增信息，随后完整表达[下一步内容]。"
+                )
             elif decision.next_action == "clarify":
                 parts.append(
                     "[指令] 候选人对题意有疑惑，请仅做题意澄清，不要新增考察维度，也不要转成追问。"
                 )
                 if decision.next_prompt:
                     parts.append(f"[澄清说明] {decision.next_prompt}")
+                parts.append(
+                    "[表达风格] 按“复述题干关键点 -> 一句解释 -> 确认问句”顺序表达；解释仅用于澄清题意，不得新增考察点。"
+                )
 
         if next_question_or_followup:
             parts.append(f"[下一步内容] {next_question_or_followup}")
