@@ -295,6 +295,8 @@ def test_build_interview_context_forced_move_same_scene_uses_neutral_bridge_with
     assert "不要说“进入下一题”" in context
     assert "候选人回答已覆盖关键点" not in context
     assert "[过渡强度] soft" in context
+    assert "[开场策略]" in context
+    assert "开场可选且不强制" in context
     assert "当前为soft过渡" not in context
 
 
@@ -327,6 +329,7 @@ def test_build_interview_context_forced_move_cross_scene_allows_neutral_scene_sw
     assert "进入下一个场景" in context
     assert "候选人回答已覆盖关键点" not in context
     assert "[过渡强度] strong" in context
+    assert "[开场策略]" in context
 
 
 def test_build_interview_context_semantic_enough_same_scene_uses_ack_without_next_question():
@@ -358,6 +361,8 @@ def test_build_interview_context_semantic_enough_same_scene_uses_ack_without_nex
     assert "中性过渡，不评价回答质量，不夸赞" not in context
     assert "[过渡强度] soft" in context
     assert "当前为soft过渡" in context
+    assert "开场不强制" in context
+    assert "无开场、仅语气词、仅过渡语或语气词+过渡语" in context
 
 
 def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch():
@@ -388,6 +393,7 @@ def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch
     assert "中性过渡，不评价回答质量，不夸赞" not in context
     assert "[过渡强度] strong" in context
     assert "当前为strong过渡" in context
+    assert "开场不强制" in context
 
 
 def test_build_interview_context_followup_injects_expression_style():
@@ -416,6 +422,7 @@ def test_build_interview_context_followup_injects_expression_style():
     assert "[追问方向]" in context
     assert "[过渡强度] soft" in context
     assert "当前为soft过渡" in context
+    assert "开场不强制" in context
 
 
 def test_build_interview_context_without_candidate_speech_disables_transition_styles():
@@ -442,6 +449,7 @@ def test_build_interview_context_without_candidate_speech_disables_transition_st
     )
 
     assert "[过渡强度] none" in context
+    assert "[开场策略]" in context
     assert "[首轮首问约束]" in context
     assert "禁止使用“进入下一题”“下一个场景”“我们继续”等过渡口吻" in context
     assert "当前为soft过渡" not in context
@@ -474,6 +482,7 @@ def test_build_interview_context_clarify_uses_clarify_instruction():
     assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
     assert "[澄清说明]" in context
     assert "复述题干关键点 -> 一句解释 -> 确认问句" in context
+    assert "开场不强制" in context
 
 
 def test_sanitize_initial_question_text_removes_transition_prefix():
@@ -544,14 +553,18 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
     assert "任何提问都只输出对[下一步内容]的完整表达" in INTERVIEWER_SYSTEM_PROMPT
     assert "末尾必须以问号（？或?）结束" in INTERVIEWER_SYSTEM_PROMPT
-    assert "允许在提问前追加最多1句极短过渡语" in INTERVIEWER_SYSTEM_PROMPT
-    assert "过渡语只能出现在问句前" in INTERVIEWER_SYSTEM_PROMPT
-    assert "推荐短过渡白名单" in INTERVIEWER_SYSTEM_PROMPT
+    assert "开场组件为可选，不是必选" in INTERVIEWER_SYSTEM_PROMPT
+    assert "无开场 / 仅语气词 / 仅过渡语 / 语气词+过渡语" in INTERVIEWER_SYSTEM_PROMPT
+    assert "语气词可用“嗯/好的/了解”等" in INTERVIEWER_SYSTEM_PROMPT
+    assert "若不需要开场可直接进入题干" in INTERVIEWER_SYSTEM_PROMPT
+    assert "开场组件只能出现在问句前" in INTERVIEWER_SYSTEM_PROMPT
     assert "过渡强度判定" in INTERVIEWER_SYSTEM_PROMPT
     assert "none（首轮首问）" in INTERVIEWER_SYSTEM_PROMPT
     assert "soft（同场景）" in INTERVIEWER_SYSTEM_PROMPT
     assert "strong（跨场景）" in INTERVIEWER_SYSTEM_PROMPT
-    assert "过渡语去重复" in INTERVIEWER_SYSTEM_PROMPT
+    assert "soft（同场景）：轻承接，允许省略开场" in INTERVIEWER_SYSTEM_PROMPT
+    assert "strong（跨场景）：可提示场景切换，允许省略开场" in INTERVIEWER_SYSTEM_PROMPT
+    assert "开场去重复" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止把具体题干泛化为“这个问题/这个话题”" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止省略任何前提条件、对象、阈值数字、比较关系、因果关系" in INTERVIEWER_SYSTEM_PROMPT
     assert "只做完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT

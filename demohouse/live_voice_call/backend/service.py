@@ -987,6 +987,11 @@ class VoiceBotService(BaseModel):
         ):
             transition_intensity = "strong"
         parts.append(f"[过渡强度] {transition_intensity}")
+        parts.append(
+            "[开场策略] 开场可选且不强制：允许“无开场 / 仅语气词 / 仅过渡语 / 语气词+过渡语”。"
+            "优先自然表达；若信息密度高或开场易重复，直接进入题干。"
+            "语气词默认可用“嗯/好的/了解”。"
+        )
 
         if not has_candidate_speech:
             parts.append(
@@ -1024,11 +1029,13 @@ class VoiceBotService(BaseModel):
                 if has_candidate_speech and decision.reason not in forced_move_reasons:
                     if is_scene_transition:
                         parts.append(
-                            "[表达风格] 当前为strong过渡：可用最多1句场景切换承接语（建议不超过20字），随后完整表达[下一步内容]，不得新增信息。"
+                            "[表达风格] 当前为strong过渡：可提示场景切换，但开场不强制；可选无开场、仅语气词、仅过渡语或语气词+过渡语。"
+                            "若使用开场，最多1句（建议不超过20字），随后完整表达[下一步内容]，不得新增信息。"
                         )
                     else:
                         parts.append(
-                            "[表达风格] 当前为soft过渡：可在问句前加最多1句极短承接语（建议不超过14字），语气中性或轻肯定；随后完整表达[下一步内容]，不得新增信息。"
+                            "[表达风格] 当前为soft过渡：轻承接即可，开场不强制；可选无开场、仅语气词、仅过渡语或语气词+过渡语。"
+                            "若使用开场，最多1句（建议不超过14字），语气中性或轻肯定；随后完整表达[下一步内容]，不得新增信息。"
                         )
             elif decision.next_action == "follow_up":
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
@@ -1036,7 +1043,8 @@ class VoiceBotService(BaseModel):
                     parts.append(f"[追问方向] {decision.next_prompt}")
                 if has_candidate_speech:
                     parts.append(
-                        "[表达风格] 当前为soft过渡：先用1句简短承接候选人上一轮，再聚焦追问；承接语不得新增信息，随后完整表达[下一步内容]。"
+                        "[表达风格] 当前为soft过渡：先承接候选人上一轮再聚焦追问，开场不强制；可选无开场、仅语气词、仅过渡语或语气词+过渡语。"
+                        "若使用开场，最多1句且不得新增信息，随后完整表达[下一步内容]。"
                     )
             elif decision.next_action == "clarify":
                 parts.append(
@@ -1046,7 +1054,8 @@ class VoiceBotService(BaseModel):
                     parts.append(f"[澄清说明] {decision.next_prompt}")
                 if has_candidate_speech:
                     parts.append(
-                        "[表达风格] 当前为soft过渡：按“复述题干关键点 -> 一句解释 -> 确认问句”顺序表达；解释仅用于澄清题意，不得新增考察点。"
+                        "[表达风格] 当前为soft过渡：按“复述题干关键点 -> 一句解释 -> 确认问句”顺序表达；开场不强制。"
+                        "如需开场，可选无开场、仅语气词、仅过渡语或语气词+过渡语；解释仅用于澄清题意，不得新增考察点。"
                     )
 
         if next_question_or_followup:
