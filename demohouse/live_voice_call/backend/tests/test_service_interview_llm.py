@@ -692,6 +692,112 @@ def test_resolve_delivery_state_prefers_next_response_state_before():
     assert resolved == service.ASK_CLARIFY
 
 
+def test_scene_transition_uses_delivery_state_for_cross_scene_next_question():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+        interview_questions=[
+            {"question_id": "q1", "main_question": "Q1", "scenario": "场景A"},
+            {"question_id": "q2", "main_question": "Q2", "scenario": "场景B"},
+        ],
+    )
+    svc._build_question_context_segments(svc.interview_questions or [])
+
+    decision = Decision(
+        next_action="next_question",
+        next_prompt="",
+        reason="semantic_enough_coverage",
+        coverage_score=0.9,
+    )
+    next_response = service.FlowResponse(
+        state_before=service.ASK_QUESTION,
+        state_after=service.WAIT_ANSWER,
+        interviewer_text="Q2",
+        decision=None,
+        question_id="q2",
+        transition_trace=["ASK_QUESTION -> WAIT_ANSWER"],
+    )
+
+    delivery_state = svc._resolve_delivery_state(service.WAIT_ANSWER, next_response)
+    is_scene_transition = svc._compute_scene_transition_for_delivery(
+        decision=decision,
+        delivery_state=delivery_state,
+        current_question_id="q1",
+        next_question_id=next_response.question_id,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup=next_response.interviewer_text,
+        flow_state=delivery_state,
+        has_candidate_speech=True,
+        is_scene_transition=is_scene_transition,
+    )
+
+    assert delivery_state == service.ASK_QUESTION
+    assert is_scene_transition is True
+    assert "[过渡强度] strong" in context
+    assert "当前为strong过渡" in context
+
+
+def test_scene_transition_uses_delivery_state_for_same_scene_next_question():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+        interview_mode=True,
+        interview_questions=[
+            {"question_id": "q1", "main_question": "Q1", "scenario": "场景A"},
+            {"question_id": "q2", "main_question": "Q2", "scenario": "场景A"},
+        ],
+    )
+    svc._build_question_context_segments(svc.interview_questions or [])
+
+    decision = Decision(
+        next_action="next_question",
+        next_prompt="",
+        reason="semantic_enough_coverage",
+        coverage_score=0.9,
+    )
+    next_response = service.FlowResponse(
+        state_before=service.ASK_QUESTION,
+        state_after=service.WAIT_ANSWER,
+        interviewer_text="Q2",
+        decision=None,
+        question_id="q2",
+        transition_trace=["ASK_QUESTION -> WAIT_ANSWER"],
+    )
+
+    delivery_state = svc._resolve_delivery_state(service.WAIT_ANSWER, next_response)
+    is_scene_transition = svc._compute_scene_transition_for_delivery(
+        decision=decision,
+        delivery_state=delivery_state,
+        current_question_id="q1",
+        next_question_id=next_response.question_id,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup=next_response.interviewer_text,
+        flow_state=delivery_state,
+        has_candidate_speech=True,
+        is_scene_transition=is_scene_transition,
+    )
+
+    assert delivery_state == service.ASK_QUESTION
+    assert is_scene_transition is False
+    assert "[过渡强度] soft" in context
+    assert "当前为soft过渡" in context
+
+
 def test_clarify_delivery_state_still_injects_repeat_first_requirements_after_flow_transition():
     class _AlwaysClarifyJudge:
         async def decide(

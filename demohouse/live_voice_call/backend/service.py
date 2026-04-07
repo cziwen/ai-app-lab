@@ -1102,6 +1102,22 @@ class VoiceBotService(BaseModel):
             return next_response.state_before
         return flow_state
 
+    def _compute_scene_transition_for_delivery(
+        self,
+        decision: Optional[Decision],
+        delivery_state: str,
+        current_question_id: Optional[str],
+        next_question_id: Optional[str],
+    ) -> bool:
+        if not decision or decision.next_action != "next_question":
+            return False
+        if delivery_state != ASK_QUESTION:
+            return False
+        return self._is_scene_transition_between_questions(
+            current_question_id=current_question_id,
+            next_question_id=next_question_id,
+        )
+
     def _clarify_subtype_from_decision(self, decision: Optional[Decision]) -> str:
         if not decision or decision.next_action != "clarify":
             return "-"
@@ -1309,23 +1325,19 @@ class VoiceBotService(BaseModel):
                             self._log("[Interview] Interview ended")
                             return
 
+                    delivery_state = self._resolve_delivery_state(flow.state, next_response)
                     next_question_id = (
                         next_response.question_id if next_response else answer_response.question_id
                     )
-                    is_scene_transition = False
-                    if (
-                        decision
-                        and decision.next_action == "next_question"
-                        and flow.state == ASK_QUESTION
-                    ):
-                        is_scene_transition = self._is_scene_transition_between_questions(
-                            current_question_id=answer_response.question_id,
-                            next_question_id=next_question_id,
-                        )
+                    is_scene_transition = self._compute_scene_transition_for_delivery(
+                        decision=decision,
+                        delivery_state=delivery_state,
+                        current_question_id=answer_response.question_id,
+                        next_question_id=next_question_id,
+                    )
                     self._activate_context_segment(next_question_id)
 
                     # LLM call #2: Generate natural interviewer speech
-                    delivery_state = self._resolve_delivery_state(flow.state, next_response)
                     clarify_subtype = self._clarify_subtype_from_decision(decision)
                     interview_context = self._build_interview_context(
                         decision=decision,
@@ -1347,6 +1359,7 @@ class VoiceBotService(BaseModel):
                         f"delivery_state={delivery_state} "
                         f"origin={origin} "
                         f"clarify_subtype={clarify_subtype} "
+                        f"is_scene_transition={is_scene_transition} "
                         f"question_delivery_mode={question_delivery_mode} "
                         f"prompt_constrained={prompt_constrained} "
                         f"segment_id={segment_id} "
@@ -1362,6 +1375,7 @@ class VoiceBotService(BaseModel):
                             "delivery_state": delivery_state,
                             "origin": origin,
                             "clarify_subtype": clarify_subtype,
+                            "is_scene_transition": is_scene_transition,
                             "question_delivery_mode": question_delivery_mode,
                             "prompt_constrained": prompt_constrained,
                         },
