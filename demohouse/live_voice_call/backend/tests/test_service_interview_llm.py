@@ -291,10 +291,11 @@ def test_build_interview_context_forced_move_same_scene_uses_neutral_bridge_with
         is_scene_transition=False,
     )
 
-    assert "中性过渡，不评价回答质量，不夸赞" in context
+    assert "中性衔接，不评价回答质量，不夸赞" in context
     assert "不要说“进入下一题”" in context
     assert "候选人回答已覆盖关键点" not in context
-    assert "可在问句前加最多1句极短承接语" in context
+    assert "[过渡强度] soft" in context
+    assert "当前为soft过渡" not in context
 
 
 def test_build_interview_context_forced_move_cross_scene_allows_neutral_scene_switch():
@@ -325,6 +326,7 @@ def test_build_interview_context_forced_move_cross_scene_allows_neutral_scene_sw
     assert "切换到新场景" in context
     assert "进入下一个场景" in context
     assert "候选人回答已覆盖关键点" not in context
+    assert "[过渡强度] strong" in context
 
 
 def test_build_interview_context_semantic_enough_same_scene_uses_ack_without_next_question():
@@ -354,6 +356,8 @@ def test_build_interview_context_semantic_enough_same_scene_uses_ack_without_nex
     assert "候选人回答已覆盖关键点，可用一句简短肯定后直接承接当前场景的后续问题" in context
     assert "不要说“进入下一题”" in context
     assert "中性过渡，不评价回答质量，不夸赞" not in context
+    assert "[过渡强度] soft" in context
+    assert "当前为soft过渡" in context
 
 
 def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch():
@@ -382,7 +386,8 @@ def test_build_interview_context_semantic_enough_cross_scene_allows_scene_switch
 
     assert "候选人回答已覆盖关键点，可用一句简短肯定后切换到下一个场景" in context
     assert "中性过渡，不评价回答质量，不夸赞" not in context
-    assert "可在问句前加最多1句极短承接语" in context
+    assert "[过渡强度] strong" in context
+    assert "当前为strong过渡" in context
 
 
 def test_build_interview_context_followup_injects_expression_style():
@@ -409,7 +414,38 @@ def test_build_interview_context_followup_injects_expression_style():
     )
 
     assert "[追问方向]" in context
-    assert "先用1句简短承接候选人上一轮，再聚焦追问" in context
+    assert "[过渡强度] soft" in context
+    assert "当前为soft过渡" in context
+
+
+def test_build_interview_context_without_candidate_speech_disables_transition_styles():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+    decision = Decision(
+        next_action="next_question",
+        next_prompt="",
+        reason="semantic_enough_coverage",
+        coverage_score=0.8,
+    )
+    context = svc._build_interview_context(
+        decision=decision,
+        next_question_or_followup="请你介绍一个你主导的项目。",
+        flow_state=service.ASK_QUESTION,
+        has_candidate_speech=False,
+    )
+
+    assert "[过渡强度] none" in context
+    assert "[首轮首问约束]" in context
+    assert "禁止使用“进入下一题”“下一个场景”“我们继续”等过渡口吻" in context
+    assert "当前为soft过渡" not in context
+    assert "当前为strong过渡" not in context
 
 
 def test_build_interview_context_clarify_uses_clarify_instruction():
@@ -438,6 +474,36 @@ def test_build_interview_context_clarify_uses_clarify_instruction():
     assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
     assert "[澄清说明]" in context
     assert "复述题干关键点 -> 一句解释 -> 确认问句" in context
+
+
+def test_sanitize_initial_question_text_removes_transition_prefix():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+    raw = "好的我们先进入下一题，请你介绍一个你主导的项目。"
+    cleaned = svc._sanitize_initial_question_text(raw)
+    assert cleaned == "请你介绍一个你主导的项目。"
+
+
+def test_sanitize_initial_question_text_keeps_non_transition_question():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+    raw = "请你介绍一个你主导的项目。"
+    cleaned = svc._sanitize_initial_question_text(raw)
+    assert cleaned == raw
 
 
 def test_build_interview_context_wrap_up_still_works():
@@ -481,6 +547,11 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "允许在提问前追加最多1句极短过渡语" in INTERVIEWER_SYSTEM_PROMPT
     assert "过渡语只能出现在问句前" in INTERVIEWER_SYSTEM_PROMPT
     assert "推荐短过渡白名单" in INTERVIEWER_SYSTEM_PROMPT
+    assert "过渡强度判定" in INTERVIEWER_SYSTEM_PROMPT
+    assert "none（首轮首问）" in INTERVIEWER_SYSTEM_PROMPT
+    assert "soft（同场景）" in INTERVIEWER_SYSTEM_PROMPT
+    assert "strong（跨场景）" in INTERVIEWER_SYSTEM_PROMPT
+    assert "过渡语去重复" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止把具体题干泛化为“这个问题/这个话题”" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止省略任何前提条件、对象、阈值数字、比较关系、因果关系" in INTERVIEWER_SYSTEM_PROMPT
     assert "只做完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
@@ -490,6 +561,7 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "“其实就是”“本质上是”" in INTERVIEWER_SYSTEM_PROMPT
     assert "必须先重写为纯问句再输出" in INTERVIEWER_SYSTEM_PROMPT
     assert "建议不超过14字" in INTERVIEWER_SYSTEM_PROMPT
+    assert "建议不超过20字" in INTERVIEWER_SYSTEM_PROMPT
 
 
 def test_build_interview_context_ask_question_injects_fidelity_requirements():
@@ -639,7 +711,13 @@ def test_clarify_delivery_state_still_injects_repeat_first_requirements_after_fl
 
     async def _run():
         flow = InterviewFlow(
-            questions=[{"question_id": "q1", "main_question": "请介绍一个你主导的项目。"}],
+            questions=[
+                {
+                    "question_id": "q1",
+                    "main_question": "请介绍一个你主导的项目。",
+                    "max_clarifies": 1,
+                }
+            ],
             judge=_AlwaysClarifyJudge(),
         )
         await flow.produce_interviewer_message()  # INTRO -> ASK_QUESTION

@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -294,6 +295,25 @@ class VoiceBotService(BaseModel):
         segment_id = self.active_context_segment.strip()
         if segment_id:
             self.segment_history_messages.setdefault(segment_id, []).append(message)
+
+    def _sanitize_initial_question_text(self, text: str) -> str:
+        """Remove opening transition phrases for the very first question."""
+        original = (text or "").strip()
+        if not original:
+            return ""
+        sanitized = original
+        prefix_patterns = [
+            r"^(?:好的|好)[，,\s]*我们?(?:先)?(?:进入下一题|进入下一个场景)[，,。；;：:\s]*",
+            r"^(?:好的|好)[，,\s]*我们?(?:先)?继续(?:下一题|下一个问题|下一个场景)?[，,。；;：:\s]*",
+            r"^我们(?:先)?(?:进入下一题|进入下一个场景|继续(?:下一题|下一个问题|下一个场景)?)[，,。；;：:\s]*",
+        ]
+        for _ in range(2):
+            before = sanitized
+            for pattern in prefix_patterns:
+                sanitized = re.sub(pattern, "", sanitized, count=1).lstrip()
+            if sanitized == before:
+                break
+        return sanitized or original
 
     def _wall_time_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -953,10 +973,25 @@ class VoiceBotService(BaseModel):
         decision: Optional[Decision],
         next_question_or_followup: str,
         flow_state: str,
+        has_candidate_speech: bool = True,
         is_scene_transition: bool = False,
     ) -> str:
         """Build the interview context string for the main interviewer LLM."""
         parts = []
+        transition_intensity = "none" if not has_candidate_speech else "soft"
+        if (
+            decision
+            and decision.next_action == "next_question"
+            and has_candidate_speech
+            and is_scene_transition
+        ):
+            transition_intensity = "strong"
+        parts.append(f"[过渡强度] {transition_intensity}")
+
+        if not has_candidate_speech:
+            parts.append(
+                "[首轮首问约束] 候选人尚未发言，直接进入问题本体；禁止使用“进入下一题”“下一个场景”“我们继续”等过渡口吻。"
+            )
 
         if decision:
             parts.append(f"[评估结果] 评判理由: {decision.reason}")
@@ -986,25 +1021,33 @@ class VoiceBotService(BaseModel):
                         parts.append(
                             "[指令] 候选人回答已覆盖关键点，可用一句简短肯定后直接承接当前场景的后续问题，不要说“进入下一题”。"
                         )
-                parts.append(
-                    "[表达风格] 可在问句前加最多1句极短承接语（建议不超过14字），语气中性或轻肯定；随后完整表达[下一步内容]，不得新增信息。"
-                )
+                if has_candidate_speech and decision.reason not in forced_move_reasons:
+                    if is_scene_transition:
+                        parts.append(
+                            "[表达风格] 当前为strong过渡：可用最多1句场景切换承接语（建议不超过20字），随后完整表达[下一步内容]，不得新增信息。"
+                        )
+                    else:
+                        parts.append(
+                            "[表达风格] 当前为soft过渡：可在问句前加最多1句极短承接语（建议不超过14字），语气中性或轻肯定；随后完整表达[下一步内容]，不得新增信息。"
+                        )
             elif decision.next_action == "follow_up":
                 parts.append("[指令] 候选人回答不够完整，请礼貌地进行追问以获取更多细节。")
                 if decision.next_prompt:
                     parts.append(f"[追问方向] {decision.next_prompt}")
-                parts.append(
-                    "[表达风格] 先用1句简短承接候选人上一轮，再聚焦追问；承接语不得新增信息，随后完整表达[下一步内容]。"
-                )
+                if has_candidate_speech:
+                    parts.append(
+                        "[表达风格] 当前为soft过渡：先用1句简短承接候选人上一轮，再聚焦追问；承接语不得新增信息，随后完整表达[下一步内容]。"
+                    )
             elif decision.next_action == "clarify":
                 parts.append(
                     "[指令] 候选人对题意有疑惑，请仅做题意澄清，不要新增考察维度，也不要转成追问。"
                 )
                 if decision.next_prompt:
                     parts.append(f"[澄清说明] {decision.next_prompt}")
-                parts.append(
-                    "[表达风格] 按“复述题干关键点 -> 一句解释 -> 确认问句”顺序表达；解释仅用于澄清题意，不得新增考察点。"
-                )
+                if has_candidate_speech:
+                    parts.append(
+                        "[表达风格] 当前为soft过渡：按“复述题干关键点 -> 一句解释 -> 确认问句”顺序表达；解释仅用于澄清题意，不得新增考察点。"
+                    )
 
         if next_question_or_followup:
             parts.append(f"[下一步内容] {next_question_or_followup}")
@@ -1145,9 +1188,18 @@ class VoiceBotService(BaseModel):
             f"text='{first_question_response.interviewer_text}'"
         )
         if first_question_response.interviewer_text:
+            first_question_text = first_question_response.interviewer_text
+            if flow.total_candidate_turns == 0:
+                sanitized_first_question = self._sanitize_initial_question_text(first_question_text)
+                if sanitized_first_question != first_question_text:
+                    self._log(
+                        "[Interview] FirstQuestion sanitized: "
+                        f"before='{first_question_text}' after='{sanitized_first_question}'"
+                    )
+                first_question_text = sanitized_first_question
             self._activate_context_segment(first_question_response.question_id)
             async for event in self._send_scripted_text(
-                first_question_response.interviewer_text
+                first_question_text
             ):
                 yield event
         self._log("[Interview] Greeting sent via TTS, waiting for candidate")
@@ -1279,6 +1331,7 @@ class VoiceBotService(BaseModel):
                         decision=decision,
                         next_question_or_followup=next_interviewer_text,
                         flow_state=delivery_state,
+                        has_candidate_speech=flow.total_candidate_turns > 0,
                         is_scene_transition=is_scene_transition,
                     )
                     origin = self._flow_state_origin(delivery_state)

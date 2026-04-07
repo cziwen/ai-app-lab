@@ -9,4 +9,4 @@ deploy/acme-webroot/*
 *.csv
 
 /demo_resource
-/backend/artifacts
+/artifacts
