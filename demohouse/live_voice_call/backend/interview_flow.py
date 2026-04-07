@@ -68,7 +68,7 @@ class InterviewFlow:
                 main_question=str(item["main_question"]),
                 evidence=dict(item.get("evidence") or {}),
                 max_followups=max(0, int(item.get("max_followups", 0))),
-                max_clarifies=max(0, int(item.get("max_clarifies", 0))),
+                max_clarifies=max(0, int(item.get("max_clarifies", 1))),
             )
             for item in questions
         ]

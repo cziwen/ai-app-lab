@@ -654,6 +654,74 @@ def test_question_clarifies_out_of_range_raises(monkeypatch, tmp_path):
         assert str(exc) == "invalid_question_followups"
 
 
+def test_create_interview_without_followups_defaults_clarifies_to_one(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目1", "答案1"), ("题目2", "答案2")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="候选人",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=None,
+    )
+    assert all(item["max_clarifies"] == 1 for item in interview["question_followups"])
+
+    detail = admin_store.get_interview_detail(interview["token"])
+    assert detail is not None
+    assert all(item["max_clarifies"] == 1 for item in detail["selected_questions"])
+
+    session = admin_store.start_interview_session(interview["token"])
+    assert session is not None
+    assert all(int(item["max_clarifies"]) == 1 for item in session.questions)
+
+
+def test_missing_question_clarify_limits_defaults_to_one(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目1", "答案1"), ("题目2", "答案2")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="候选人",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"], max_clarifies=0),
+    )
+
+    with admin_store.get_conn() as conn:
+        conn.execute(
+            "UPDATE interviews SET question_clarify_limits = ? WHERE token = ?",
+            ("{}", interview["token"]),
+        )
+        conn.commit()
+
+    detail = admin_store.get_interview_detail(interview["token"])
+    assert detail is not None
+    assert all(item["max_clarifies"] == 1 for item in detail["selected_questions"])
+
+    session = admin_store.start_interview_session(interview["token"])
+    assert session is not None
+    assert all(int(item["max_clarifies"]) == 1 for item in session.questions)
+
+
 def test_create_job_with_rubric_fields_persists_and_maps_reference_answer(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")

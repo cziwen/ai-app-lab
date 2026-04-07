@@ -156,7 +156,7 @@ export const AdminInterviewsPage = () => {
         );
         setQuestionClarifyInputs(
           questions.reduce<Record<number, string>>((acc, question) => {
-            acc[question.id] = '0';
+            acc[question.id] = '1';
             return acc;
           }, {}),
         );

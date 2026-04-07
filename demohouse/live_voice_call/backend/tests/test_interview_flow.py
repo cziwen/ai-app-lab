@@ -256,6 +256,36 @@ def test_intro_mentions_dynamic_scenario_count():
     asyncio.run(_run())
 
 
+def test_missing_max_clarifies_defaults_to_one():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[
+                Decision("clarify", "请补充你负责的关键动作。", "clarify", 0.2),
+                Decision("clarify", "继续澄清", "clarify", 0.2),
+            ]
+        )
+        questions = [
+            {
+                "question_id": "q1",
+                "main_question": "介绍项目经历。",
+                "max_followups": 0,
+            }
+        ]
+        flow = InterviewFlow(questions=questions, judge=judge)
+
+        await _bootstrap_to_wait(flow)
+        first = await flow.receive_candidate_answer("回答比较模糊")
+        assert first.state_after == ASK_CLARIFY
+
+        await _bootstrap_to_wait(flow)
+        second = await flow.receive_candidate_answer("再次回答")
+        assert second.decision is not None
+        assert second.decision.reason == "clarify_limit_reached"
+        assert second.state_after == WRAP_UP
+
+    asyncio.run(_run())
+
+
 def test_intro_counts_consecutive_same_scene_as_one_scenario():
     async def _run():
         judge = SequenceJudge(decisions=[Decision("next_question", "", "ok", 0.9)])

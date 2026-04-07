@@ -132,7 +132,7 @@ export const AdminPage = () => {
       const question_followups = (jobDetailResp.job.questions || []).map(item => ({
         question_id: item.id,
         max_followups: 0,
-        max_clarifies: 0,
+        max_clarifies: 1,
       }));
       await adminApi.createInterview({
         candidate_name: candidateName.trim(),
