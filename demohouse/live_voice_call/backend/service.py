@@ -1042,6 +1042,23 @@ class VoiceBotService(BaseModel):
             return "wrap_up"
         return "unknown"
 
+    def _resolve_delivery_state(
+        self, flow_state: str, next_response: Optional[FlowResponse]
+    ) -> str:
+        """Resolve the state that produced current interviewer text."""
+        if next_response and next_response.state_before:
+            return next_response.state_before
+        return flow_state
+
+    def _clarify_subtype_from_decision(self, decision: Optional[Decision]) -> str:
+        if not decision or decision.next_action != "clarify":
+            return "-"
+        if decision.reason == "candidate_requested_repeat":
+            return "repeat_request"
+        if decision.reason == "candidate_requested_clarification":
+            return "meaning_clarify"
+        return "other"
+
     def _calc_segment_context_char_len(self, interview_context: str) -> int:
         history_messages = self._history_for_current_segment()
         total = len(interview_context or "")
@@ -1247,14 +1264,16 @@ class VoiceBotService(BaseModel):
                     self._activate_context_segment(next_question_id)
 
                     # LLM call #2: Generate natural interviewer speech
+                    delivery_state = self._resolve_delivery_state(flow.state, next_response)
+                    clarify_subtype = self._clarify_subtype_from_decision(decision)
                     interview_context = self._build_interview_context(
                         decision=decision,
                         next_question_or_followup=next_interviewer_text,
-                        flow_state=flow.state,
+                        flow_state=delivery_state,
                         is_scene_transition=is_scene_transition,
                     )
-                    origin = self._flow_state_origin(flow.state)
-                    prompt_constrained = flow.state in (ASK_QUESTION, ASK_CLARIFY)
+                    origin = self._flow_state_origin(delivery_state)
+                    prompt_constrained = delivery_state in (ASK_QUESTION, ASK_CLARIFY)
                     question_delivery_mode = "prompt_constrained_paraphrase"
                     segment_id = self.active_context_segment.strip() or "-"
                     segment_context_len = self._calc_segment_context_char_len(interview_context)
@@ -1263,7 +1282,9 @@ class VoiceBotService(BaseModel):
                     )
                     self._log(
                         "[Interview] LLM #2 context stats: "
+                        f"delivery_state={delivery_state} "
                         f"origin={origin} "
+                        f"clarify_subtype={clarify_subtype} "
                         f"question_delivery_mode={question_delivery_mode} "
                         f"prompt_constrained={prompt_constrained} "
                         f"segment_id={segment_id} "
@@ -1276,7 +1297,9 @@ class VoiceBotService(BaseModel):
                             "context_len": len(interview_context),
                             "segment_context_len": segment_context_len,
                             "segment_id": segment_id,
+                            "delivery_state": delivery_state,
                             "origin": origin,
+                            "clarify_subtype": clarify_subtype,
                             "question_delivery_mode": question_delivery_mode,
                             "prompt_constrained": prompt_constrained,
                         },

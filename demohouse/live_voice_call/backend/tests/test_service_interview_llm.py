@@ -2,7 +2,7 @@ import asyncio
 
 from arkitect.core.component.llm.model import ArkMessage
 
-from interview_flow import QuestionAnswerSnapshot
+from interview_flow import ASK_CLARIFY, InterviewFlow, QuestionAnswerSnapshot
 from interview_judge import Decision
 from prompt import INTERVIEWER_SYSTEM_PROMPT
 import service
@@ -564,6 +564,87 @@ def test_flow_state_origin_mapping():
     assert svc._flow_state_origin(service.ASK_FOLLOWUP) == "follow_up"
     assert svc._flow_state_origin(service.ASK_CLARIFY) == "clarify"
     assert svc._flow_state_origin(service.WRAP_UP) == "wrap_up"
+
+
+def test_resolve_delivery_state_prefers_next_response_state_before():
+    svc = service.VoiceBotService(
+        ark_api_key="ark-key",
+        llm1_endpoint_id="ep-judge",
+        llm2_endpoint_id="ep-interviewer",
+        asr_app_key="asr-app",
+        asr_access_key="asr-token",
+        tts_app_key="tts-app",
+        tts_access_key="tts-token",
+    )
+    next_response = service.FlowResponse(
+        state_before=service.ASK_CLARIFY,
+        state_after=service.WAIT_ANSWER,
+        interviewer_text="澄清文本",
+        decision=None,
+        question_id="q1",
+        transition_trace=["ASK_CLARIFY -> WAIT_ANSWER"],
+    )
+
+    resolved = svc._resolve_delivery_state(service.WAIT_ANSWER, next_response)
+    assert resolved == service.ASK_CLARIFY
+
+
+def test_clarify_delivery_state_still_injects_repeat_first_requirements_after_flow_transition():
+    class _AlwaysClarifyJudge:
+        async def decide(
+            self,
+            question,
+            candidate_answer,
+            follow_up_count,
+            clarify_count,
+            evidence=None,
+        ):
+            return Decision(
+                next_action="clarify",
+                next_prompt=question,
+                reason="candidate_requested_repeat",
+                coverage_score=0.0,
+            )
+
+    async def _run():
+        flow = InterviewFlow(
+            questions=[{"question_id": "q1", "main_question": "请介绍一个你主导的项目。"}],
+            judge=_AlwaysClarifyJudge(),
+        )
+        await flow.produce_interviewer_message()  # INTRO -> ASK_QUESTION
+        await flow.produce_interviewer_message()  # ASK_QUESTION -> WAIT_ANSWER
+        answer_response = await flow.receive_candidate_answer("我没听清，可以再说一遍吗")
+        assert answer_response.state_after == ASK_CLARIFY
+        decision = answer_response.decision
+        assert decision is not None
+
+        next_response = await flow.produce_interviewer_message()
+        assert next_response.state_before == ASK_CLARIFY
+        assert flow.state == service.WAIT_ANSWER
+
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+        )
+        delivery_state = svc._resolve_delivery_state(flow.state, next_response)
+        context = svc._build_interview_context(
+            decision=decision,
+            next_question_or_followup=next_response.interviewer_text,
+            flow_state=delivery_state,
+        )
+        origin = svc._flow_state_origin(delivery_state)
+        prompt_constrained = delivery_state in (service.ASK_QUESTION, service.ASK_CLARIFY)
+
+        assert "[题意澄清要求]" in context
+        assert origin == "clarify"
+        assert prompt_constrained is True
+
+    asyncio.run(_run())
 
 
 def test_is_scene_transition_between_questions_uses_segment_mapping():

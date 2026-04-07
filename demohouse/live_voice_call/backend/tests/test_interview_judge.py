@@ -146,17 +146,60 @@ def test_responses_adapter_path_uses_endpoint_and_thinking():
     asyncio.run(_run())
 
 
-def test_clarify_request_prefers_clarify_action():
+def test_clarify_request_repeat_prefers_question_replay():
     async def _run():
         judge = InterviewJudge(llm_decider=_always_followup)
+        question = "介绍一个你做过的项目，并说明目标、动作和结果。"
         decision = await judge.decide(
-            question="介绍一个你做过的项目",
-            candidate_answer="这道题我没太听懂，能解释一下吗？",
+            question=question,
+            candidate_answer="嗯，我没太听懂这个题目，能再说一遍吗？",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+        assert decision.next_action == "clarify"
+        assert decision.reason == "candidate_requested_repeat"
+        assert decision.next_prompt == question
+
+    asyncio.run(_run())
+
+
+def test_clarify_request_meaning_prefers_meaning_clarification():
+    async def _run():
+        judge = InterviewJudge(llm_decider=_always_followup)
+        question = "请讲一个你推进跨团队协作并最终达成结果的例子。"
+        decision = await judge.decide(
+            question=question,
+            candidate_answer="我不太理解这个题目什么意思，可以解释一下吗？",
             follow_up_count=0,
             clarify_count=0,
         )
         assert decision.next_action == "clarify"
         assert decision.reason == "candidate_requested_clarification"
-        assert decision.next_prompt
+        assert question in decision.next_prompt
+        assert "按这个题意来回答吗" in decision.next_prompt
+
+    asyncio.run(_run())
+
+
+def test_clarify_request_synonyms_are_classified_consistently():
+    async def _run():
+        judge = InterviewJudge(llm_decider=_always_followup)
+        question = "你如何处理复杂问题？"
+
+        repeat = await judge.decide(
+            question=question,
+            candidate_answer="请你重说一遍这个题目，我没听清。",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+        meaning = await judge.decide(
+            question=question,
+            candidate_answer="这个问题我没太理解，能再解释一下吗？",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+
+        assert repeat.reason == "candidate_requested_repeat"
+        assert meaning.reason == "candidate_requested_clarification"
 
     asyncio.run(_run())

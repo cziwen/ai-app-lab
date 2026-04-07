@@ -73,10 +73,21 @@ class InterviewJudge:
     ) -> Decision:
         answer = (candidate_answer or "").strip()
 
-        if self._is_clarify_request(answer):
+        clarify_subtype = self._classify_clarify_request(answer)
+        if clarify_subtype == "repeat_request":
+            repeat_prompt = (question or "").strip() or (
+                "我再完整复述一遍题目，你听清楚后再回答可以吗？"
+            )
             return Decision(
                 next_action="clarify",
-                next_prompt="你可以按这个问题理解来回答：请结合实际经历，说明你的具体做法和结果。",
+                next_prompt=repeat_prompt,
+                reason="candidate_requested_repeat",
+                coverage_score=0.0,
+            )
+        if clarify_subtype == "meaning_clarify":
+            return Decision(
+                next_action="clarify",
+                next_prompt=self._build_meaning_clarify_prompt(question),
                 reason="candidate_requested_clarification",
                 coverage_score=0.0,
             )
@@ -226,10 +237,22 @@ class InterviewJudge:
     def _heuristic_decision_json(
         self, question: str, candidate_answer: str, evidence: Optional[Dict[str, Any]]
     ) -> str:
-        if self._is_clarify_request(candidate_answer):
+        clarify_subtype = self._classify_clarify_request(candidate_answer)
+        if clarify_subtype == "repeat_request":
+            repeat_prompt = (question or "").strip() or (
+                "我再完整复述一遍题目，你听清楚后再回答可以吗？"
+            )
             decision = {
                 "next_action": "clarify",
-                "next_prompt": "这道题想了解你的实际做法。你可以按“背景-行动-结果”来回答。",
+                "next_prompt": repeat_prompt,
+                "reason": "candidate_requested_repeat",
+                "coverage_score": 0.0,
+            }
+            return json.dumps(decision, ensure_ascii=False)
+        if clarify_subtype == "meaning_clarify":
+            decision = {
+                "next_action": "clarify",
+                "next_prompt": self._build_meaning_clarify_prompt(question),
                 "reason": "candidate_requested_clarification",
                 "coverage_score": 0.0,
             }
@@ -309,25 +332,81 @@ class InterviewJudge:
                 break
         return picked
 
-    def _is_clarify_request(self, answer: str) -> bool:
-        normalized = (answer or "").strip().replace("？", "?")
+    def _normalize_clarify_text(self, answer: str) -> str:
+        normalized = (answer or "").strip().lower()
         if not normalized:
-            return False
-        clarify_signals = [
+            return ""
+        replacements = {
+            "？": "?",
+            "，": ",",
+            "。": ".",
+            "！": "!",
+            "：": ":",
+            "；": ";",
+            "　": " ",
+            "重新再说一遍": "再说一遍",
+            "重新再讲一遍": "再讲一遍",
+            "重说一遍": "再说一遍",
+            "重讲一遍": "再讲一遍",
+            "再重复一遍": "重复一遍",
+            "重新说一遍": "再说一遍",
+            "重新讲一遍": "再讲一遍",
+        }
+        for src, target in replacements.items():
+            normalized = normalized.replace(src, target)
+        normalized = re.sub(r"\s+", "", normalized)
+        return normalized
+
+    def _classify_clarify_request(self, answer: str) -> Optional[str]:
+        normalized = self._normalize_clarify_text(answer)
+        if not normalized:
+            return None
+
+        repeat_signals = [
+            "没听清",
+            "听不清",
             "没听懂",
             "没太听懂",
+            "再说一遍",
+            "再讲一遍",
+            "重复一遍",
+            "题目是什么",
+            "重新说",
+            "重新讲",
+            "再说一次",
+            "重说",
+            "重讲",
+        ]
+        meaning_signals = [
             "没理解",
+            "没太理解",
             "不理解",
+            "不太理解",
             "什么意思",
             "什么问题",
             "怎么理解",
-            "题目是什么",
             "请解释",
-            "再说一遍",
             "再解释",
-            "听不清",
+            "解释一下",
+            "我没懂",
+            "我不太懂",
+            "为什么说",
+            "为什么是",
         ]
-        for signal in clarify_signals:
+
+        for signal in repeat_signals:
             if signal in normalized:
-                return True
-        return False
+                return "repeat_request"
+        for signal in meaning_signals:
+            if signal in normalized:
+                return "meaning_clarify"
+        return None
+
+    def _is_clarify_request(self, answer: str) -> bool:
+        return self._classify_clarify_request(answer) is not None
+
+    def _build_meaning_clarify_prompt(self, question: str) -> str:
+        core = (question or "").strip()
+        if not core:
+            return "我解释一下题意：你可以按题目本身来回答，可以吗？"
+        return f"我解释一下题意：我们讨论的还是这道题本身——{core}，你可以按这个题意来回答吗？"
