@@ -481,7 +481,7 @@ def test_build_interview_context_clarify_uses_clarify_instruction():
 
     assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
     assert "[澄清说明]" in context
-    assert "复述题干关键点 -> 一句解释 -> 确认问句" in context
+    assert "复述题干关键点 -> 一句解释 -> 邀请作答（按原题型输出）" in context
     assert "开场不强制" in context
 
 
@@ -552,12 +552,14 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "禁止表达个人观点、结论、建议" in INTERVIEWER_SYSTEM_PROMPT
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
     assert "任何提问都只输出对[下一步内容]的完整表达" in INTERVIEWER_SYSTEM_PROMPT
-    assert "末尾必须以问号（？或?）结束" in INTERVIEWER_SYSTEM_PROMPT
+    assert "题型保真：若[下一步内容]为问句，输出问句；若为陈述/任务指令句，输出陈述/任务指令句，禁止强行改成问句" in INTERVIEWER_SYSTEM_PROMPT
+    assert "标点保真：问句使用问号（？），陈述/任务指令句使用句号（。），与[下一步内容]题型一致" in INTERVIEWER_SYSTEM_PROMPT
+    assert "禁止为了凑问句追加确认尾巴，如“对吗/可以吗/好吗/是吗”等" in INTERVIEWER_SYSTEM_PROMPT
     assert "开场组件为可选，不是必选" in INTERVIEWER_SYSTEM_PROMPT
     assert "无开场 / 仅语气词 / 仅过渡语 / 语气词+过渡语" in INTERVIEWER_SYSTEM_PROMPT
     assert "语气词可用“嗯/好的/了解”等" in INTERVIEWER_SYSTEM_PROMPT
     assert "若不需要开场可直接进入题干" in INTERVIEWER_SYSTEM_PROMPT
-    assert "开场组件只能出现在问句前" in INTERVIEWER_SYSTEM_PROMPT
+    assert "开场组件只能出现在题干本体前" in INTERVIEWER_SYSTEM_PROMPT
     assert "过渡强度判定" in INTERVIEWER_SYSTEM_PROMPT
     assert "none（首轮首问）" in INTERVIEWER_SYSTEM_PROMPT
     assert "soft（同场景）" in INTERVIEWER_SYSTEM_PROMPT
@@ -572,7 +574,7 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "“我觉得”“我认为”“我更偏向”" in INTERVIEWER_SYSTEM_PROMPT
     assert "“你可以”“你应该”“建议你”" in INTERVIEWER_SYSTEM_PROMPT
     assert "“其实就是”“本质上是”" in INTERVIEWER_SYSTEM_PROMPT
-    assert "必须先重写为纯问句再输出" in INTERVIEWER_SYSTEM_PROMPT
+    assert "必须先重写为中性表达并保持题型保真再输出" in INTERVIEWER_SYSTEM_PROMPT
     assert "建议不超过14字" in INTERVIEWER_SYSTEM_PROMPT
     assert "建议不超过20字" in INTERVIEWER_SYSTEM_PROMPT
 
@@ -605,6 +607,8 @@ def test_build_interview_context_ask_question_injects_fidelity_requirements():
     assert "若[下一步内容]含“背景说明+提问要求”，两部分必须都保留" in context
     assert "禁止只输出问题尾句" in context
     assert "若含对立观点前置背景（如“有人说…也有人说…”），该背景必须完整保留" in context
+    assert "不得强行改成确认问句" in context
+    assert "不得追加“对吗/可以吗/好吗/是吗”等确认尾巴" in context
     assert "禁止省略、合并、替换任何关键数字或条件" in context
 
 
@@ -664,6 +668,7 @@ def test_build_interview_context_ask_clarify_injects_repeat_first_requirements()
     assert "[题意澄清要求]" in context
     assert "先复述题干关键信息，再做一句简短解释" in context
     assert "解释不得新增考察点" in context
+    assert "若题干是陈述/任务指令句，保持原题型，不要转成确认问句" in context
 
 
 def test_flow_state_origin_mapping():
