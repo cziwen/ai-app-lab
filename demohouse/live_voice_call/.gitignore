@@ -10,3 +10,4 @@ deploy/acme-webroot/*
 
 /demo_resource
 /artifacts
+backend/backend/artifacts
