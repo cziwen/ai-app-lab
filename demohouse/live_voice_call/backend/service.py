@@ -1048,14 +1048,15 @@ class VoiceBotService(BaseModel):
                     )
             elif decision.next_action == "clarify":
                 parts.append(
-                    "[指令] 候选人对题意有疑惑，请仅做题意澄清，不要新增考察维度，也不要转成追问。"
+                    "[指令] 候选人对题意有疑惑，请仅做题意澄清，不要新增考察维度，也不要转成追问。澄清属于解释态，不属于提问态。"
                 )
                 if decision.next_prompt:
                     parts.append(f"[澄清说明] {decision.next_prompt}")
                 if has_candidate_speech:
                     parts.append(
-                        "[表达风格] 当前为soft过渡：按“复述题干关键点 -> 一句解释 -> 邀请作答（按原题型输出）”顺序表达；开场不强制。"
+                        "[表达风格] 当前为soft过渡：按“复述题干关键点 -> 一句解释 -> 请按这个题意继续作答（陈述句）”顺序表达；开场不强制。"
                         "如需开场，可选无开场、仅语气词、仅过渡语或语气词+过渡语；解释仅用于澄清题意，不得新增考察点。"
+                        "澄清阶段禁止反问、禁止新增问题、禁止问号。"
                     )
 
         if next_question_or_followup:
@@ -1076,6 +1077,8 @@ class VoiceBotService(BaseModel):
                 "[题意澄清要求] 若候选人是在请求重复题目或没听清，先复述题干关键信息，再做一句简短解释；"
                 "解释不得新增考察点。"
                 "若题干是陈述/任务指令句，保持原题型，不要转成确认问句，也不要新增确认尾巴。"
+                "澄清结束句统一使用“请按这个题意继续作答。”。"
+                "澄清阶段禁止反问和二选一提问，不要输出问号。"
             )
 
         if flow_state == WRAP_UP:

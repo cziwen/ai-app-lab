@@ -37,8 +37,12 @@ JUDGE_INSTRUCTIONS = (
     "遵守：当 next_action=next_question 时，next_prompt 必须为空字符串；"
     "当 next_action=follow_up 时，next_prompt 必须是追问句；"
     "当 next_action=clarify 时，next_prompt 必须是题意澄清，不能新增考察点。"
+    "当 next_action=clarify 时，next_prompt 必须是解释性陈述，禁止反问、禁止二选一提问。"
     "clarify 仅用于候选人明确表示听不懂、没理解题目、请求解释。"
     "follow_up 仅用于候选人已经作答但信息不足，需要继续深挖。"
+    "候选人回答“不知道/不清楚/不会/没想好”时，一律视为回答不足，返回 follow_up。"
+    "仅当候选人明确表示“没听清/没听懂/请重复题目/请解释题意/什么意思”时，才允许返回 clarify。"
+    "若回答同时包含“回答不足词”和“求澄清词”，优先返回 clarify。"
     "评分时只允许参考：题目(question)、评分分界线(scoring_boundary)、候选人回答(candidate_answer)。"
     "禁止参考 must_cover、reference_answer、best_standard、medium_standard、worst_standard。"
 )
@@ -74,9 +78,11 @@ class InterviewJudge:
         answer = (candidate_answer or "").strip()
 
         clarify_subtype = self._classify_clarify_request(answer)
+        insufficient_answer = self._is_insufficient_answer(answer)
+        # Priority: explicit clarification request overrides insufficiency wording.
         if clarify_subtype == "repeat_request":
             repeat_prompt = (question or "").strip() or (
-                "我再完整复述一遍题目，你听清楚后再回答可以吗？"
+                "我复述一下题目。请按题意继续作答。"
             )
             return Decision(
                 next_action="clarify",
@@ -89,6 +95,13 @@ class InterviewJudge:
                 next_action="clarify",
                 next_prompt=self._build_meaning_clarify_prompt(question),
                 reason="candidate_requested_clarification",
+                coverage_score=0.0,
+            )
+        if insufficient_answer:
+            return Decision(
+                next_action="follow_up",
+                next_prompt="我先听你讲一个最接近的真实案例，再补充你的行动和结果。",
+                reason="candidate_answer_insufficient",
                 coverage_score=0.0,
             )
 
@@ -238,14 +251,23 @@ class InterviewJudge:
         self, question: str, candidate_answer: str, evidence: Optional[Dict[str, Any]]
     ) -> str:
         clarify_subtype = self._classify_clarify_request(candidate_answer)
+        insufficient_answer = self._is_insufficient_answer(candidate_answer)
         if clarify_subtype == "repeat_request":
             repeat_prompt = (question or "").strip() or (
-                "我再完整复述一遍题目，你听清楚后再回答可以吗？"
+                "我复述一下题目。请按题意继续作答。"
             )
             decision = {
                 "next_action": "clarify",
                 "next_prompt": repeat_prompt,
                 "reason": "candidate_requested_repeat",
+                "coverage_score": 0.0,
+            }
+            return json.dumps(decision, ensure_ascii=False)
+        if insufficient_answer:
+            decision = {
+                "next_action": "follow_up",
+                "next_prompt": "我先听你讲一个最接近的真实案例，再补充你的行动和结果。",
+                "reason": "candidate_answer_insufficient",
                 "coverage_score": 0.0,
             }
             return json.dumps(decision, ensure_ascii=False)
@@ -402,11 +424,30 @@ class InterviewJudge:
                 return "meaning_clarify"
         return None
 
+    def _is_insufficient_answer(self, answer: str) -> bool:
+        normalized = self._normalize_clarify_text(answer)
+        if not normalized:
+            return False
+
+        insufficient_signals = [
+            "不知道",
+            "不清楚",
+            "不会",
+            "没想好",
+            "想不出来",
+            "答不上来",
+        ]
+        return any(signal in normalized for signal in insufficient_signals)
+
     def _is_clarify_request(self, answer: str) -> bool:
         return self._classify_clarify_request(answer) is not None
 
     def _build_meaning_clarify_prompt(self, question: str) -> str:
         core = (question or "").strip()
         if not core:
-            return "我解释一下题意：你可以按题目本身来回答，可以吗？"
-        return f"我解释一下题意：我们讨论的还是这道题本身——{core}，你可以按这个题意来回答吗？"
+            return "我复述一下题目：请按题目本身作答。这里需要围绕题干要求说明你的真实做法。请按这个题意继续作答。"
+        return (
+            f"我复述一下题目：{core}。"
+            "这里的关键术语按题干上下文理解，不需要额外扩展范围。"
+            "请按这个题意继续作答。"
+        )

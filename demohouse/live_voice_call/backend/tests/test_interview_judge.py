@@ -176,7 +176,8 @@ def test_clarify_request_meaning_prefers_meaning_clarification():
         assert decision.next_action == "clarify"
         assert decision.reason == "candidate_requested_clarification"
         assert question in decision.next_prompt
-        assert "按这个题意来回答吗" in decision.next_prompt
+        assert "请按这个题意继续作答。" in decision.next_prompt
+        assert "？" not in decision.next_prompt
 
     asyncio.run(_run())
 
@@ -201,5 +202,35 @@ def test_clarify_request_synonyms_are_classified_consistently():
 
         assert repeat.reason == "candidate_requested_repeat"
         assert meaning.reason == "candidate_requested_clarification"
+
+    asyncio.run(_run())
+
+
+def test_insufficient_answer_words_prefer_follow_up():
+    async def _run():
+        judge = InterviewJudge(llm_decider=_always_followup)
+        decision = await judge.decide(
+            question="你如何评估项目成效？",
+            candidate_answer="不知道，不清楚。",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+        assert decision.next_action == "follow_up"
+        assert decision.reason == "candidate_answer_insufficient"
+
+    asyncio.run(_run())
+
+
+def test_mixed_insufficient_and_clarify_signals_prefer_clarify():
+    async def _run():
+        judge = InterviewJudge(llm_decider=_always_followup)
+        decision = await judge.decide(
+            question="请说明你做决策时的判断标准。",
+            candidate_answer="我不清楚这题什么意思，请解释一下。",
+            follow_up_count=0,
+            clarify_count=0,
+        )
+        assert decision.next_action == "clarify"
+        assert decision.reason == "candidate_requested_clarification"
 
     asyncio.run(_run())

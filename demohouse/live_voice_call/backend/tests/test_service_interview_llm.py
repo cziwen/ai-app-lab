@@ -481,7 +481,9 @@ def test_build_interview_context_clarify_uses_clarify_instruction():
 
     assert "仅做题意澄清，不要新增考察维度，也不要转成追问" in context
     assert "[澄清说明]" in context
-    assert "复述题干关键点 -> 一句解释 -> 邀请作答（按原题型输出）" in context
+    assert "澄清属于解释态，不属于提问态" in context
+    assert "复述题干关键点 -> 一句解释 -> 请按这个题意继续作答（陈述句）" in context
+    assert "澄清阶段禁止反问、禁止新增问题、禁止问号" in context
     assert "开场不强制" in context
 
 
@@ -548,7 +550,8 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "执行流程（仅内部思考，不要输出这些步骤）" in INTERVIEWER_SYSTEM_PROMPT
     assert "先抽取信息点清单，再口语化改写，最后逐项自检" in INTERVIEWER_SYSTEM_PROMPT
     assert "若漏任一点，回退为完整复述[下一步内容]" in INTERVIEWER_SYSTEM_PROMPT
-    assert "提问状态（主问题、子问题、追问、澄清提问）下只能提问" in INTERVIEWER_SYSTEM_PROMPT
+    assert "提问状态（主问题、子问题、追问）下只能提问" in INTERVIEWER_SYSTEM_PROMPT
+    assert "澄清属于解释态，不属于提问态" in INTERVIEWER_SYSTEM_PROMPT
     assert "禁止表达个人观点、结论、建议" in INTERVIEWER_SYSTEM_PROMPT
     assert "所有提问类型都适用同一保真规则" in INTERVIEWER_SYSTEM_PROMPT
     assert "任何提问都只输出对[下一步内容]的完整表达" in INTERVIEWER_SYSTEM_PROMPT
@@ -577,6 +580,9 @@ def test_interviewer_system_prompt_contains_question_fidelity_rules():
     assert "必须先重写为中性表达并保持题型保真再输出" in INTERVIEWER_SYSTEM_PROMPT
     assert "建议不超过14字" in INTERVIEWER_SYSTEM_PROMPT
     assert "建议不超过20字" in INTERVIEWER_SYSTEM_PROMPT
+    assert "澄清阶段禁止反问、禁止新增问题、禁止问号" in INTERVIEWER_SYSTEM_PROMPT
+    assert "“你说的指标具体指什么？”" in INTERVIEWER_SYSTEM_PROMPT
+    assert "“是经营指标还是运营指标？”" in INTERVIEWER_SYSTEM_PROMPT
 
 
 def test_build_interview_context_ask_question_injects_fidelity_requirements():
@@ -669,6 +675,8 @@ def test_build_interview_context_ask_clarify_injects_repeat_first_requirements()
     assert "先复述题干关键信息，再做一句简短解释" in context
     assert "解释不得新增考察点" in context
     assert "若题干是陈述/任务指令句，保持原题型，不要转成确认问句" in context
+    assert "请按这个题意继续作答。" in context
+    assert "不要输出问号" in context
 
 
 def test_flow_state_origin_mapping():
