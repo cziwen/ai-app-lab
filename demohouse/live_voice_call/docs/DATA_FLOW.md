@@ -4,12 +4,13 @@
 
 ```text
 候选人打开 /check-in?token=INT-xxx
-  -> 前端建立 ws://...:8888?token=INT-xxx
+  -> 前端建立 ws://...:8888?token=INT-xxx&client_id=xxx (client_id 可选，建议传)
   -> handler 校验 token
      - 无效: BotError(INVALID_TOKEN) + close
      - 有效: 进入 InterviewOccupancy.acquire
          - admitted: 进入面试
-         - duplicate_token: BotError(TOKEN_ALREADY_WAITING) + close
+         - duplicate_token(不同 client_id): BotError(TOKEN_ALREADY_WAITING) + close
+         - admitted(相同 client_id 重连接管): 进入面试
          - capacity_full: BotError(INTERVIEW_CAPACITY_FULL) + close
          - other: BotError(SERVICE_UNAVAILABLE) + close
 ```
@@ -44,5 +45,7 @@
 
 ## 5. 结束与持久化
 - `ClientHangup` 或流程自然结束后，`handler` 收集 turns 与音频。
+- finalize 护栏：若旧会话发现 token 已被新 owner 接管（`token_reacquired`），则降级 `disconnected` 并 `skip_complete`。
 - `PersistenceQueue` 异步写入存储并触发 `ScoringQueue`。
+- persistence 护栏：若写入前 owner 已变化，则记录 `event=interview_persist.complete_skipped reason=token_reacquired`，跳过 `completed` 写入。
 - `ScoringQueue` 调用 LLM3 完成场景段评分。

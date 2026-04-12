@@ -353,10 +353,15 @@ docker compose down
 当前并发控制采用 `InterviewOccupancy` 的快速准入模型，不走排队事件链路：
 
 - 准入成功：继续面试
-- 同 token 重复占用：返回 `BotError`，`code=TOKEN_ALREADY_WAITING`，并关闭连接
+- 同 token 且不同 `client_id` 重复占用：返回 `BotError`，`code=TOKEN_ALREADY_WAITING`，并关闭连接
+- 同 token 且相同 `client_id` 重连：允许接管 owner（不返回 `TOKEN_ALREADY_WAITING`）
 - 并发满载：返回 `BotError`，`code=INTERVIEW_CAPACITY_FULL`，并关闭连接
 - 服务异常：返回 `BotError`，`code=SERVICE_UNAVAILABLE`，并关闭连接
 - token 无效：返回 `BotError`，`code=INVALID_TOKEN`，并关闭连接
+
+结束态护栏（防误失效）：
+- 若旧会话检测到 token 已被新 owner 接管（`token_reacquired`），会降级为 `disconnected` 并跳过完成态写入。
+- 持久化前会再次校验 owner；若 owner 已变化，会记录 `event=interview_persist.complete_skipped reason=token_reacquired`，不执行 `completed` 写入。
 
 说明：当前版本不使用历史排队事件。
 
