@@ -262,12 +262,12 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{job=~\"interview-logs|backend-server\"}",
+          "expr": "{job=\"interview-logs\", token=~\"${token:regex}\"}",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Interview Logs (Filter by token label in Explore)",
+      "title": "Interview Logs by Token ($token)",
       "type": "logs"
     }
   ],
@@ -279,7 +279,20 @@
     "observability"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "token",
+        "label": "Interview Token",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
   },
   "time": {
     "from": "now-1h",
