@@ -12,11 +12,24 @@ HeartbeatResult = Literal["ok", "lost_lock", "error"]
 _ACQUIRE_SCRIPT = """
 redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", ARGV[3])
 local current_owner = redis.call("GET", KEYS[1])
+local incoming_client_id = ARGV[6]
 if current_owner then
     if current_owner == ARGV[2] then
         redis.call("PEXPIRE", KEYS[1], ARGV[4])
+        if incoming_client_id ~= "" then
+            redis.call("SET", KEYS[3], incoming_client_id, "PX", ARGV[4])
+        end
         redis.call("ZADD", KEYS[2], ARGV[3] + ARGV[4], ARGV[1])
         return "admitted"
+    end
+    if incoming_client_id ~= "" then
+        local current_client_id = redis.call("GET", KEYS[3])
+        if current_client_id and current_client_id == incoming_client_id then
+            redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[4])
+            redis.call("SET", KEYS[3], incoming_client_id, "PX", ARGV[4])
+            redis.call("ZADD", KEYS[2], ARGV[3] + ARGV[4], ARGV[1])
+            return "admitted"
+        end
     end
     return "duplicate_token"
 end
@@ -28,9 +41,21 @@ local ok = redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[4], "NX")
 if not ok then
     local race_owner = redis.call("GET", KEYS[1])
     if race_owner then
+        if incoming_client_id ~= "" then
+            local race_client_id = redis.call("GET", KEYS[3])
+            if race_client_id and race_client_id == incoming_client_id then
+                redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[4])
+                redis.call("SET", KEYS[3], incoming_client_id, "PX", ARGV[4])
+                redis.call("ZADD", KEYS[2], ARGV[3] + ARGV[4], ARGV[1])
+                return "admitted"
+            end
+        end
         return "duplicate_token"
     end
     return "capacity_full"
+end
+if incoming_client_id ~= "" then
+    redis.call("SET", KEYS[3], incoming_client_id, "PX", ARGV[4])
 end
 redis.call("ZADD", KEYS[2], ARGV[3] + ARGV[4], ARGV[1])
 return "admitted"
@@ -42,6 +67,11 @@ if not current_owner or current_owner ~= ARGV[2] then
     return "lost_lock"
 end
 redis.call("PEXPIRE", KEYS[1], ARGV[4])
+if ARGV[5] ~= "" then
+    redis.call("SET", KEYS[3], ARGV[5], "PX", ARGV[4])
+else
+    redis.call("PEXPIRE", KEYS[3], ARGV[4])
+end
 redis.call("ZADD", KEYS[2], ARGV[3] + ARGV[4], ARGV[1])
 return "ok"
 """
@@ -50,6 +80,7 @@ _RELEASE_SCRIPT = """
 local current_owner = redis.call("GET", KEYS[1])
 if current_owner and current_owner == ARGV[2] then
     redis.call("DEL", KEYS[1])
+    redis.call("DEL", KEYS[3])
     redis.call("ZREM", KEYS[2], ARGV[1])
     return 1
 end
@@ -60,7 +91,6 @@ _ACTIVE_COUNT_SCRIPT = """
 redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
 return redis.call("ZCARD", KEYS[1])
 """
-
 
 @dataclass(frozen=True)
 class OccupancyConfig:
@@ -107,6 +137,9 @@ class InterviewOccupancy:
     def _lock_key(self, token: str) -> str:
         return f"{self._config.key_prefix}:lock:{token}"
 
+    def _client_key(self, token: str) -> str:
+        return f"{self._config.key_prefix}:client:{token}"
+
     def _active_key(self) -> str:
         return f"{self._config.key_prefix}:active"
 
@@ -116,21 +149,24 @@ class InterviewOccupancy:
     def _ttl_ms(self) -> int:
         return self._config.ttl_seconds * 1000
 
-    def acquire(self, token: str, owner_id: str) -> AcquireResult:
+    def acquire(self, token: str, owner_id: str, client_id: Optional[str] = None) -> AcquireResult:
         client = self._get_client()
         if client is None:
             return "error"
+        normalized_client_id = (client_id or "").strip()
         try:
             result = client.eval(
                 _ACQUIRE_SCRIPT,
-                2,
+                3,
                 self._lock_key(token),
                 self._active_key(),
+                self._client_key(token),
                 token,
                 owner_id,
                 self._now_ms(),
                 self._ttl_ms(),
                 self._config.max_active,
+                normalized_client_id,
             )
         except RedisError:
             return "error"
@@ -138,20 +174,23 @@ class InterviewOccupancy:
             return result
         return "error"
 
-    def heartbeat(self, token: str, owner_id: str) -> HeartbeatResult:
+    def heartbeat(self, token: str, owner_id: str, client_id: Optional[str] = None) -> HeartbeatResult:
         client = self._get_client()
         if client is None:
             return "error"
+        normalized_client_id = (client_id or "").strip()
         try:
             result = client.eval(
                 _HEARTBEAT_SCRIPT,
-                2,
+                3,
                 self._lock_key(token),
                 self._active_key(),
+                self._client_key(token),
                 token,
                 owner_id,
                 self._now_ms(),
                 self._ttl_ms(),
+                normalized_client_id,
             )
         except RedisError:
             return "error"
@@ -166,9 +205,10 @@ class InterviewOccupancy:
         try:
             result = client.eval(
                 _RELEASE_SCRIPT,
-                2,
+                3,
                 self._lock_key(token),
                 self._active_key(),
+                self._client_key(token),
                 token,
                 owner_id,
             )

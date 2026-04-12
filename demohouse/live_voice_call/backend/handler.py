@@ -669,7 +669,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         path (str): The requested path.
     """
     parsed_path = urlparse(path or "")
-    token = (parse_qs(parsed_path.query).get("token", [None])[0] or "").strip()
+    query = parse_qs(parsed_path.query)
+    token = (query.get("token", [None])[0] or "").strip()
+    reconnect_client_id = (query.get("client_id", [None])[0] or "").strip()
+    if len(reconnect_client_id) > 128:
+        reconnect_client_id = reconnect_client_id[:128]
     interview_data = (
         await asyncio.to_thread(start_interview_session, token) if token else None
     )
@@ -690,9 +694,15 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
 
     occupancy_owner_id = str(uuid.uuid4())
     acquire_result = await asyncio.to_thread(
-        OCCUPANCY.acquire, token, occupancy_owner_id
+        OCCUPANCY.acquire, token, occupancy_owner_id, reconnect_client_id
     )
     if acquire_result == "duplicate_token":
+        server_logger.warning(
+            "event=interview.rejected reason=duplicate_token remote=%s token=%s client_id_present=%s",
+            websocket.remote_address,
+            token,
+            "1" if reconnect_client_id else "0",
+        )
         duplicate_waiting_payload = BotErrorPayload(
             error=ErrorEvent(
                 code="TOKEN_ALREADY_WAITING",
@@ -866,7 +876,10 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 pass
 
             heartbeat_result = await asyncio.to_thread(
-                OCCUPANCY.heartbeat, token, occupancy_owner_id
+                OCCUPANCY.heartbeat,
+                token,
+                occupancy_owner_id,
+                reconnect_client_id,
             )
             if heartbeat_result == "ok":
                 continue

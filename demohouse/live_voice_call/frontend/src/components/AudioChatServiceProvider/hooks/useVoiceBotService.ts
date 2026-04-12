@@ -23,7 +23,19 @@ import { useSyncRef } from '@/hooks/useSyncRef';
 import { useWsUrl } from '@/components/AudioChatServiceProvider/hooks/useWsUrl';
 import { useSessionAuth } from '@/auth/context';
 
-const appendTokenToWsUrl = (baseWsUrl: string, token?: string | null) => {
+const createReconnectClientId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+};
+const PAGE_RECONNECT_CLIENT_ID = createReconnectClientId();
+
+const appendTokenToWsUrl = (
+  baseWsUrl: string,
+  token?: string | null,
+  reconnectClientId?: string | null,
+) => {
   if (!token) {
     return baseWsUrl;
   }
@@ -31,13 +43,21 @@ const appendTokenToWsUrl = (baseWsUrl: string, token?: string | null) => {
   if (!trimmed) {
     return baseWsUrl;
   }
+  const normalizedClientId = reconnectClientId?.trim() ?? '';
   if (typeof window !== 'undefined') {
     const resolved = new URL(baseWsUrl, window.location.href);
     resolved.searchParams.set('token', trimmed);
+    if (normalizedClientId) {
+      resolved.searchParams.set('client_id', normalizedClientId);
+    }
     return resolved.toString();
   }
   const separator = baseWsUrl.includes('?') ? '&' : '?';
-  return `${baseWsUrl}${separator}token=${encodeURIComponent(trimmed)}`;
+  const base = `${baseWsUrl}${separator}token=${encodeURIComponent(trimmed)}`;
+  if (!normalizedClientId) {
+    return base;
+  }
+  return `${base}&client_id=${encodeURIComponent(normalizedClientId)}`;
 };
 
 const resolveReconnectMaxSeconds = () => {
@@ -105,6 +125,7 @@ export const useVoiceBotService = () => {
 
   const { wsUrl } = useWsUrl();
   const { token } = useSessionAuth();
+  const reconnectClientIdRef = useRef<string>(PAGE_RECONNECT_CLIENT_ID);
   const ttsDoneRef = useRef(false);
   const playbackStoppedRef = useRef(false);
   const botTurnStartedRef = useRef(false);
@@ -146,7 +167,11 @@ export const useVoiceBotService = () => {
     if (!serviceRef.current) {
       return false;
     }
-    const wsUrlWithToken = appendTokenToWsUrl(wsUrl, token);
+    const wsUrlWithToken = appendTokenToWsUrl(
+      wsUrl,
+      token,
+      reconnectClientIdRef.current,
+    );
     try {
       await serviceRef.current.connect(wsUrlWithToken);
       setWsConnected(true);
