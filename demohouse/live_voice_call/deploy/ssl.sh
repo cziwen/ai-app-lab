@@ -255,6 +255,7 @@ switch_active_link() {
 
 reload_gateway() {
   wait_for_service_running grafana "$GRAFANA_WAIT_TIMEOUT_SECONDS"
+  wait_for_service_running gateway 30
   compose exec -T gateway nginx -t
   compose exec -T gateway nginx -s reload
 }
@@ -316,15 +317,25 @@ run_init() {
 
   echo "[ssl] Building gateway (serial, FRONTEND_NODE_OPTIONS=$FRONTEND_NODE_OPTIONS)"
   compose_build_serial --build-arg FRONTEND_NODE_OPTIONS="$FRONTEND_NODE_OPTIONS" gateway
-  echo "[ssl] Starting gateway"
-  compose up -d gateway
 
   local existing_cert
   existing_cert="$(pick_latest_cert_dir "$domain" || true)"
   if [[ -n "$existing_cert" ]]; then
     echo "[ssl] Reusing existing certificate for $domain: $existing_cert"
   else
-    echo "[ssl] No existing certificate found, requesting certificate for $domain"
+    echo "[ssl] No existing certificate found, will request certificate after gateway is up"
+  fi
+
+  echo "[ssl] Starting observability stack"
+  compose up -d prometheus loki promtail node-exporter redis-exporter grafana
+  wait_for_service_running grafana "$GRAFANA_WAIT_TIMEOUT_SECONDS"
+
+  echo "[ssl] Starting gateway"
+  compose up -d gateway
+  wait_for_service_running gateway 30
+
+  if [[ -z "$existing_cert" ]]; then
+    echo "[ssl] Requesting certificate for $domain"
     compose --profile certbot run --rm certbot certonly \
       --webroot -w "$ACME_WEBROOT" \
       -d "$domain" \
@@ -332,10 +343,6 @@ run_init() {
       -m "$email" \
       --agree-tos --no-eff-email
   fi
-
-  echo "[ssl] Starting observability stack"
-  compose up -d prometheus loki promtail node-exporter redis-exporter grafana
-  wait_for_service_running grafana "$GRAFANA_WAIT_TIMEOUT_SECONDS"
 
   activate_latest_cert "$domain"
 
