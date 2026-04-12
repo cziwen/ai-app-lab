@@ -176,6 +176,19 @@ class InterviewOccupancy:
             return False
         return bool(result)
 
+    def current_owner(self, token: str) -> Optional[str]:
+        client = self._get_client()
+        if client is None:
+            return None
+        try:
+            owner = client.get(self._lock_key(token))
+        except RedisError:
+            return None
+        if owner is None:
+            return None
+        owner_str = str(owner).strip()
+        return owner_str or None
+
     def active_count(self) -> Optional[int]:
         client = self._get_client()
         if client is None:

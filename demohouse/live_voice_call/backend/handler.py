@@ -733,9 +733,18 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         await websocket.close()
         return
 
+    occupancy_released = False
+
+    async def release_occupancy_once() -> None:
+        nonlocal occupancy_released
+        if occupancy_released:
+            return
+        occupancy_released = True
+        await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
+
     session_marked = await asyncio.to_thread(mark_interview_in_progress, token)
     if not session_marked:
-        await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
+        await release_occupancy_once()
         unavailable_payload = BotErrorPayload(
             error=ErrorEvent(code="SERVICE_UNAVAILABLE", message="服务暂时不可用，请稍后重试")
         )
@@ -972,6 +981,10 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             {fetch_task, wait_closed_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if wait_closed_task in done:
+            # Release occupancy as soon as transport-level close is observed.
+            # The handler may still be unwinding service tasks for a short time.
+            await release_occupancy_once()
         for task in pending:
             task.cancel()
         for task in done:
@@ -1007,7 +1020,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             occupancy_heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await occupancy_heartbeat_task
-        await asyncio.to_thread(OCCUPANCY.release, token, occupancy_owner_id)
+        await release_occupancy_once()
         try:
             if not interview_completed and close_source is None:
                 close_source = "client_ws" if websocket.closed else "internal_error"
@@ -1052,11 +1065,26 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 and not client_hangup
                 and is_network_disconnect
             ):
-                marked_disconnected = await asyncio.to_thread(
-                    mark_interview_disconnected,
-                    token,
-                    INTERVIEW_RECONNECT_GRACE_SECONDS,
-                )
+                marked_disconnected = False
+                occupancy_current_owner: Optional[str] = None
+                current_owner_fn = getattr(OCCUPANCY, "current_owner", None)
+                if callable(current_owner_fn):
+                    occupancy_current_owner = await asyncio.to_thread(
+                        current_owner_fn, token
+                    )
+                if (
+                    occupancy_current_owner
+                    and occupancy_current_owner != occupancy_owner_id
+                ):
+                    interview_log(
+                        "event=interview.disconnect_mark_skipped reason=token_reacquired"
+                    )
+                else:
+                    marked_disconnected = await asyncio.to_thread(
+                        mark_interview_disconnected,
+                        token,
+                        INTERVIEW_RECONNECT_GRACE_SECONDS,
+                    )
                 if marked_disconnected:
                     should_mark_completed = False
                     end_status = "disconnected"
