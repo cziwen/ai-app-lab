@@ -20,6 +20,8 @@ FRONTEND_NODE_OPTIONS="${FRONTEND_NODE_OPTIONS:---max-old-space-size=512}"
 STOP_NONESSENTIAL_CONTAINERS_DEFAULT="${STOP_NONESSENTIAL_CONTAINERS_DEFAULT:-1}"
 STOP_EXTRA_PROCESSES_DEFAULT="${STOP_EXTRA_PROCESSES_DEFAULT:-0}"
 EXTRA_STOP_PATTERNS="${EXTRA_STOP_PATTERNS:-code-server|vscode-server|AliYunDunMonito|aegis_cli}"
+GRAFANA_WAIT_TIMEOUT_SECONDS="${GRAFANA_WAIT_TIMEOUT_SECONDS:-180}"
+KEEP_SERVICES=(backend gateway certbot grafana prometheus loki promtail node-exporter redis-exporter redis)
 
 DOMAIN_OVERRIDE=""
 EMAIL_OVERRIDE=""
@@ -133,15 +135,24 @@ stop_nonessential_containers() {
     return 0
   fi
 
-  local keep_regex='^(live-voice-backend|live-voice-gateway|live-voice-certbot)$'
   local names=()
   local ids=()
-  local line
-  while IFS='|' read -r line; do
-    [[ -z "$line" ]] && continue
-    local id="${line%%|*}"
-    local name="${line#*|}"
-    if [[ "$name" =~ $keep_regex ]]; then
+  local keep_id
+  local id
+  local name
+  local service
+  declare -A keep_ids=()
+
+  for service in "${KEEP_SERVICES[@]}"; do
+    while IFS= read -r keep_id; do
+      [[ -z "$keep_id" ]] && continue
+      keep_ids["$keep_id"]=1
+    done < <(compose ps -q "$service" 2>/dev/null || true)
+  done
+
+  while IFS='|' read -r id name; do
+    [[ -z "$id" ]] && continue
+    if [[ -n "${keep_ids[$id]:-}" ]]; then
       continue
     fi
     names+=("$name")
@@ -155,6 +166,11 @@ stop_nonessential_containers() {
 
   echo "[ssl] Stopping nonessential containers: ${names[*]}"
   docker stop "${ids[@]}" || true
+}
+
+restart_project_stack_atomic() {
+  echo "[ssl] Restarting compose project atomically (down -> up), preserving named volumes"
+  compose down --remove-orphans || true
 }
 
 stop_extra_processes() {
@@ -243,8 +259,34 @@ switch_active_link() {
 }
 
 reload_gateway() {
+  wait_for_service_running grafana "$GRAFANA_WAIT_TIMEOUT_SECONDS"
+  wait_for_service_running gateway 30
   compose exec -T gateway nginx -t
   compose exec -T gateway nginx -s reload
+}
+
+wait_for_service_running() {
+  local service="$1"
+  local timeout="${2:-60}"
+  local waited=0
+  local interval=2
+
+  echo "[ssl] Waiting for service '$service' to be running (timeout: ${timeout}s)"
+  while (( waited < timeout )); do
+    local running
+    running="$(compose ps --status running --services "$service" 2>/dev/null || true)"
+    if [[ "$running" == "$service" ]]; then
+      echo "[ssl] Service '$service' is running"
+      return 0
+    fi
+    sleep "$interval"
+    waited=$((waited + interval))
+  done
+
+  echo "[ssl] Service '$service' failed to reach running state within ${timeout}s" >&2
+  echo "[ssl] Debug hint: docker compose ps $service" >&2
+  echo "[ssl] Debug hint: docker compose logs --tail=100 $service" >&2
+  return 1
 }
 
 activate_latest_cert() {
@@ -266,9 +308,9 @@ run_init() {
   email="$(resolve_email)"
 
   print_precheck
-  stop_project_containers
   stop_nonessential_containers
   stop_extra_processes
+  restart_project_stack_atomic
 
   echo "[ssl] Ensuring swap for low-memory deployment"
   ensure_swap
@@ -280,15 +322,25 @@ run_init() {
 
   echo "[ssl] Building gateway (serial, FRONTEND_NODE_OPTIONS=$FRONTEND_NODE_OPTIONS)"
   compose_build_serial --build-arg FRONTEND_NODE_OPTIONS="$FRONTEND_NODE_OPTIONS" gateway
-  echo "[ssl] Starting gateway"
-  compose up -d gateway
 
   local existing_cert
   existing_cert="$(pick_latest_cert_dir "$domain" || true)"
   if [[ -n "$existing_cert" ]]; then
     echo "[ssl] Reusing existing certificate for $domain: $existing_cert"
   else
-    echo "[ssl] No existing certificate found, requesting certificate for $domain"
+    echo "[ssl] No existing certificate found, will request certificate after gateway is up"
+  fi
+
+  echo "[ssl] Starting observability stack"
+  compose up -d prometheus loki promtail node-exporter redis-exporter grafana
+  wait_for_service_running grafana "$GRAFANA_WAIT_TIMEOUT_SECONDS"
+
+  echo "[ssl] Starting gateway"
+  compose up -d gateway
+  wait_for_service_running gateway 30
+
+  if [[ -z "$existing_cert" ]]; then
+    echo "[ssl] Requesting certificate for $domain"
     compose --profile certbot run --rm certbot certonly \
       --webroot -w "$ACME_WEBROOT" \
       -d "$domain" \
