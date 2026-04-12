@@ -48,7 +48,7 @@
 4. **性能监控**
    - **Turn Trace**：详细记录每轮对话的性能指标
    - **关键指标**：judge_ms、llm2_ttft_ms、rec_to_first_sentence_ms
-   - **延迟优化**：ASR 静默检测默认 8 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置）、流式 TTS 合成
+   - **延迟优化**：ASR 静默检测默认 6 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，建议保持低于上游 8 秒超时）、流式 TTS 合成
 
 ### 流程架构
 

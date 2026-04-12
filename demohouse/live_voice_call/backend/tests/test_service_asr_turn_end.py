@@ -39,6 +39,36 @@ def _asr_response(text: str, duration: int = 0, stream_connect_id: str = ""):
     )
 
 
+def test_load_asr_silence_timeout_ms_clamps_to_safe_max(monkeypatch):
+    logs = []
+    monkeypatch.setenv("ASR_SILENCE_TIMEOUT_MS", "9000")
+    monkeypatch.setattr(service, "INFO", logs.append)
+
+    loaded = service._load_asr_silence_timeout_ms()
+
+    assert loaded == service.MAX_ASR_SILENCE_TIMEOUT_MS
+    assert any("clamp to safe max" in line for line in logs)
+
+
+def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 50)
+        svc.asr_buffer = "边界收尾"
+        svc.asr_last_growth_mono_ms = 1000
+        monkeypatch.setattr(svc, "_mono_ms", lambda: 1050)
+
+        finalized = await svc._finalize_asr_turn_if_silent()
+
+        assert isinstance(finalized, service.SentenceRecognizedPayload)
+        assert finalized.sentence == "边界收尾"
+        assert fake.close_calls == 1
+        assert any("ASR_TURN_END reason=silence_timeout silence_ms=50" in line for line in logs)
+
+    asyncio.run(_run())
+
+
 def test_turn_end_on_wall_clock_silence_without_new_packets(monkeypatch):
     async def _run():
         fake = _FakeASRClient()

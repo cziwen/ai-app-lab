@@ -49,7 +49,10 @@ from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient, SaucASRFullServer
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
-DEFAULT_ASR_SILENCE_TIMEOUT_MS = 8000
+# Keep local turn-finalize timeout below upstream ASR "wait next packet" timeout
+# to avoid race conditions that can surface as server-side timeout errors.
+DEFAULT_ASR_SILENCE_TIMEOUT_MS = 6000
+MAX_ASR_SILENCE_TIMEOUT_MS = 7000
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 
 
@@ -71,6 +74,12 @@ def _load_asr_silence_timeout_ms() -> int:
             f"value={DEFAULT_ASR_SILENCE_TIMEOUT_MS}"
         )
         return DEFAULT_ASR_SILENCE_TIMEOUT_MS
+    if parsed > MAX_ASR_SILENCE_TIMEOUT_MS:
+        INFO(
+            "ASR_SILENCE_TIMEOUT_MS too large, clamp to safe max "
+            f"value={MAX_ASR_SILENCE_TIMEOUT_MS}"
+        )
+        return MAX_ASR_SILENCE_TIMEOUT_MS
     return parsed
 
 
@@ -386,7 +395,7 @@ class VoiceBotService(BaseModel):
                     f"ASR_SILENCE_TICK silence_ms={silence_ms} text_len={len(self.asr_buffer)}"
                 )
 
-            if silence_ms <= ASRInterval:
+            if silence_ms < ASRInterval:
                 return None
             reason = "silence_timeout"
 

@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover - exercised only in minimal dev environmen
 
 DEFAULT_ASR_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 DEFAULT_ASR_RESOURCE_ID = "volc.bigasr.sauc.duration"
+ASR_WAIT_NEXT_PACKET_TIMEOUT_CODE = 45000081
 
 
 class ProtocolVersion:
@@ -267,6 +268,22 @@ class SaucASRClient:
         self._ws = None
         self._session_started = False
         self._stream_lock = asyncio.Lock()
+        self._replay_audio_chunk: Optional[bytes] = None
+
+    def _take_replay_audio_chunk(self) -> Optional[bytes]:
+        chunk = self._replay_audio_chunk
+        self._replay_audio_chunk = None
+        return chunk
+
+    def _buffer_replay_audio_chunk(self, audio_chunk: bytes) -> None:
+        if not audio_chunk:
+            return
+        self._replay_audio_chunk = bytes(audio_chunk)
+        self._log(
+            "ASR_REPLAY_CHUNK_BUFFERED "
+            f"size={len(self._replay_audio_chunk)} "
+            "reason=server_wait_next_packet_timeout"
+        )
 
     async def init(self) -> None:
         if self.inited and self._ws is not None and not self._ws.closed:
@@ -374,13 +391,22 @@ class SaucASRClient:
     ) -> AsyncIterator[SaucASRFullServerResponse]:
         async with self._stream_lock:
             source_iter = source.__aiter__()
-            pending_chunk_task: Optional[asyncio.Task] = asyncio.create_task(
-                source_iter.__anext__()
-            )
+            loop = asyncio.get_running_loop()
+            replay_chunk = self._take_replay_audio_chunk()
+            if replay_chunk is not None:
+                pending_chunk_task: Optional[asyncio.Future] = loop.create_future()
+                pending_chunk_task.set_result(replay_chunk)
+                self._log(
+                    "ASR_REPLAY_CHUNK_RESTORED "
+                    f"size={len(replay_chunk)}"
+                )
+            else:
+                pending_chunk_task = asyncio.create_task(source_iter.__anext__())
             recv_task: Optional[asyncio.Task] = None
             source_finished = False
             sent_last = False
             received_last = False
+            graceful_end_requested = False
             try:
                 while True:
                     if self.inited and self._ws is not None and not self._ws.closed:
@@ -414,11 +440,22 @@ class SaucASRClient:
                                 continue
                             frame = SaucProtocolCodec.parse_server_frame(raw)
                             if frame.error_code is not None:
-                                raise RuntimeError(
-                                    f"ASR server error code={frame.error_code} "
-                                    f"message={frame.error_message or ''} "
-                                    f"logid={self.tt_logid or '-'}"
-                                )
+                                # Upstream closes the ASR session when no next audio packet arrives
+                                # in time. Treat this specific condition as a recoverable stream end.
+                                if frame.error_code == ASR_WAIT_NEXT_PACKET_TIMEOUT_CODE:
+                                    self._log(
+                                        "ASR_SERVER_SESSION_TIMEOUT "
+                                        f"code={frame.error_code} "
+                                        f"message={frame.error_message or '-'} "
+                                        "action=graceful_stream_end"
+                                    )
+                                    graceful_end_requested = True
+                                else:
+                                    raise RuntimeError(
+                                        f"ASR server error code={frame.error_code} "
+                                        f"message={frame.error_message or ''} "
+                                        f"logid={self.tt_logid or '-'}"
+                                    )
                             if frame.payload_obj:
                                 mapped = self._map_payload(
                                     frame.payload_obj,
@@ -437,8 +474,18 @@ class SaucASRClient:
                             pending_chunk_task = None
                         else:
                             if audio_chunk:
-                                await self._send_audio(bytes(audio_chunk), is_last=False)
-                            pending_chunk_task = asyncio.create_task(source_iter.__anext__())
+                                if graceful_end_requested:
+                                    self._buffer_replay_audio_chunk(bytes(audio_chunk))
+                                else:
+                                    await self._send_audio(bytes(audio_chunk), is_last=False)
+                            if graceful_end_requested:
+                                pending_chunk_task = None
+                            else:
+                                pending_chunk_task = asyncio.create_task(source_iter.__anext__())
+
+                    if graceful_end_requested:
+                        self._mark_disconnected("server_wait_next_packet_timeout")
+                        break
 
                     if source_finished:
                         if (
