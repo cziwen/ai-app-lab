@@ -168,6 +168,11 @@ stop_nonessential_containers() {
   docker stop "${ids[@]}" || true
 }
 
+restart_project_stack_atomic() {
+  echo "[ssl] Restarting compose project atomically (down -> up), preserving named volumes"
+  compose down --remove-orphans || true
+}
+
 stop_extra_processes() {
   if [[ "$STOP_EXTRA_PROCESSES" != "1" ]]; then
     echo "[ssl] Skip stopping extra host processes (STOP_EXTRA_PROCESSES=0)"
@@ -303,9 +308,9 @@ run_init() {
   email="$(resolve_email)"
 
   print_precheck
-  stop_project_containers
   stop_nonessential_containers
   stop_extra_processes
+  restart_project_stack_atomic
 
   echo "[ssl] Ensuring swap for low-memory deployment"
   ensure_swap

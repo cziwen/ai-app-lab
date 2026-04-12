@@ -47,6 +47,7 @@ cp .env.example .env
 这一步会自动完成：
 
 - 低内存模式串行构建并启动 `backend -> gateway`（适配 2C2G）
+- `init` 会先执行一次 compose 全量重启（`down --remove-orphans`，不使用 `-v`，保留命名卷数据）
 - 自动确保系统开启 swap（默认 `/swapfile`，大小 `2G`）
 - 部署前先停本项目容器；默认额外停非本项目运行中的容器，优先腾内存
 - 前端构建默认注入 `NODE_OPTIONS=--max-old-space-size=512`，避免 OOM
