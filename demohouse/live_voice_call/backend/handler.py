@@ -1023,7 +1023,6 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             if (
                 not interview_completed
                 and not client_hangup
-                and close_source == "client_ws"
                 and ws_close_code == CLIENT_HANGUP_CLOSE_CODE
             ):
                 client_hangup = True

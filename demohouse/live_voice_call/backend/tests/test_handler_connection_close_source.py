@@ -397,6 +397,73 @@ def test_handler_marks_hangup_reason_from_ws_close_frame_fallback(monkeypatch):
     asyncio.run(_run())
 
 
+def test_handler_marks_hangup_reason_from_ws_close_frame_when_close_source_is_asr_upstream(
+    monkeypatch,
+):
+    class DummyConnectionClosed(Exception):
+        pass
+
+    class _AsrUpstreamCloseWebSocket(_FakeWebSocket):
+        def __init__(self):
+            super().__init__(close_exc_cls=DummyConnectionClosed)
+            self.close_code = handler.CLIENT_HANGUP_CLOSE_CODE
+            self.close_reason = handler.CLIENT_HANGUP_CLOSE_REASON
+
+    class _FakeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            raise DummyConnectionClosed("asr upstream closed")
+            if False:
+                yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-HANGUP-CLOSE-FRAME-ASR-UPSTREAM"
+        ws = _AsrUpstreamCloseWebSocket()
+
+        monkeypatch.setattr(
+            handler.websockets.exceptions, "ConnectionClosed", DummyConnectionClosed
+        )
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].should_mark_completed is True
+        assert fake_persistence.tasks[0].completed_reason == "hangup"
+        assert any(
+            "event=session.client_hangup source=ws_close_frame" in line
+            for line in interview_logger.lines
+        )
+        assert any(
+            "[Session] closed status=completed close_source=asr_upstream" in line
+            for line in interview_logger.lines
+        )
+
+    asyncio.run(_run())
+
+
 def test_handler_does_not_mark_hangup_from_close_reason_only(monkeypatch):
     class _CloseReasonOnlyWebSocket(_FakeWebSocket):
         def __init__(self):

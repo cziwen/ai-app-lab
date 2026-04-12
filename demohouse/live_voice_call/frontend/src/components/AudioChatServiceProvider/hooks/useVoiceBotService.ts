@@ -63,6 +63,23 @@ const CLIENT_HANGUP_DRAIN_MAX_WAIT_MS = 450;
 const CLIENT_HANGUP_CLOSE_CODE = 4000;
 const CLIENT_HANGUP_CLOSE_REASON = 'client_hangup';
 
+export const shouldAbortReconnectFlow = (
+  autoReconnectEnabled: boolean,
+  manualDisconnect: boolean,
+) => !autoReconnectEnabled || manualDisconnect;
+
+export const shouldAcceptReconnectSuccess = (
+  autoReconnectEnabled: boolean,
+  manualDisconnect: boolean,
+  onRejected: () => void,
+) => {
+  if (shouldAbortReconnectFlow(autoReconnectEnabled, manualDisconnect)) {
+    onRejected();
+    return false;
+  }
+  return true;
+};
+
 export const useVoiceBotService = () => {
   const {
     wsReadyRef,
@@ -149,7 +166,12 @@ export const useVoiceBotService = () => {
     if (!serviceRef.current) {
       return;
     }
-    if (!autoReconnectEnabledRef.current || manualDisconnectRef.current) {
+    if (
+      shouldAbortReconnectFlow(
+        autoReconnectEnabledRef.current,
+        manualDisconnectRef.current,
+      )
+    ) {
       stopRecovering();
       clearReconnectTimer();
       return;
@@ -171,7 +193,13 @@ export const useVoiceBotService = () => {
       ];
     clearReconnectTimer();
     reconnectTimerRef.current = window.setTimeout(async () => {
-      if (!serviceRef.current || !autoReconnectEnabledRef.current) {
+      if (
+        !serviceRef.current ||
+        shouldAbortReconnectFlow(
+          autoReconnectEnabledRef.current,
+          manualDisconnectRef.current,
+        )
+      ) {
         return;
       }
       const ok = await connectToServer({
@@ -179,6 +207,19 @@ export const useVoiceBotService = () => {
         connectLogLabel: 'reconnect',
       });
       if (ok) {
+        const accepted = shouldAcceptReconnectSuccess(
+          autoReconnectEnabledRef.current,
+          manualDisconnectRef.current,
+          () => {
+            log('reconnect result ignored after manual stop, closing unexpected ws');
+            serviceRef.current?.disconnectWsOnly();
+            clearReconnectTimer();
+            stopRecovering();
+          },
+        );
+        if (!accepted) {
+          return;
+        }
         clearReconnectTimer();
         reconnectAttemptRef.current = 0;
         stopRecovering();
