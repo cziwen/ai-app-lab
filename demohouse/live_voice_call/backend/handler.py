@@ -267,6 +267,7 @@ class PersistenceTask:
     score_inputs: List[Dict[str, Any]]
     should_mark_completed: bool
     completed_reason: Optional[str]
+    expected_owner_id: Optional[str]
     candidate_frame_prefixed_count: int
     candidate_frame_raw_count: int
     candidate_audio_dropped_frames: int
@@ -340,6 +341,20 @@ class PersistenceQueue:
                 task.candidate_audio_dropped_frames,
             )
             if task.should_mark_completed:
+                expected_owner_id = (task.expected_owner_id or "").strip()
+                if expected_owner_id:
+                    current_owner = await asyncio.to_thread(
+                        OCCUPANCY.current_owner,
+                        task.token,
+                    )
+                    if current_owner and current_owner != expected_owner_id:
+                        self.logger.info(
+                            "event=interview_persist.complete_skipped reason=token_reacquired token=%s expected_owner_id=%s current_owner_id=%s",
+                            task.token,
+                            expected_owner_id,
+                            current_owner,
+                        )
+                        return
                 await asyncio.to_thread(
                     mark_interview_completed,
                     task.token,
@@ -1089,8 +1104,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     occupancy_current_owner
                     and occupancy_current_owner != occupancy_owner_id
                 ):
+                    should_mark_completed = False
+                    end_status = "disconnected"
+                    completed_reason = None
                     interview_log(
-                        "event=interview.disconnect_mark_skipped reason=token_reacquired"
+                        "event=interview.disconnect_mark_skipped reason=token_reacquired action=skip_complete"
                     )
                 else:
                     marked_disconnected = await asyncio.to_thread(
@@ -1125,6 +1143,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     score_inputs=score_inputs,
                     should_mark_completed=should_mark_completed,
                     completed_reason=completed_reason,
+                    expected_owner_id=occupancy_owner_id,
                     candidate_frame_prefixed_count=candidate_frame_prefixed_count,
                     candidate_frame_raw_count=candidate_frame_raw_count,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,

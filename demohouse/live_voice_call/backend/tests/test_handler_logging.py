@@ -300,6 +300,7 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
         score_inputs=[],
         should_mark_completed=True,
         completed_reason="disconnect",
+        expected_owner_id="OWNER-PERSIST-ERR",
         candidate_frame_prefixed_count=0,
         candidate_frame_raw_count=0,
         candidate_audio_dropped_frames=0,
@@ -338,6 +339,11 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
         "init_interview_scorecard",
         lambda token: captured["init_scorecard"].append(token),
     )
+    monkeypatch.setattr(
+        handler,
+        "OCCUPANCY",
+        SimpleNamespace(current_owner=lambda _token: "OWNER-PERSIST-SCORING"),
+    )
     monkeypatch.setattr(handler, "SCORING", _FakeScoringQueue())
 
     queue = handler.PersistenceQueue(logging.getLogger("test.persistence.scoring"))
@@ -349,6 +355,7 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
         score_inputs=[{"question_id": "q1"}],
         should_mark_completed=True,
         completed_reason="normal_end",
+        expected_owner_id="OWNER-PERSIST-SCORING",
         candidate_frame_prefixed_count=0,
         candidate_frame_raw_count=0,
         candidate_audio_dropped_frames=0,
@@ -360,6 +367,154 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
     assert captured["init_scorecard"] == ["INT-PERSIST-SCORING"]
     assert len(captured["scoring_tasks"]) == 1
     assert captured["scoring_tasks"][0].token == "INT-PERSIST-SCORING"
+
+
+def test_persistence_process_skips_completion_when_owner_changed(monkeypatch):
+    captured_records = []
+    captured = {
+        "mark_completed": [],
+        "init_scorecard": [],
+        "scoring_tasks": [],
+    }
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record):
+            captured_records.append(record)
+
+    class _FakeScoringQueue:
+        async def submit(self, task):
+            captured["scoring_tasks"].append(task)
+
+    capture_logger = logging.getLogger("test.persistence.owner_changed")
+    capture_logger.setLevel(logging.INFO)
+    capture_logger.handlers.clear()
+    capture_logger.addHandler(CaptureHandler())
+    capture_logger.propagate = False
+
+    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(
+        handler,
+        "mark_interview_completed",
+        lambda token, reason: captured["mark_completed"].append((token, reason)),
+    )
+    monkeypatch.setattr(
+        handler,
+        "init_interview_scorecard",
+        lambda token: captured["init_scorecard"].append(token),
+    )
+    monkeypatch.setattr(
+        handler,
+        "OCCUPANCY",
+        SimpleNamespace(current_owner=lambda _token: "OWNER-NEW"),
+    )
+    monkeypatch.setattr(handler, "SCORING", _FakeScoringQueue())
+
+    queue = handler.PersistenceQueue(capture_logger)
+    task = handler.PersistenceTask(
+        token="INT-PERSIST-SKIP",
+        turns=[],
+        candidate_pcm_bytes=b"",
+        interviewer_encoded_bytes=b"",
+        score_inputs=[{"question_id": "q1"}],
+        should_mark_completed=True,
+        completed_reason="normal_end",
+        expected_owner_id="OWNER-OLD",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
+        candidate_audio_dropped_frames=0,
+    )
+
+    asyncio.run(queue._process(task))
+
+    assert captured["mark_completed"] == []
+    assert captured["init_scorecard"] == []
+    assert captured["scoring_tasks"] == []
+    assert any(
+        "event=interview_persist.complete_skipped reason=token_reacquired"
+        in record.getMessage()
+        for record in captured_records
+    )
+
+
+def test_persistence_process_completes_when_owner_is_missing_or_unchanged(monkeypatch):
+    captured = {
+        "mark_completed": [],
+        "init_scorecard": [],
+        "scoring_tasks": [],
+    }
+
+    class _FakeScoringQueue:
+        async def submit(self, task):
+            captured["scoring_tasks"].append(task)
+
+    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(
+        handler,
+        "mark_interview_completed",
+        lambda token, reason: captured["mark_completed"].append((token, reason)),
+    )
+    monkeypatch.setattr(
+        handler,
+        "init_interview_scorecard",
+        lambda token: captured["init_scorecard"].append(token),
+    )
+    monkeypatch.setattr(handler, "SCORING", _FakeScoringQueue())
+
+    owner_map = {
+        "INT-PERSIST-OWNER-NONE": None,
+        "INT-PERSIST-OWNER-SAME": "OWNER-SAME",
+    }
+    monkeypatch.setattr(
+        handler,
+        "OCCUPANCY",
+        SimpleNamespace(current_owner=lambda token: owner_map.get(token)),
+    )
+
+    queue = handler.PersistenceQueue(logging.getLogger("test.persistence.owner_allow"))
+    task_none = handler.PersistenceTask(
+        token="INT-PERSIST-OWNER-NONE",
+        turns=[],
+        candidate_pcm_bytes=b"",
+        interviewer_encoded_bytes=b"",
+        score_inputs=[{"question_id": "q1"}],
+        should_mark_completed=True,
+        completed_reason="normal_end",
+        expected_owner_id="OWNER-NONE",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
+        candidate_audio_dropped_frames=0,
+    )
+    task_same = handler.PersistenceTask(
+        token="INT-PERSIST-OWNER-SAME",
+        turns=[],
+        candidate_pcm_bytes=b"",
+        interviewer_encoded_bytes=b"",
+        score_inputs=[{"question_id": "q2"}],
+        should_mark_completed=True,
+        completed_reason="normal_end",
+        expected_owner_id="OWNER-SAME",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
+        candidate_audio_dropped_frames=0,
+    )
+
+    asyncio.run(queue._process(task_none))
+    asyncio.run(queue._process(task_same))
+
+    assert captured["mark_completed"] == [
+        ("INT-PERSIST-OWNER-NONE", "normal_end"),
+        ("INT-PERSIST-OWNER-SAME", "normal_end"),
+    ]
+    assert captured["init_scorecard"] == [
+        "INT-PERSIST-OWNER-NONE",
+        "INT-PERSIST-OWNER-SAME",
+    ]
+    assert [task.token for task in captured["scoring_tasks"]] == [
+        "INT-PERSIST-OWNER-NONE",
+        "INT-PERSIST-OWNER-SAME",
+    ]
 
 
 def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):

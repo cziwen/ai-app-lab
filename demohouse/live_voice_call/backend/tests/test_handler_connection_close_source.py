@@ -17,21 +17,25 @@ class _ListLogger:
 
 
 class _FakeAdmission:
-    def __init__(self, acquire_result="admitted"):
+    def __init__(self, acquire_result="admitted", current_owner=None):
         self.released = []
         self.acquire_result = acquire_result
+        self.current_owner_value = current_owner
 
     config = SimpleNamespace(heartbeat_seconds=1000, ttl_seconds=30)
 
-    def acquire(self, _token, _owner_id):
+    def acquire(self, _token, _owner_id, _client_id=None):
         return self.acquire_result
 
-    def heartbeat(self, _token, _owner_id):
+    def heartbeat(self, _token, _owner_id, _client_id=None):
         return "ok"
 
     def release(self, token, _owner_id):
         self.released.append(token)
         return True
+
+    def current_owner(self, _token):
+        return self.current_owner_value
 
 
 class _FakePersistence:
@@ -229,6 +233,71 @@ def test_handler_close_source_asr_upstream(monkeypatch):
         assert any("Connection closed source=asr_upstream" in line for line in interview_logger.lines)
         assert any(
             "[Session] closed status=disconnected close_source=asr_upstream" in line
+            for line in interview_logger.lines
+        )
+
+    asyncio.run(_run())
+
+
+def test_handler_skips_completed_when_token_reacquired(monkeypatch):
+    class DummyConnectionClosed(Exception):
+        pass
+
+    class _FakeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission(current_owner="NEW-OWNER")
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-REACQUIRED"
+        ws = _FakeWebSocket(
+            close_exc_cls=DummyConnectionClosed,
+            fail_on_send_call=2,  # BotReady succeeds; first output send fails.
+        )
+        mark_disconnected_calls = {"count": 0}
+
+        def _mark_disconnected(*_args, **_kwargs):
+            mark_disconnected_calls["count"] += 1
+            return True
+
+        monkeypatch.setattr(
+            handler.websockets.exceptions, "ConnectionClosed", DummyConnectionClosed
+        )
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(handler, "mark_interview_disconnected", _mark_disconnected)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert mark_disconnected_calls["count"] == 0
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].should_mark_completed is False
+        assert fake_persistence.tasks[0].completed_reason is None
+        assert any(
+            "event=interview.disconnect_mark_skipped reason=token_reacquired action=skip_complete"
+            in line
+            for line in interview_logger.lines
+        )
+        assert any(
+            "[Session] closed status=disconnected close_source=client_ws" in line
             for line in interview_logger.lines
         )
 
