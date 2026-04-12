@@ -41,6 +41,24 @@ class _FakePersistence:
         self.tasks.append(task)
 
 
+class _FakeRuntimeCheckpoints:
+    def __init__(self, initial=None):
+        self.initial = initial
+        self.saved = []
+        self.deleted = []
+
+    def load(self, _token):
+        return self.initial
+
+    def save(self, token, checkpoint):
+        self.saved.append((token, checkpoint))
+        return True
+
+    def delete(self, token):
+        self.deleted.append(token)
+        return True
+
+
 class _FakeWebSocket:
     def __init__(self, *, close_exc_cls, fail_on_send_call=None):
         self.remote_address = ("127.0.0.1", 8888)
@@ -126,8 +144,12 @@ def test_handler_close_source_client_ws(monkeypatch):
             lambda incoming_token: _fake_session_data(incoming_token),
         )
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
 
@@ -135,9 +157,10 @@ def test_handler_close_source_client_ws(monkeypatch):
 
         assert fake_admission.released == [token]
         assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].should_mark_completed is False
         assert any("Connection closed source=client_ws" in line for line in interview_logger.lines)
         assert any(
-            "[Session] closed status=completed close_source=client_ws" in line
+            "[Session] closed status=disconnected close_source=client_ws" in line
             for line in interview_logger.lines
         )
 
@@ -177,8 +200,12 @@ def test_handler_close_source_asr_upstream(monkeypatch):
             lambda incoming_token: _fake_session_data(incoming_token),
         )
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
         monkeypatch.setattr(handler, "server_logger", SimpleNamespace(info=lambda *a, **k: None, error=lambda *a, **k: None))
@@ -187,9 +214,10 @@ def test_handler_close_source_asr_upstream(monkeypatch):
 
         assert fake_admission.released == [token]
         assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].should_mark_completed is False
         assert any("Connection closed source=asr_upstream" in line for line in interview_logger.lines)
         assert any(
-            "[Session] closed status=completed close_source=asr_upstream" in line
+            "[Session] closed status=disconnected close_source=asr_upstream" in line
             for line in interview_logger.lines
         )
 
@@ -210,6 +238,7 @@ def test_handler_rejects_when_capacity_full(monkeypatch):
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
         monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -233,6 +262,7 @@ def test_handler_rejects_when_token_already_occupied(monkeypatch):
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_occupancy)
         monkeypatch.setattr(handler, "PERSISTENCE", _FakePersistence())
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -284,6 +314,7 @@ def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypat
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
         monkeypatch.setattr(
@@ -328,8 +359,12 @@ def test_handler_marks_error_reason_after_close_source_normalization(monkeypatch
             lambda incoming_token: _fake_session_data(incoming_token),
         )
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: False
+        )
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
 
@@ -382,8 +417,12 @@ def test_handler_releases_when_wait_closed_finishes_first(monkeypatch):
             lambda incoming_token: _fake_session_data(incoming_token),
         )
         monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
         monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
         monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
 

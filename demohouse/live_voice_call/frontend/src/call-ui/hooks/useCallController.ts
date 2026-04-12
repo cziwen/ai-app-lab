@@ -118,6 +118,7 @@ export const useCallController = (): CallController => {
     shutdownSession,
     notifyClientHangup,
     notifyClientEndAnswer,
+    isRecovering,
   } = useVoiceBotService();
   const { logContent } = useLogContent();
   const { mediaStreamsRef } = useSessionAuth();
@@ -207,7 +208,8 @@ export const useCallController = (): CallController => {
       mode !== 'real' ||
       wsConnected ||
       endingRef.current ||
-      connectingRef.current
+      connectingRef.current ||
+      isRecovering
     ) {
       return;
     }
@@ -217,7 +219,7 @@ export const useCallController = (): CallController => {
       connectingRef.current = false;
     }, 1200);
     return () => window.clearTimeout(guardTimer);
-  }, [handleConnect, mode, wsConnected]);
+  }, [handleConnect, isRecovering, mode, wsConnected]);
 
   useEffect(() => {
     if (mode !== 'mock' || !mockInCall) {
@@ -259,11 +261,11 @@ export const useCallController = (): CallController => {
       return;
     }
     const wasConnected = prevWsConnectedRef.current;
-    if (wasConnected && !wsConnected && !endingRef.current) {
+    if (wasConnected && !wsConnected && !endingRef.current && !isRecovering) {
       startAutoFinishFlow();
     }
     prevWsConnectedRef.current = wsConnected;
-  }, [mode, startAutoFinishFlow, wsConnected]);
+  }, [isRecovering, mode, startAutoFinishFlow, wsConnected]);
 
   useEffect(() => {
     if (mode !== 'real' || endPhase !== 'waiting_last_audio') {

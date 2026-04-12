@@ -81,6 +81,127 @@ class InterviewFlow:
         self.latest_follow_up: str = ""
         self.latest_clarify: str = ""
 
+    def export_runtime_checkpoint(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "state": self.state,
+            "current_question_index": self.current_question_index,
+            "total_candidate_turns": self.total_candidate_turns,
+            "latest_follow_up": self.latest_follow_up,
+            "latest_clarify": self.latest_clarify,
+            "questions": [
+                {
+                    "question_id": q.question_id,
+                    "status": q.status,
+                    "follow_up_count": q.follow_up_count,
+                    "clarify_count": q.clarify_count,
+                    "coverage_score": q.coverage_score,
+                    "turns": [
+                        {
+                            "role": str(turn.get("role", "")),
+                            "content": str(turn.get("content", "")),
+                        }
+                        for turn in q.turns
+                        if isinstance(turn, dict)
+                    ],
+                }
+                for q in self.questions
+            ],
+        }
+
+    def restore_runtime_checkpoint(self, checkpoint: Dict[str, Any]) -> bool:
+        if not isinstance(checkpoint, dict):
+            return False
+        raw_questions = checkpoint.get("questions")
+        if not isinstance(raw_questions, list):
+            return False
+        if len(raw_questions) != len(self.questions):
+            return False
+
+        restored_turn_count = 0
+        for idx, raw_q in enumerate(raw_questions):
+            if not isinstance(raw_q, dict):
+                return False
+            q = self.questions[idx]
+            status = str(raw_q.get("status", q.status) or q.status).strip()
+            if status not in {"pending", "in_progress", "done"}:
+                status = q.status
+            q.status = status
+            q.follow_up_count = max(0, int(raw_q.get("follow_up_count", 0) or 0))
+            q.clarify_count = max(0, int(raw_q.get("clarify_count", 0) or 0))
+            try:
+                q.coverage_score = float(raw_q.get("coverage_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                q.coverage_score = 0.0
+            q.turns = []
+            raw_turns = raw_q.get("turns")
+            if isinstance(raw_turns, list):
+                for turn in raw_turns:
+                    if not isinstance(turn, dict):
+                        continue
+                    role = str(turn.get("role", "") or "").strip()
+                    content = str(turn.get("content", "") or "").strip()
+                    if role not in {"candidate", "interviewer"}:
+                        continue
+                    if not content:
+                        continue
+                    q.turns.append({"role": role, "content": content})
+                    if role == "candidate":
+                        restored_turn_count += 1
+
+        max_index = len(self.questions) - 1
+        try:
+            restored_index = int(checkpoint.get("current_question_index", 0) or 0)
+        except (TypeError, ValueError):
+            restored_index = 0
+        self.current_question_index = min(max(restored_index, 0), max_index)
+        try:
+            restored_total_turns = int(checkpoint.get("total_candidate_turns", 0) or 0)
+        except (TypeError, ValueError):
+            restored_total_turns = 0
+        self.total_candidate_turns = max(restored_total_turns, restored_turn_count)
+        self.latest_follow_up = str(checkpoint.get("latest_follow_up", "") or "")
+        self.latest_clarify = str(checkpoint.get("latest_clarify", "") or "")
+
+        state = str(checkpoint.get("state", self.state) or self.state).strip()
+        allowed_states = {
+            INTRO,
+            ASK_QUESTION,
+            WAIT_ANSWER,
+            EVAL_ANSWER,
+            DECIDE,
+            ASK_FOLLOWUP,
+            ASK_CLARIFY,
+            WRAP_UP,
+            DONE,
+        }
+        if state in allowed_states:
+            self.state = state
+        return True
+
+    def rewind_to_question_start(self, index: int) -> bool:
+        if index < 0 or index >= len(self.questions):
+            return False
+        q = self.questions[index]
+        if q.status == "done":
+            return False
+        removed_candidate_turns = sum(
+            1 for turn in q.turns if str(turn.get("role", "")) == "candidate"
+        )
+        q.turns = []
+        q.follow_up_count = 0
+        q.clarify_count = 0
+        q.coverage_score = 0.0
+        q.status = "pending"
+        self.current_question_index = index
+        self.total_candidate_turns = max(
+            0, int(self.total_candidate_turns) - removed_candidate_turns
+        )
+        self.latest_follow_up = ""
+        self.latest_clarify = ""
+        self.state = ASK_QUESTION
+        return True
+
     @staticmethod
     def _count_scenarios(questions: List[Dict[str, Any]]) -> int:
         count = 0

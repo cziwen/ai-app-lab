@@ -412,3 +412,33 @@ def test_export_question_answer_snapshots_aggregates_answers_per_question():
         assert snapshots[1].aggregated_answer == "回答3"
 
     asyncio.run(_run())
+
+
+def test_runtime_checkpoint_restore_and_rewind_to_current_question_start():
+    async def _run():
+        judge = SequenceJudge(
+            decisions=[
+                Decision(True, False, "", "ok", 0.9),
+                Decision(True, False, "", "ok", 0.9),
+            ]
+        )
+        flow = InterviewFlow(questions=QUESTIONS[:2], judge=judge)
+
+        await _bootstrap_to_wait(flow)
+        await flow.receive_candidate_answer("第一题回答")
+        assert flow.current_question_index == 1
+        assert flow.state == ASK_QUESTION
+
+        checkpoint = flow.export_runtime_checkpoint()
+        resumed = InterviewFlow(questions=QUESTIONS[:2], judge=SequenceJudge(decisions=[]))
+        assert resumed.restore_runtime_checkpoint(checkpoint) is True
+        assert resumed.current_question_index == 1
+        assert resumed.questions[0].status == "done"
+        assert resumed.questions[0].turns[0]["content"] == "第一题回答"
+        assert resumed.rewind_to_question_start(resumed.current_question_index) is True
+        assert resumed.state == ASK_QUESTION
+        assert resumed.questions[1].status == "pending"
+        assert resumed.questions[1].turns == []
+        assert resumed.total_candidate_turns == 1
+
+    asyncio.run(_run())

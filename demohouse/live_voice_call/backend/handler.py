@@ -39,8 +39,10 @@ from admin_store import (
     interview_exists,
     init_interview_scorecard,
     mark_interview_completed,
+    mark_interview_disconnected,
     mark_interview_in_progress,
     persist_interview_audio,
+    resolve_all_interview_timeouts,
     save_interview_scorecard_failed,
     save_interview_scorecard_success,
     save_interview_turns,
@@ -48,6 +50,10 @@ from admin_store import (
     start_interview_session,
 )
 from interview_scorer import InterviewScorer
+from interview_runtime_checkpoint import (
+    InterviewRuntimeCheckpointStore,
+    load_runtime_checkpoint_config,
+)
 from service import DEFAULT_SPEAKER, VoiceBotService
 from startup_self_check import (
     format_self_check_lines,
@@ -109,6 +115,9 @@ FRONTEND_LOG_MAX_ENTRY_CHARS = max(
 WS_PING_INTERVAL_SECONDS = max(1.0, float(os.getenv("WS_PING_INTERVAL_SECONDS", "20")))
 WS_PING_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_PING_TIMEOUT_SECONDS", "20")))
 WS_CLOSE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("WS_CLOSE_TIMEOUT_SECONDS", "5")))
+INTERVIEW_RECONNECT_GRACE_SECONDS = max(
+    1, int(os.getenv("INTERVIEW_RECONNECT_GRACE_SECONDS", "30"))
+)
 SCORING_DEBUG_LOG_ENABLED = (
     os.getenv("SCORING_DEBUG_LOG_ENABLED", "true").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -582,6 +591,9 @@ class ScoringQueue:
 
 
 OCCUPANCY = InterviewOccupancy(load_occupancy_config(max_active=MAX_ACTIVE_INTERVIEWS))
+RUNTIME_CHECKPOINTS = InterviewRuntimeCheckpointStore(
+    load_runtime_checkpoint_config()
+)
 PERSISTENCE = PersistenceQueue(server_logger)
 SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
@@ -730,6 +742,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         )
         await websocket.close()
         return
+    runtime_checkpoint = await asyncio.to_thread(RUNTIME_CHECKPOINTS.load, token)
+    latest_runtime_checkpoint: Optional[Dict[str, Any]] = runtime_checkpoint
 
     interview_logger = _get_interview_logger(token, "backend")
     interview_log: Callable[[str], None] = interview_logger.info
@@ -764,6 +778,21 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
 
     def record_bot_audio(chunk: bytes):
         interviewer_audio_encoded.extend(chunk)
+
+    def persist_runtime_checkpoint(checkpoint: Dict[str, Any]) -> None:
+        nonlocal latest_runtime_checkpoint
+        if not isinstance(checkpoint, dict):
+            return
+        latest_runtime_checkpoint = checkpoint
+
+        async def _persist() -> None:
+            await asyncio.to_thread(RUNTIME_CHECKPOINTS.save, token, checkpoint)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_persist())
+        except RuntimeError:
+            RUNTIME_CHECKPOINTS.save(token, checkpoint)
 
     ws_session_id = str(uuid.uuid4())
 
@@ -809,10 +838,12 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         asr_ws_url=RUNTIME_CONFIG.asr_ws_url or "",
         interview_mode=True,
         interview_questions=interview_data.questions,
+        interview_runtime_checkpoint=runtime_checkpoint,
         on_candidate_sentence=lambda text: record_turn("candidate", text),
         on_bot_sentence=lambda text: record_turn("interviewer", text),
         on_bot_audio_chunk=record_bot_audio,
         on_interview_completed=on_interview_completed,
+        on_interview_runtime_checkpoint=persist_runtime_checkpoint,
         log_fn=interview_log,
         session_id=ws_session_id,
     )
@@ -936,6 +967,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     close_detail = (
                         "websocket.closed" if websocket.closed else "source_unknown"
                     )
+            if latest_runtime_checkpoint and not interview_completed:
+                await asyncio.to_thread(
+                    RUNTIME_CHECKPOINTS.save, token, latest_runtime_checkpoint
+                )
+
             completed_reason = (
                 INTERVIEW_COMPLETED_REASON_NORMAL_END
                 if interview_completed
@@ -949,6 +985,23 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     )
                 )
             )
+            is_network_disconnect = close_source in {"client_ws", "asr_upstream"}
+            should_mark_completed = True
+            end_status = "completed"
+            if (
+                not interview_completed
+                and not client_hangup
+                and is_network_disconnect
+            ):
+                marked_disconnected = await asyncio.to_thread(
+                    mark_interview_disconnected,
+                    token,
+                    INTERVIEW_RECONNECT_GRACE_SECONDS,
+                )
+                if marked_disconnected:
+                    should_mark_completed = False
+                    end_status = "disconnected"
+                    completed_reason = None
             score_inputs: List[Dict[str, Any]] = []
             build_score_inputs = getattr(service, "build_interview_score_inputs", None)
             if callable(build_score_inputs):
@@ -970,15 +1023,16 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     candidate_pcm_bytes=bytes(candidate_audio),
                     interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
                     score_inputs=score_inputs,
-                    should_mark_completed=True,
+                    should_mark_completed=should_mark_completed,
                     completed_reason=completed_reason,
                     candidate_frame_prefixed_count=candidate_frame_prefixed_count,
                     candidate_frame_raw_count=candidate_frame_raw_count,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,
-                    grace_seconds=30,
+                    grace_seconds=INTERVIEW_RECONNECT_GRACE_SECONDS,
                 )
             )
-            end_status = "completed"
+            if should_mark_completed:
+                await asyncio.to_thread(RUNTIME_CHECKPOINTS.delete, token)
             close_source_for_log = close_source or "-"
             interview_log(
                 f"[Session] closed status={end_status} "
@@ -1229,6 +1283,7 @@ async def main():
     async def _run_interview_expiry_sweeper() -> None:
         while True:
             try:
+                await asyncio.to_thread(resolve_all_interview_timeouts)
                 summary = await asyncio.to_thread(
                     sweep_expired_interviews,
                     INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,

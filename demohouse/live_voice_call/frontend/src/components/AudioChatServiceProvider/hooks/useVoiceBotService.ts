@@ -9,7 +9,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. 
 
-import { useContext, useEffect, useRef } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
 import { Message } from '@arco-design/web-react';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
@@ -40,6 +40,25 @@ const appendTokenToWsUrl = (baseWsUrl: string, token?: string | null) => {
   return `${baseWsUrl}${separator}token=${encodeURIComponent(trimmed)}`;
 };
 
+const resolveReconnectMaxSeconds = () => {
+  const fallback = 15;
+  if (typeof process === 'undefined' || !process.env) {
+    return fallback;
+  }
+  const raw =
+    process.env.MODERN_PUBLIC_FRONTEND_RECONNECT_MAX_SECONDS ||
+    process.env.FRONTEND_RECONNECT_MAX_SECONDS ||
+    '15';
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+};
+
+const FRONTEND_RECONNECT_MAX_SECONDS = resolveReconnectMaxSeconds();
+const RECONNECT_DELAYS_MS = [500, 1000, 2000, 3000] as const;
+
 export const useVoiceBotService = () => {
   const {
     wsReadyRef,
@@ -68,8 +87,97 @@ export const useVoiceBotService = () => {
   const ttsDoneRef = useRef(false);
   const playbackStoppedRef = useRef(false);
   const botTurnStartedRef = useRef(false);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectStartAtRef = useRef(0);
+  const autoReconnectEnabledRef = useRef(true);
+  const manualDisconnectRef = useRef(false);
+  const recoveringRef = useRef(false);
+  const [isRecovering, setIsRecovering] = useState(false);
 
   const { log } = useLogContent();
+  const clearReconnectTimer = () => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  };
+
+  const stopRecovering = () => {
+    recoveringRef.current = false;
+    setIsRecovering(false);
+  };
+
+  const connectToServer = async ({
+    showError,
+    connectLogLabel,
+  }: {
+    showError: boolean;
+    connectLogLabel: string;
+  }) => {
+    if (!serviceRef.current) {
+      return false;
+    }
+    const wsUrlWithToken = appendTokenToWsUrl(wsUrl, token);
+    try {
+      await serviceRef.current.connect(wsUrlWithToken);
+      setWsConnected(true);
+      log(`${connectLogLabel} success`);
+      return true;
+    } catch (_e) {
+      log(`${connectLogLabel} failed`);
+      if (showError) {
+        Message.error('连接失败');
+      }
+      setWsConnected(false);
+      return false;
+    }
+  };
+
+  const scheduleReconnect = () => {
+    if (!serviceRef.current) {
+      return;
+    }
+    if (!autoReconnectEnabledRef.current || manualDisconnectRef.current) {
+      stopRecovering();
+      clearReconnectTimer();
+      return;
+    }
+
+    const elapsedMs = Date.now() - reconnectStartAtRef.current;
+    if (elapsedMs >= FRONTEND_RECONNECT_MAX_SECONDS * 1000) {
+      log('reconnect timeout');
+      autoReconnectEnabledRef.current = false;
+      stopRecovering();
+      clearReconnectTimer();
+      return;
+    }
+
+    const nextDelay =
+      RECONNECT_DELAYS_MS[
+        Math.min(reconnectAttemptRef.current, RECONNECT_DELAYS_MS.length - 1)
+      ];
+    clearReconnectTimer();
+    reconnectTimerRef.current = window.setTimeout(async () => {
+      if (!serviceRef.current || !autoReconnectEnabledRef.current) {
+        return;
+      }
+      const ok = await connectToServer({
+        showError: false,
+        connectLogLabel: 'reconnect',
+      });
+      if (ok) {
+        clearReconnectTimer();
+        reconnectAttemptRef.current = 0;
+        stopRecovering();
+        manualDisconnectRef.current = false;
+        autoReconnectEnabledRef.current = true;
+        return;
+      }
+      reconnectAttemptRef.current += 1;
+      scheduleReconnect();
+    }, nextDelay);
+  };
   const clearRecorderGate = () => {
     ttsDoneRef.current = false;
     playbackStoppedRef.current = false;
@@ -129,22 +237,20 @@ export const useVoiceBotService = () => {
   };
 
   const handleConnect = async () => {
+    manualDisconnectRef.current = false;
+    autoReconnectEnabledRef.current = true;
+    reconnectAttemptRef.current = 0;
+    reconnectStartAtRef.current = Date.now();
+    clearReconnectTimer();
+    stopRecovering();
     setTimeout(() => {
       if (!serviceRef.current) {
         return;
       }
-      const wsUrlWithToken = appendTokenToWsUrl(wsUrl, token);
-      serviceRef.current
-        .connect(wsUrlWithToken)
-        .then(() => {
-          setWsConnected(true);
-          log('connect success');
-        })
-        .catch(e => {
-          log('connect failed');
-          Message.error('连接失败');
-          setWsConnected(false);
-        });
+      void connectToServer({
+        showError: true,
+        connectLogLabel: 'connect',
+      });
     }, 0);
   };
 
@@ -168,6 +274,10 @@ export const useVoiceBotService = () => {
   };
 
   const disconnectSession = () => {
+    manualDisconnectRef.current = true;
+    autoReconnectEnabledRef.current = false;
+    clearReconnectTimer();
+    stopRecovering();
     wsReadyRef.current = false;
     serviceRef.current?.disconnectWsOnly();
     resetWsState();
@@ -190,6 +300,10 @@ export const useVoiceBotService = () => {
   };
 
   const shutdownSession = () => {
+    manualDisconnectRef.current = true;
+    autoReconnectEnabledRef.current = false;
+    clearReconnectTimer();
+    stopRecovering();
     wsReadyRef.current = false;
     serviceRef.current?.shutdown();
     resetWsState();
@@ -227,6 +341,18 @@ export const useVoiceBotService = () => {
       onClose: () => {
         log('ws closed');
         resetWsState();
+        if (!autoReconnectEnabledRef.current || manualDisconnectRef.current) {
+          stopRecovering();
+          clearReconnectTimer();
+          return;
+        }
+        if (!recoveringRef.current) {
+          reconnectStartAtRef.current = Date.now();
+          reconnectAttemptRef.current = 0;
+          recoveringRef.current = true;
+          setIsRecovering(true);
+        }
+        scheduleReconnect();
       },
       onError: event => {
         log('ws error');
@@ -287,6 +413,10 @@ export const useVoiceBotService = () => {
             if (code !== undefined) {
               log('receive | bot error code:' + String(code));
             }
+            autoReconnectEnabledRef.current = false;
+            manualDisconnectRef.current = true;
+            clearReconnectTimer();
+            stopRecovering();
             Message.error(message);
             resetWsState();
             resetMediaState();
@@ -315,12 +445,14 @@ export const useVoiceBotService = () => {
       document.removeEventListener('click', tryUnlockAudio);
       document.removeEventListener('touchstart', tryUnlockAudio);
       document.removeEventListener('keydown', tryUnlockAudio);
+      clearReconnectTimer();
+      recoveringRef.current = false;
       service.shutdown();
       if (serviceRef.current === service) {
         serviceRef.current = null;
       }
     };
-  }, [wsUrl]);
+  }, [wsUrl, token]);
 
   return {
     handleConnect,
@@ -328,5 +460,6 @@ export const useVoiceBotService = () => {
     shutdownSession,
     notifyClientHangup,
     notifyClientEndAnswer,
+    isRecovering,
   };
 };

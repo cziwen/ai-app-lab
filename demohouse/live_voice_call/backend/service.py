@@ -169,13 +169,16 @@ class VoiceBotService(BaseModel):
     interview_flow: Optional[Any] = None
     interview_judge: Optional[Any] = None
     interview_questions: Optional[List[Dict[str, Any]]] = None
+    interview_runtime_checkpoint: Optional[Dict[str, Any]] = None
     on_candidate_sentence: Optional[Callable[[str], None]] = None
     on_bot_sentence: Optional[Callable[[str], None]] = None
     on_bot_audio_chunk: Optional[Callable[[bytes], None]] = None
     on_interview_completed: Optional[Callable[[], None]] = None
+    on_interview_runtime_checkpoint: Optional[Callable[[Dict[str, Any]], None]] = None
     log_fn: Optional[Callable[[str], None]] = None
     session_id: str = ""
     responses_adapter: Optional[Any] = None
+    interview_resumed_from_checkpoint: bool = False
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
     segment_history_messages: Dict[str, List[ArkMessage]] = {}
@@ -245,6 +248,23 @@ class VoiceBotService(BaseModel):
                 global_turn_limit=_load_interview_global_turn_limit(),
             )
             self._build_question_context_segments(flow_questions)
+            runtime_checkpoint = self.interview_runtime_checkpoint
+            if isinstance(runtime_checkpoint, dict):
+                restored = self.interview_flow.restore_runtime_checkpoint(
+                    runtime_checkpoint
+                )
+                if restored:
+                    rewound = self.interview_flow.rewind_to_question_start(
+                        self.interview_flow.current_question_index
+                    )
+                    self.interview_resumed_from_checkpoint = rewound
+                    self._log(
+                        "[Interview] Runtime checkpoint restored "
+                        f"restored={restored} rewound={rewound} "
+                        f"question_index={self.interview_flow.current_question_index}"
+                    )
+                    if rewound:
+                        self._emit_interview_runtime_checkpoint()
 
     def _log(self, message: str) -> None:
         if self.log_fn:
@@ -537,6 +557,18 @@ class VoiceBotService(BaseModel):
         except Exception as callback_error:
             self._log(
                 f"[InterviewPersist] on_interview_completed callback failed: {callback_error}"
+            )
+
+    def _emit_interview_runtime_checkpoint(self) -> None:
+        if not self.on_interview_runtime_checkpoint or not self.interview_flow:
+            return
+        try:
+            checkpoint = self.interview_flow.export_runtime_checkpoint()
+            self.on_interview_runtime_checkpoint(checkpoint)
+        except Exception as callback_error:
+            self._log(
+                "[InterviewPersist] on_interview_runtime_checkpoint callback failed: "
+                f"{callback_error}"
             )
 
     def build_interview_score_inputs(self) -> List[Dict[str, Any]]:
@@ -1209,38 +1241,56 @@ class VoiceBotService(BaseModel):
         flow = self.interview_flow
         self._log("[Interview] Starting interview handler loop")
 
-        # Phase 1: Send intro and first question separately via TTS (no LLM needed)
-        intro_response = await flow.produce_interviewer_message()
-        self._log(
-            f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
-            f"text='{intro_response.interviewer_text}'"
-        )
-        if intro_response.interviewer_text:
-            async for event in self._send_scripted_text(intro_response.interviewer_text):
-                yield event
+        if self.interview_resumed_from_checkpoint:
+            if flow.state != ASK_QUESTION:
+                flow.state = ASK_QUESTION
+            resumed_question_response = await flow.produce_interviewer_message()
+            self._log(
+                f"[Interview] ResumeQuestion: {resumed_question_response.state_before}->"
+                f"{resumed_question_response.state_after} "
+                f"q={resumed_question_response.question_id} "
+                f"text='{resumed_question_response.interviewer_text}'"
+            )
+            if resumed_question_response.interviewer_text:
+                self._activate_context_segment(resumed_question_response.question_id)
+                async for event in self._send_scripted_text(
+                    resumed_question_response.interviewer_text
+                ):
+                    yield event
+        else:
+            # Phase 1: Send intro and first question separately via TTS (no LLM needed)
+            intro_response = await flow.produce_interviewer_message()
+            self._log(
+                f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
+                f"text='{intro_response.interviewer_text}'"
+            )
+            if intro_response.interviewer_text:
+                async for event in self._send_scripted_text(intro_response.interviewer_text):
+                    yield event
 
-        first_question_response = await flow.produce_interviewer_message()
-        self._log(
-            f"[Interview] FirstQuestion: {first_question_response.state_before}->"
-            f"{first_question_response.state_after} "
-            f"q={first_question_response.question_id} "
-            f"text='{first_question_response.interviewer_text}'"
-        )
-        if first_question_response.interviewer_text:
-            first_question_text = first_question_response.interviewer_text
-            if flow.total_candidate_turns == 0:
-                sanitized_first_question = self._sanitize_initial_question_text(first_question_text)
-                if sanitized_first_question != first_question_text:
-                    self._log(
-                        "[Interview] FirstQuestion sanitized: "
-                        f"before='{first_question_text}' after='{sanitized_first_question}'"
+            first_question_response = await flow.produce_interviewer_message()
+            self._log(
+                f"[Interview] FirstQuestion: {first_question_response.state_before}->"
+                f"{first_question_response.state_after} "
+                f"q={first_question_response.question_id} "
+                f"text='{first_question_response.interviewer_text}'"
+            )
+            if first_question_response.interviewer_text:
+                first_question_text = first_question_response.interviewer_text
+                if flow.total_candidate_turns == 0:
+                    sanitized_first_question = self._sanitize_initial_question_text(
+                        first_question_text
                     )
-                first_question_text = sanitized_first_question
-            self._activate_context_segment(first_question_response.question_id)
-            async for event in self._send_scripted_text(
-                first_question_text
-            ):
-                yield event
+                    if sanitized_first_question != first_question_text:
+                        self._log(
+                            "[Interview] FirstQuestion sanitized: "
+                            f"before='{first_question_text}' after='{sanitized_first_question}'"
+                        )
+                    first_question_text = sanitized_first_question
+                self._activate_context_segment(first_question_response.question_id)
+                async for event in self._send_scripted_text(first_question_text):
+                    yield event
+        self._emit_interview_runtime_checkpoint()
         self._log("[Interview] Greeting sent via TTS, waiting for candidate")
 
         try:
@@ -1283,6 +1333,7 @@ class VoiceBotService(BaseModel):
                         self._log_turn_latency_breakdown(status="aborted")
                         self._end_turn()
                         raise
+                    self._emit_interview_runtime_checkpoint()
                     self._log_turn_event("judge_end")
                     decision = answer_response.decision
 
