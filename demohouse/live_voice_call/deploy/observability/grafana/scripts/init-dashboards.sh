@@ -11,10 +11,10 @@ fetch_dashboard() {
   if [ -s "$out" ]; then
     return 0
   fi
-  if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$tmp"; then
+  if command -v curl >/dev/null 2>&1 && curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 --retry-delay 1 "$url" -o "$tmp"; then
     mv "$tmp" "$out"
     echo "downloaded dashboard: $out"
-  elif command -v wget >/dev/null 2>&1 && wget -qO "$tmp" "$url"; then
+  elif command -v wget >/dev/null 2>&1 && wget -qO "$tmp" --timeout=20 --tries=2 "$url"; then
     mv "$tmp" "$out"
     echo "downloaded dashboard: $out"
   else

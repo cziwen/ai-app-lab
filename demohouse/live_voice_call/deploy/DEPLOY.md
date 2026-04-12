@@ -60,6 +60,7 @@ cp .env.example .env
 - `FRONTEND_NODE_OPTIONS=--max-old-space-size=512`：前端构建 Node 堆上限
 - `STOP_NONESSENTIAL_CONTAINERS_DEFAULT=1`：`init` 时默认停非本项目容器
 - `STOP_EXTRA_PROCESSES_DEFAULT=0`：是否默认停额外宿主进程（例如 `vscode-server`）
+- `GRAFANA_WAIT_TIMEOUT_SECONDS=180`：等待 Grafana 启动超时时间（秒）
 
 可选参数（命令行）：
 
