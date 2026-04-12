@@ -28,6 +28,7 @@ from admin_store import (
     get_admin_by_session,
     get_audio_file_path,
     get_interview_detail,
+    get_interview_log_file_path,
     get_job_detail,
     get_public_access,
     list_interviews,
@@ -584,6 +585,45 @@ def create_admin_app(
         else:
             media_type = "application/octet-stream"
         return FileResponse(path=path, media_type=media_type, filename=Path(path).name)
+
+    @app.get("/api/admin/interviews/{token}/logs/{stream}")
+    async def get_interview_log(
+        token: str,
+        stream: str,
+        tail_lines: int = Query(default=2000, ge=1, le=20000),
+        _admin: Dict[str, Any] = Depends(require_admin),
+    ) -> Dict[str, Any]:
+        path = get_interview_log_file_path(token, stream)
+        if not path:
+            raise HTTPException(status_code=404, detail="日志不存在")
+
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        truncated = len(lines) > tail_lines
+        selected_lines = lines[-tail_lines:] if truncated else lines
+        content = "\n".join(selected_lines)
+        if selected_lines:
+            content = f"{content}\n"
+
+        return {
+            "token": token,
+            "stream": stream,
+            "path": str(path),
+            "line_count": len(lines),
+            "returned_line_count": len(selected_lines),
+            "truncated": truncated,
+            "content": content,
+        }
+
+    @app.get("/api/admin/interviews/{token}/logs/{stream}/download")
+    async def download_interview_log(
+        token: str,
+        stream: str,
+        _admin: Dict[str, Any] = Depends(require_admin),
+    ) -> FileResponse:
+        path = get_interview_log_file_path(token, stream)
+        if not path:
+            raise HTTPException(status_code=404, detail="日志不存在")
+        return FileResponse(path=path, media_type="text/plain; charset=utf-8", filename=Path(path).name)
 
     @app.get("/api/public/interviews/{token}/access")
     async def public_interview_access(token: str) -> Dict[str, Any]:

@@ -2239,3 +2239,18 @@ def get_audio_file_path(token: str, track: str) -> Optional[Path]:
     if not path.exists() or not path.is_file():
         return None
     return path
+
+
+def get_interview_log_file_path(token: str, stream: str) -> Optional[Path]:
+    if stream not in ("backend", "frontend"):
+        return None
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT token FROM interviews WHERE token = ?", (token,)).fetchone()
+        if not row:
+            return None
+
+    path = INTERVIEW_LOG_DIR / token / f"{stream}.log"
+    if not path.exists() or not path.is_file():
+        return None
+    return path

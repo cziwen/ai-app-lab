@@ -4,6 +4,7 @@ import {
   adminApi,
   type CheckInKey,
   type InterviewDetail,
+  type InterviewLogStream,
   type InterviewListItem,
   type JobListItem,
 } from '@/admin/api';
@@ -63,6 +64,11 @@ export const AdminInterviewsPage = () => {
   const [showCreateInterview, setShowCreateInterview] = useState(false);
   const [interviewDetail, setInterviewDetail] = useState<InterviewDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [selectedLogStream, setSelectedLogStream] = useState<InterviewLogStream>('backend');
+  const [logContent, setLogContent] = useState('');
+  const [logLoading, setLogLoading] = useState(false);
+  const [logError, setLogError] = useState('');
+  const [logTruncated, setLogTruncated] = useState(false);
 
   const [candidateName, setCandidateName] = useState('');
   const [selectedJobUid, setSelectedJobUid] = useState('');
@@ -167,12 +173,44 @@ export const AdminInterviewsPage = () => {
     loadSelectedJobQuestions();
   }, [selectedJobUid]);
 
+  const loadInterviewLog = async (token: string, stream: InterviewLogStream) => {
+    setLogLoading(true);
+    setLogError('');
+    setSelectedLogStream(stream);
+    try {
+      const data = await adminApi.getInterviewLog(token, stream);
+      setLogContent(data.content || '');
+      setLogTruncated(Boolean(data.truncated));
+    } catch (e) {
+      setLogContent('');
+      setLogTruncated(false);
+      setLogError(e instanceof Error ? e.message : '加载日志失败');
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
+  const closeInterviewDetail = () => {
+    setInterviewDetail(null);
+    setDetailLoading(false);
+    setSelectedLogStream('backend');
+    setLogContent('');
+    setLogLoading(false);
+    setLogError('');
+    setLogTruncated(false);
+  };
+
   const openInterviewDetail = async (token: string) => {
     setDetailLoading(true);
     setInterviewDetail(null);
+    setSelectedLogStream('backend');
+    setLogContent('');
+    setLogError('');
+    setLogTruncated(false);
     try {
       const data = await adminApi.getInterview(token);
       setInterviewDetail(data.interview);
+      void loadInterviewLog(token, 'backend');
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : '加载面试详情失败');
     } finally {
@@ -186,7 +224,7 @@ export const AdminInterviewsPage = () => {
     }
     try {
       await adminApi.deleteInterview(token);
-      setInterviewDetail(null);
+      closeInterviewDetail();
       await loadInterviews();
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : '删除面试失败');
@@ -460,7 +498,7 @@ export const AdminInterviewsPage = () => {
       )}
 
       {(detailLoading || interviewDetail) && (
-        <AdminModal title="面试详情" onClose={() => setInterviewDetail(null)}>
+        <AdminModal title="面试详情" onClose={closeInterviewDetail}>
           {detailLoading && <p className="admin-loading">加载详情中...</p>}
           {!detailLoading && interviewDetail && (
             <article className="admin-detail-article">
@@ -610,6 +648,43 @@ export const AdminInterviewsPage = () => {
                   {interviewDetail.completion_message || '用户还没有完成面试。'}
                 </p>
               )}
+
+              <section>
+                <h3 className="admin-detail-title">日志</h3>
+                <div className="admin-log-actions">
+                  <button
+                    type="button"
+                    className={`admin-ghost-btn ${selectedLogStream === 'backend' ? 'is-active' : ''}`}
+                    onClick={() => loadInterviewLog(interviewDetail.token, 'backend')}
+                    disabled={logLoading}
+                  >
+                    查看后端日志
+                  </button>
+                  <button
+                    type="button"
+                    className={`admin-ghost-btn ${selectedLogStream === 'frontend' ? 'is-active' : ''}`}
+                    onClick={() => loadInterviewLog(interviewDetail.token, 'frontend')}
+                    disabled={logLoading}
+                  >
+                    查看前端日志
+                  </button>
+                  <a
+                    className="admin-ghost-btn"
+                    href={adminApi.getInterviewLogDownloadUrl(interviewDetail.token, selectedLogStream)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    下载当前日志
+                  </a>
+                </div>
+                {logLoading && <p className="admin-loading">日志加载中...</p>}
+                {logError && <p className="admin-error">{logError}</p>}
+                {logTruncated && (
+                  <p className="admin-hint">仅展示最近 2000 行，完整内容请点击“下载当前日志”。</p>
+                )}
+                {!logLoading && !logError && !logContent && <p className="admin-hint">暂无日志内容</p>}
+                {logContent && <pre className="admin-log-viewer">{logContent}</pre>}
+              </section>
             </article>
           )}
         </AdminModal>

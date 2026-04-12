@@ -108,6 +108,18 @@ export type InterviewDetail = {
   };
 };
 
+export type InterviewLogStream = 'backend' | 'frontend';
+
+export type InterviewLogResponse = {
+  token: string;
+  stream: InterviewLogStream;
+  path: string;
+  line_count: number;
+  returned_line_count: number;
+  truncated: boolean;
+  content: string;
+};
+
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   let response: Response;
   try {
@@ -208,6 +220,14 @@ export const adminApi = {
 
   getInterview: (token: string) =>
     request<{ interview: InterviewDetail }>(`/api/admin/interviews/${token}`),
+
+  getInterviewLog: (token: string, stream: InterviewLogStream, tailLines = 2000) =>
+    request<InterviewLogResponse>(
+      `/api/admin/interviews/${token}/logs/${stream}?tail_lines=${tailLines}`,
+    ),
+
+  getInterviewLogDownloadUrl: (token: string, stream: InterviewLogStream) =>
+    `${API_URL}/api/admin/interviews/${token}/logs/${stream}/download`,
 
   deleteInterview: (token: string) =>
     request<{ ok: boolean }>(`/api/admin/interviews/${token}`, {
