@@ -925,6 +925,10 @@ body {
   background: rgba(91, 163, 255, 0.35);
 }
 
+.admin-ghost-btn.is-active {
+  background: rgba(91, 163, 255, 0.24);
+}
+
 .admin-action-row {
   display: flex;
   gap: 8px;
@@ -1105,6 +1109,28 @@ body {
 
 .admin-detail-grid p {
   margin: 0;
+}
+
+.admin-log-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-log-viewer {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 420px;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .admin-table-wrap {
