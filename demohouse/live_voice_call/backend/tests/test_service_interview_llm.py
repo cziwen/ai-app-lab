@@ -2,7 +2,14 @@ import asyncio
 
 from arkitect.core.component.llm.model import ArkMessage
 
-from interview_flow import ASK_CLARIFY, InterviewFlow, QuestionAnswerSnapshot
+from interview_flow import (
+    ASK_CLARIFY,
+    DONE,
+    WRAP_UP,
+    FlowResponse,
+    InterviewFlow,
+    QuestionAnswerSnapshot,
+)
 from interview_judge import Decision
 from prompt import INTERVIEWER_SYSTEM_PROMPT
 import service
@@ -1004,5 +1011,180 @@ def test_voice_bot_service_init_uses_interview_global_turn_limit_env(monkeypatch
         await svc.init()
         assert svc.interview_flow is not None
         assert svc.interview_flow.global_turn_limit == 300
+
+    asyncio.run(_run())
+
+
+def test_interview_handler_loop_resume_wrap_up_emits_wrap_text_and_completes(monkeypatch):
+    async def _run():
+        completed = []
+        sent_texts = []
+
+        class _FakeFlow:
+            def __init__(self):
+                self.state = WRAP_UP
+
+            async def produce_interviewer_message(self):
+                return FlowResponse(
+                    state_before=WRAP_UP,
+                    state_after=DONE,
+                    interviewer_text="好的，面试到这里结束。",
+                    decision=None,
+                    question_id=None,
+                    transition_trace=[],
+                )
+
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            on_interview_completed=lambda: completed.append(True),
+        )
+        svc.interview_flow = _FakeFlow()
+        svc.interview_resume_mode = service.RESUME_MODE_WRAP_UP
+
+        async def _fake_send_scripted_text(_self, text):
+            sent_texts.append(text)
+            yield service.WebEvent.from_payload(service.TTSDonePayload())
+
+        monkeypatch.setattr(
+            service.VoiceBotService,
+            "_send_scripted_text",
+            _fake_send_scripted_text,
+            raising=False,
+        )
+
+        async def _inputs():
+            if False:
+                yield None
+
+        events = []
+        async for event in svc._interview_handler_loop(_inputs()):
+            events.append(event)
+
+        assert sent_texts == ["好的，面试到这里结束。"]
+        assert completed == [True]
+        assert len(events) == 1
+        assert events[0].event == service.TTS_DONE
+
+    asyncio.run(_run())
+
+
+def test_interview_handler_loop_resume_done_completes_without_emitting_events():
+    async def _run():
+        completed = []
+
+        class _FakeFlow:
+            def __init__(self):
+                self.state = DONE
+
+            async def produce_interviewer_message(self):
+                raise AssertionError("produce_interviewer_message should not be called")
+
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            on_interview_completed=lambda: completed.append(True),
+        )
+        svc.interview_flow = _FakeFlow()
+        svc.interview_resume_mode = service.RESUME_MODE_DONE
+
+        async def _inputs():
+            if False:
+                yield None
+
+        events = []
+        async for event in svc._interview_handler_loop(_inputs()):
+            events.append(event)
+
+        assert events == []
+        assert completed == [True]
+
+    asyncio.run(_run())
+
+
+def test_voice_bot_service_init_sets_resume_mode_wrap_up_from_checkpoint():
+    async def _run():
+        checkpoint = {
+            "version": 1,
+            "state": WRAP_UP,
+            "current_question_index": 0,
+            "total_candidate_turns": 1,
+            "latest_follow_up": "",
+            "latest_clarify": "",
+            "questions": [
+                {
+                    "question_id": "q1",
+                    "status": "done",
+                    "follow_up_count": 0,
+                    "clarify_count": 0,
+                    "coverage_score": 0.8,
+                    "turns": [{"role": "candidate", "content": "回答"}],
+                }
+            ],
+        }
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            interview_questions=[{"question_id": "q1", "main_question": "介绍自己"}],
+            interview_runtime_checkpoint=checkpoint,
+        )
+        await svc.init()
+        assert svc.interview_resume_mode == service.RESUME_MODE_WRAP_UP
+
+    asyncio.run(_run())
+
+
+def test_voice_bot_service_init_sets_resume_mode_done_from_checkpoint():
+    async def _run():
+        checkpoint = {
+            "version": 1,
+            "state": DONE,
+            "current_question_index": 0,
+            "total_candidate_turns": 1,
+            "latest_follow_up": "",
+            "latest_clarify": "",
+            "questions": [
+                {
+                    "question_id": "q1",
+                    "status": "done",
+                    "follow_up_count": 0,
+                    "clarify_count": 0,
+                    "coverage_score": 0.8,
+                    "turns": [{"role": "candidate", "content": "回答"}],
+                }
+            ],
+        }
+        svc = service.VoiceBotService(
+            ark_api_key="ark-key",
+            llm1_endpoint_id="ep-judge",
+            llm2_endpoint_id="ep-interviewer",
+            asr_app_key="asr-app",
+            asr_access_key="asr-token",
+            tts_app_key="tts-app",
+            tts_access_key="tts-token",
+            interview_mode=True,
+            interview_questions=[{"question_id": "q1", "main_question": "介绍自己"}],
+            interview_runtime_checkpoint=checkpoint,
+        )
+        await svc.init()
+        assert svc.interview_resume_mode == service.RESUME_MODE_DONE
 
     asyncio.run(_run())

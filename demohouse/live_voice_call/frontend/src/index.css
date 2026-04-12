@@ -297,6 +297,27 @@ body {
   z-index: 6;
 }
 
+.reconnect-notice {
+  align-self: center;
+  width: fit-content;
+  max-width: min(920px, 92%);
+  border-radius: 10px;
+  padding: 8px 14px;
+  background: rgba(63, 94, 251, 0.22);
+  border: 1px solid rgba(125, 173, 255, 0.56);
+  color: #eaf2ff;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.stage-reconnect-notice {
+  position: absolute;
+  top: 58px;
+  left: 14px;
+  right: 14px;
+  z-index: 6;
+}
+
 .control-bar {
   align-self: center;
   width: fit-content;
@@ -711,6 +732,12 @@ body {
     right: 10px;
   }
 
+  .stage-reconnect-notice {
+    top: 50px;
+    left: 10px;
+    right: 10px;
+  }
+
   .pip-window {
     width: 132px;
   }
@@ -754,7 +781,8 @@ body {
   }
 
   .subtitle-bar,
-  .end-notice {
+  .end-notice,
+  .reconnect-notice {
     max-width: 100%;
     width: fit-content;
     border-radius: 10px;

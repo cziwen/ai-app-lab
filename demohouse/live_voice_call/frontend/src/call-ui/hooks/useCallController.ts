@@ -119,6 +119,7 @@ export const useCallController = (): CallController => {
     notifyClientHangup,
     notifyClientEndAnswer,
     isRecovering,
+    reconnectExhausted,
   } = useVoiceBotService();
   const { logContent } = useLogContent();
   const { mediaStreamsRef } = useSessionAuth();
@@ -209,7 +210,8 @@ export const useCallController = (): CallController => {
       wsConnected ||
       endingRef.current ||
       connectingRef.current ||
-      isRecovering
+      isRecovering ||
+      reconnectExhausted
     ) {
       return;
     }
@@ -219,7 +221,7 @@ export const useCallController = (): CallController => {
       connectingRef.current = false;
     }, 1200);
     return () => window.clearTimeout(guardTimer);
-  }, [handleConnect, isRecovering, mode, wsConnected]);
+  }, [handleConnect, isRecovering, mode, reconnectExhausted, wsConnected]);
 
   useEffect(() => {
     if (mode !== 'mock' || !mockInCall) {
@@ -266,6 +268,13 @@ export const useCallController = (): CallController => {
     }
     prevWsConnectedRef.current = wsConnected;
   }, [isRecovering, mode, startAutoFinishFlow, wsConnected]);
+
+  useEffect(() => {
+    if (mode !== 'real' || !reconnectExhausted || endingRef.current) {
+      return;
+    }
+    startAutoFinishFlow();
+  }, [mode, reconnectExhausted, startAutoFinishFlow]);
 
   useEffect(() => {
     if (mode !== 'real' || endPhase !== 'waiting_last_audio') {
@@ -321,6 +330,12 @@ export const useCallController = (): CallController => {
     }
     return undefined;
   }, [endCountdownSec, endPhase, mode]);
+  const reconnectNotice = useMemo(() => {
+    if (mode !== 'real' || !isRecovering) {
+      return undefined;
+    }
+    return '网络波动，正在重连…';
+  }, [isRecovering, mode]);
 
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
@@ -457,6 +472,7 @@ export const useCallController = (): CallController => {
       elapsedSec,
       subtitle,
       endNotice,
+      reconnectNotice,
       interviewerAudioLevel: botAudioLevel,
       userAudioLevel,
       interviewer: {

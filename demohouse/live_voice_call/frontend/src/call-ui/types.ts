@@ -41,6 +41,7 @@ export interface CallUiState {
   elapsedSec: number;
   subtitle: string;
   endNotice?: string;
+  reconnectNotice?: string;
   interviewerAudioLevel?: number;
   userAudioLevel?: number;
   interviewer: CallParticipant;

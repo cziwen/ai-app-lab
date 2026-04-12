@@ -766,6 +766,9 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     close_detail = "-"
     occupancy_heartbeat_stop = asyncio.Event()
     occupancy_heartbeat_task: Optional[asyncio.Task] = None
+    checkpoint_flush_task: Optional[asyncio.Task] = None
+    checkpoint_target_version = 0
+    checkpoint_flushed_version = 0
 
     def record_turn(role: str, text: str):
         if not text:
@@ -779,20 +782,63 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     def record_bot_audio(chunk: bytes):
         interviewer_audio_encoded.extend(chunk)
 
+    async def _flush_runtime_checkpoint_loop() -> None:
+        nonlocal checkpoint_flushed_version
+        nonlocal checkpoint_flush_task
+        while checkpoint_flushed_version < checkpoint_target_version:
+            target_version = checkpoint_target_version
+            checkpoint = latest_runtime_checkpoint
+            if checkpoint:
+                try:
+                    await asyncio.to_thread(RUNTIME_CHECKPOINTS.save, token, checkpoint)
+                except Exception as checkpoint_err:
+                    interview_log(
+                        "[InterviewPersist] failed to save runtime checkpoint "
+                        f"token={token} error={checkpoint_err}"
+                    )
+            checkpoint_flushed_version = target_version
+        checkpoint_flush_task = None
+
+    async def wait_for_runtime_checkpoint_flush(force_latest: bool = False) -> None:
+        nonlocal checkpoint_flushed_version
+        nonlocal checkpoint_flush_task
+        task = checkpoint_flush_task
+        if task is not None:
+            with contextlib.suppress(Exception):
+                await task
+        if (
+            force_latest
+            and latest_runtime_checkpoint
+            and checkpoint_flushed_version < checkpoint_target_version
+        ):
+            try:
+                await asyncio.to_thread(
+                    RUNTIME_CHECKPOINTS.save, token, latest_runtime_checkpoint
+                )
+                checkpoint_flushed_version = checkpoint_target_version
+            except Exception as checkpoint_err:
+                interview_log(
+                    "[InterviewPersist] failed to save runtime checkpoint "
+                    f"token={token} error={checkpoint_err}"
+                )
+
     def persist_runtime_checkpoint(checkpoint: Dict[str, Any]) -> None:
         nonlocal latest_runtime_checkpoint
+        nonlocal checkpoint_target_version
+        nonlocal checkpoint_flushed_version
+        nonlocal checkpoint_flush_task
         if not isinstance(checkpoint, dict):
             return
         latest_runtime_checkpoint = checkpoint
-
-        async def _persist() -> None:
-            await asyncio.to_thread(RUNTIME_CHECKPOINTS.save, token, checkpoint)
+        checkpoint_target_version += 1
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_persist())
+            if checkpoint_flush_task is None or checkpoint_flush_task.done():
+                checkpoint_flush_task = loop.create_task(_flush_runtime_checkpoint_loop())
         except RuntimeError:
             RUNTIME_CHECKPOINTS.save(token, checkpoint)
+            checkpoint_flushed_version = checkpoint_target_version
 
     ws_session_id = str(uuid.uuid4())
 
@@ -967,10 +1013,9 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     close_detail = (
                         "websocket.closed" if websocket.closed else "source_unknown"
                     )
-            if latest_runtime_checkpoint and not interview_completed:
-                await asyncio.to_thread(
-                    RUNTIME_CHECKPOINTS.save, token, latest_runtime_checkpoint
-                )
+            await wait_for_runtime_checkpoint_flush(
+                force_latest=bool(latest_runtime_checkpoint)
+            )
 
             completed_reason = (
                 INTERVIEW_COMPLETED_REASON_NORMAL_END
@@ -1032,6 +1077,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 )
             )
             if should_mark_completed:
+                await wait_for_runtime_checkpoint_flush(force_latest=False)
                 await asyncio.to_thread(RUNTIME_CHECKPOINTS.delete, token)
             close_source_for_log = close_source or "-"
             interview_log(

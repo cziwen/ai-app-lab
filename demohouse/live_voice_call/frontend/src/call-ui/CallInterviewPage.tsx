@@ -264,6 +264,11 @@ export const CallInterviewPage = () => {
         {uiState.endNotice && (
           <div className="end-notice stage-end-notice">{uiState.endNotice}</div>
         )}
+        {uiState.reconnectNotice && (
+          <div className="reconnect-notice stage-reconnect-notice">
+            {uiState.reconnectNotice}
+          </div>
+        )}
 
         <div className="main-video">
           <CallParticipantCard

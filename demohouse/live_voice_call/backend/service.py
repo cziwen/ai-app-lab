@@ -54,6 +54,10 @@ StateIdle = "Idle"
 DEFAULT_ASR_SILENCE_TIMEOUT_MS = 6000
 MAX_ASR_SILENCE_TIMEOUT_MS = 7000
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
+RESUME_MODE_NONE = "none"
+RESUME_MODE_QUESTION_START = "question_start"
+RESUME_MODE_WRAP_UP = "wrap_up"
+RESUME_MODE_DONE = "done"
 
 
 def _load_asr_silence_timeout_ms() -> int:
@@ -179,6 +183,7 @@ class VoiceBotService(BaseModel):
     session_id: str = ""
     responses_adapter: Optional[Any] = None
     interview_resumed_from_checkpoint: bool = False
+    interview_resume_mode: str = RESUME_MODE_NONE
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
     segment_history_messages: Dict[str, List[ArkMessage]] = {}
@@ -248,23 +253,33 @@ class VoiceBotService(BaseModel):
                 global_turn_limit=_load_interview_global_turn_limit(),
             )
             self._build_question_context_segments(flow_questions)
+            self.interview_resume_mode = RESUME_MODE_NONE
+            self.interview_resumed_from_checkpoint = False
             runtime_checkpoint = self.interview_runtime_checkpoint
             if isinstance(runtime_checkpoint, dict):
                 restored = self.interview_flow.restore_runtime_checkpoint(
                     runtime_checkpoint
                 )
                 if restored:
-                    rewound = self.interview_flow.rewind_to_question_start(
-                        self.interview_flow.current_question_index
-                    )
-                    self.interview_resumed_from_checkpoint = rewound
+                    rewound = False
+                    if self.interview_flow.state == DONE:
+                        self.interview_resume_mode = RESUME_MODE_DONE
+                    elif self.interview_flow.state == WRAP_UP:
+                        self.interview_resume_mode = RESUME_MODE_WRAP_UP
+                    else:
+                        rewound = self.interview_flow.rewind_to_question_start(
+                            self.interview_flow.current_question_index
+                        )
+                        if rewound:
+                            self.interview_resume_mode = RESUME_MODE_QUESTION_START
+                            self.interview_resumed_from_checkpoint = True
+                            self._emit_interview_runtime_checkpoint()
                     self._log(
                         "[Interview] Runtime checkpoint restored "
                         f"restored={restored} rewound={rewound} "
+                        f"resume_mode={self.interview_resume_mode} "
                         f"question_index={self.interview_flow.current_question_index}"
                     )
-                    if rewound:
-                        self._emit_interview_runtime_checkpoint()
 
     def _log(self, message: str) -> None:
         if self.log_fn:
@@ -1239,9 +1254,34 @@ class VoiceBotService(BaseModel):
     ) -> AsyncIterable[WebEvent]:
         """Interview-mode main loop using InterviewFlow state machine."""
         flow = self.interview_flow
+        if not flow:
+            self._log("[Interview] interview_flow unavailable, abort loop")
+            return
         self._log("[Interview] Starting interview handler loop")
 
-        if self.interview_resumed_from_checkpoint:
+        resume_mode = str(self.interview_resume_mode or RESUME_MODE_NONE).strip()
+        self.interview_resume_mode = RESUME_MODE_NONE
+
+        if resume_mode == RESUME_MODE_DONE:
+            self._log("[Interview] ResumeMode=done, mark interview completed")
+            self._emit_interview_completed()
+            return
+        if resume_mode == RESUME_MODE_WRAP_UP:
+            if flow.state != WRAP_UP:
+                flow.state = WRAP_UP
+            wrap_response = await flow.produce_interviewer_message()
+            self._log(
+                f"[Interview] ResumeWrapUp: {wrap_response.state_before}->"
+                f"{wrap_response.state_after} "
+                f"text='{wrap_response.interviewer_text}'"
+            )
+            if wrap_response.interviewer_text:
+                async for event in self._send_scripted_text(wrap_response.interviewer_text):
+                    yield event
+            self._emit_interview_completed()
+            self._log("[Interview] Resume wrap-up completed")
+            return
+        if resume_mode == RESUME_MODE_QUESTION_START:
             if flow.state != ASK_QUESTION:
                 flow.state = ASK_QUESTION
             resumed_question_response = await flow.produce_interviewer_message()

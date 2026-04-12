@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 import admin_store
@@ -42,20 +43,26 @@ class _FakePersistence:
 
 
 class _FakeRuntimeCheckpoints:
-    def __init__(self, initial=None):
+    def __init__(self, initial=None, save_delay_seconds=0.0):
         self.initial = initial
         self.saved = []
         self.deleted = []
+        self.operations = []
+        self.save_delay_seconds = save_delay_seconds
 
     def load(self, _token):
         return self.initial
 
     def save(self, token, checkpoint):
+        if self.save_delay_seconds > 0:
+            time.sleep(self.save_delay_seconds)
         self.saved.append((token, checkpoint))
+        self.operations.append(("save", token, checkpoint))
         return True
 
     def delete(self, token):
         self.deleted.append(token)
+        self.operations.append(("delete", token))
         return True
 
 
@@ -430,5 +437,61 @@ def test_handler_releases_when_wait_closed_finishes_first(monkeypatch):
 
         assert fake_admission.released == [token]
         assert len(fake_persistence.tasks) == 1
+
+    asyncio.run(_run())
+
+
+def test_handler_waits_for_latest_checkpoint_flush_before_delete(monkeypatch):
+    class _CheckpointService:
+        def __init__(self, **kwargs):
+            self._checkpoint_cb = kwargs.get("on_interview_runtime_checkpoint")
+            self._completed_cb = kwargs.get("on_interview_completed")
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            if callable(self._checkpoint_cb):
+                self._checkpoint_cb({"version": 1})
+                self._checkpoint_cb({"version": 2})
+            if callable(self._completed_cb):
+                self._completed_cb()
+            yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        runtime_checkpoints = _FakeRuntimeCheckpoints(save_delay_seconds=0.02)
+        token = "INT-HANDLER-CHECKPOINT-FLUSH"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError, fail_on_send_call=None)
+
+        monkeypatch.setattr(handler, "VoiceBotService", _CheckpointService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", runtime_checkpoints)
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert runtime_checkpoints.saved
+        assert runtime_checkpoints.saved[-1][1].get("version") == 2
+        delete_positions = [
+            idx
+            for idx, op in enumerate(runtime_checkpoints.operations)
+            if op and op[0] == "delete"
+        ]
+        assert delete_positions
+        first_delete_idx = delete_positions[0]
+        assert all(
+            op[0] != "save" for op in runtime_checkpoints.operations[first_delete_idx + 1 :]
+        )
 
     asyncio.run(_run())

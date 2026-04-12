@@ -93,7 +93,9 @@ export const useVoiceBotService = () => {
   const autoReconnectEnabledRef = useRef(true);
   const manualDisconnectRef = useRef(false);
   const recoveringRef = useRef(false);
+  const reconnectExhaustedRef = useRef(false);
   const [isRecovering, setIsRecovering] = useState(false);
+  const [reconnectExhausted, setReconnectExhausted] = useState(false);
 
   const { log } = useLogContent();
   const clearReconnectTimer = () => {
@@ -106,6 +108,11 @@ export const useVoiceBotService = () => {
   const stopRecovering = () => {
     recoveringRef.current = false;
     setIsRecovering(false);
+  };
+
+  const markReconnectExhausted = (value: boolean) => {
+    reconnectExhaustedRef.current = value;
+    setReconnectExhausted(value);
   };
 
   const connectToServer = async ({
@@ -150,6 +157,7 @@ export const useVoiceBotService = () => {
       autoReconnectEnabledRef.current = false;
       stopRecovering();
       clearReconnectTimer();
+      markReconnectExhausted(true);
       return;
     }
 
@@ -172,6 +180,7 @@ export const useVoiceBotService = () => {
         stopRecovering();
         manualDisconnectRef.current = false;
         autoReconnectEnabledRef.current = true;
+        markReconnectExhausted(false);
         return;
       }
       reconnectAttemptRef.current += 1;
@@ -239,6 +248,7 @@ export const useVoiceBotService = () => {
   const handleConnect = async () => {
     manualDisconnectRef.current = false;
     autoReconnectEnabledRef.current = true;
+    markReconnectExhausted(false);
     reconnectAttemptRef.current = 0;
     reconnectStartAtRef.current = Date.now();
     clearReconnectTimer();
@@ -276,6 +286,7 @@ export const useVoiceBotService = () => {
   const disconnectSession = () => {
     manualDisconnectRef.current = true;
     autoReconnectEnabledRef.current = false;
+    markReconnectExhausted(false);
     clearReconnectTimer();
     stopRecovering();
     wsReadyRef.current = false;
@@ -302,6 +313,7 @@ export const useVoiceBotService = () => {
   const shutdownSession = () => {
     manualDisconnectRef.current = true;
     autoReconnectEnabledRef.current = false;
+    markReconnectExhausted(false);
     clearReconnectTimer();
     stopRecovering();
     wsReadyRef.current = false;
@@ -351,6 +363,7 @@ export const useVoiceBotService = () => {
           reconnectAttemptRef.current = 0;
           recoveringRef.current = true;
           setIsRecovering(true);
+          markReconnectExhausted(false);
         }
         scheduleReconnect();
       },
@@ -447,6 +460,7 @@ export const useVoiceBotService = () => {
       document.removeEventListener('keydown', tryUnlockAudio);
       clearReconnectTimer();
       recoveringRef.current = false;
+      reconnectExhaustedRef.current = false;
       service.shutdown();
       if (serviceRef.current === service) {
         serviceRef.current = null;
@@ -461,5 +475,6 @@ export const useVoiceBotService = () => {
     notifyClientHangup,
     notifyClientEndAnswer,
     isRecovering,
+    reconnectExhausted,
   };
 };

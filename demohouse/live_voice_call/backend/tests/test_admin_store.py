@@ -424,11 +424,48 @@ def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch,
     assert admin_store.start_interview_session(token) is not None
     assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
     assert admin_store.start_interview_session(token) is not None
+    assert admin_store.mark_interview_in_progress(token) is True
 
     detail = admin_store.get_interview_detail(token)
     assert detail is not None
     assert detail["interruption_count"] == 0
     assert detail["reconnect_deadline_at"] is None
+
+
+def test_start_interview_session_does_not_clear_reconnect_deadline(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="SRE 工程师",
+        duties="保障系统稳定性",
+        requirements="熟悉故障排查",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("你如何处理故障升级", "定位 处置 复盘")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="赵七",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    assert admin_store.start_interview_session(token) is not None
+    assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
+    assert admin_store.start_interview_session(token) is not None
+
+    detail_before_mark = admin_store.get_interview_detail(token)
+    assert detail_before_mark is not None
+    assert detail_before_mark["reconnect_deadline_at"] is not None
+
+    assert admin_store.mark_interview_in_progress(token) is True
+    detail_after_mark = admin_store.get_interview_detail(token)
+    assert detail_after_mark is not None
+    assert detail_after_mark["reconnect_deadline_at"] is None
 
 
 def test_start_interview_session_uses_selected_questions_only(monkeypatch, tmp_path):

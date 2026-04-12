@@ -1641,16 +1641,6 @@ def start_interview_session(token: str) -> Optional[InterviewSessionData]:
             return None
         if _is_interview_expired(row["expires_at"], datetime.now(timezone.utc)):
             return None
-        if row["reconnect_deadline_at"]:
-            conn.execute(
-                """
-                UPDATE interviews
-                SET reconnect_deadline_at = ?, updated_at = ?
-                WHERE token = ?
-                """,
-                (None, utc_now_iso(), token),
-            )
-            conn.commit()
 
         selected_ids = [
             int(chunk)

@@ -418,8 +418,8 @@ def test_runtime_checkpoint_restore_and_rewind_to_current_question_start():
     async def _run():
         judge = SequenceJudge(
             decisions=[
-                Decision(True, False, "", "ok", 0.9),
-                Decision(True, False, "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
+                Decision("next_question", "", "ok", 0.9),
             ]
         )
         flow = InterviewFlow(questions=QUESTIONS[:2], judge=judge)
