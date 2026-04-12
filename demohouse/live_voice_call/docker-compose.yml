@@ -39,6 +39,98 @@ services:
       - "8890"
     restart: "no"
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: live-voice-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_DAYS:-15}d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    expose:
+      - "9090"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: live-voice-loki
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+      - -config.expand-env=true
+    environment:
+      LOKI_RETENTION_PERIOD: ${LOKI_RETENTION_PERIOD:-168h}
+    volumes:
+      - ./deploy/observability/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    expose:
+      - "3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: live-voice-promtail
+    command:
+      - -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    volumes:
+      - ./deploy/observability/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - ./backend/logs:/var/log/live-voice/backend_logs:ro
+      - ./backend/data/storage/interview_logs:/var/log/live-voice/interview_logs:ro
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: live-voice-node-exporter
+    command:
+      - --path.rootfs=/host
+    volumes:
+      - /:/host:ro,rslave
+    expose:
+      - "9100"
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: live-voice-redis-exporter
+    command:
+      - --redis.addr=redis://redis:6379
+    depends_on:
+      - redis
+    expose:
+      - "9121"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: live-voice-grafana
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_now}
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/observability/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./deploy/observability/grafana/scripts/init-dashboards.sh:/etc/grafana/init-dashboards.sh:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - /etc/grafana/init-dashboards.sh && /run.sh
+    expose:
+      - "3000"
+    restart: unless-stopped
+
   gateway:
     build:
       context: .
@@ -62,3 +154,8 @@ services:
     volumes:
       - ./deploy/letsencrypt:/etc/letsencrypt
       - ./deploy/acme-webroot:/var/www/certbot
+
+volumes:
+  prometheus_data:
+  loki_data:
+  grafana_data:

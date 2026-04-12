@@ -25,6 +25,12 @@ cp .env.example .env
 - `LETSENCRYPT_EMAIL=2377963631@qq.com`（建议填写你常用且可收邮件的邮箱，用于到期提醒）
 - 业务凭据 `ARK_API_KEY`、`LLM1_ENDPOINT_ID`、`LLM2_ENDPOINT_ID`、`ASR_*`、`TTS_*`
 - Redis 配置 `REDIS_URL=redis://redis:6379/0`（必填）
+- 可观测中心账号与保留策略：
+  - `GRAFANA_ADMIN_USER`
+  - `GRAFANA_ADMIN_PASSWORD`
+  - `GRAFANA_PUBLIC_URL=https://<你的域名>/observability/`
+  - `LOKI_RETENTION_PERIOD=168h`
+  - `PROMETHEUS_RETENTION_DAYS=15`
 
 说明：
 - 本项目后端启动前会执行 `LLM1 + LLM2 + ASR + TTS + Redis` 自检，任一失败即退出。
@@ -123,6 +129,7 @@ curl -I https://smartinterview.cn/static/css/index.css
 
 - `https://smartinterview.cn/`
 - `https://smartinterview.cn/admin/login`
+- `https://smartinterview.cn/observability/`
 
 ## 常见问题
 

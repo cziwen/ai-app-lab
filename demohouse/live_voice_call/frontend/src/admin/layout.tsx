@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
 import { useNavigate } from '@modern-js/runtime/router';
+import { OBSERVABILITY_URL } from '@/config/endpoints';
 
 type TabKey = 'jobs' | 'interviews';
 
@@ -29,9 +30,14 @@ export const AdminShell = ({
           <h1>AI 面试官管理后台</h1>
           <p>管理员：{username}</p>
         </div>
-        <button type="button" className="admin-ghost-btn" onClick={onLogout}>
-          退出登录
-        </button>
+        <div className="admin-header-actions">
+          <a className="admin-ghost-btn" href={OBSERVABILITY_URL} target="_blank" rel="noreferrer">
+            可观测中心
+          </a>
+          <button type="button" className="admin-ghost-btn" onClick={onLogout}>
+            退出登录
+          </button>
+        </div>
       </header>
 
       {globalError && <p className="admin-error">{globalError}</p>}

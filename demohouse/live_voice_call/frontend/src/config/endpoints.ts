@@ -21,6 +21,13 @@ const fallbackWsUrl = () => {
   return `${protocol}//${window.location.host}/ws`;
 };
 
+const ensureTrailingSlash = (url: string) => (url.endsWith('/') ? url : `${url}/`);
+
 export const WS_URL = readEnv('MODERN_PUBLIC_WS_URL') ?? fallbackWsUrl();
 export const LOG_URL = readEnv('MODERN_PUBLIC_LOG_URL') ?? `${fallbackOrigin()}/api/frontend-logs`;
 export const API_URL = readEnv('MODERN_PUBLIC_API_URL') ?? fallbackOrigin();
+export const OBSERVABILITY_URL = ensureTrailingSlash(
+  readEnv('MODERN_PUBLIC_GRAFANA_PUBLIC_URL') ??
+    readEnv('GRAFANA_PUBLIC_URL') ??
+    `${fallbackOrigin()}/observability/`,
+);

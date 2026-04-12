@@ -270,6 +270,7 @@
    - 应用首页：`http://<ECS_PUBLIC_IP>/`
    - 管理后台登录：`http://<ECS_PUBLIC_IP>/admin/login`
    - 候选人面试页：`http://<ECS_PUBLIC_IP>/check-in?token=...`
+   - 可观测中心（Grafana）：`http://<ECS_PUBLIC_IP>/observability/`
 
 ### 架构说明（单入口）
 
@@ -282,6 +283,22 @@
   - 服务端口：`6379`
   - 固定内存上限：`256MB`
   - 淘汰策略：`allkeys-lru`
+- observability 组件仅在容器网络内暴露：
+  - Grafana：`3000`（通过 `/observability/` 代理）
+  - Prometheus：`9090`
+  - Loki：`3100`
+  - Promtail：`9080`
+  - Node Exporter：`9100`
+  - Redis Exporter：`9121`
+
+### 可观测中心（Grafana + Prometheus + Loki）
+
+- 管理后台顶部增加了“可观测中心”按钮，会新开页跳转到 `/observability/`
+- 默认需要 Grafana 账号密码登录（独立于 admin_session）
+- 日志检索建议：
+  - 在 Grafana Explore 里选择 Loki
+  - 用 `token` 标签检索单场面试日志，例如：`{job="interview-logs", token="INT-xxxx"}`
+  - `stream` 标签可区分 `frontend` / `backend`
 
 ### 常用运维命令
 
