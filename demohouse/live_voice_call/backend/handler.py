@@ -597,6 +597,8 @@ RUNTIME_CHECKPOINTS = InterviewRuntimeCheckpointStore(
 PERSISTENCE = PersistenceQueue(server_logger)
 SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
+CLIENT_HANGUP_CLOSE_CODE = 4000
+CLIENT_HANGUP_CLOSE_REASON = "client_hangup"
 
 
 class ClientWebSocketClosedError(RuntimeError):
@@ -1016,6 +1018,19 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             await wait_for_runtime_checkpoint_flush(
                 force_latest=bool(latest_runtime_checkpoint)
             )
+            ws_close_code = getattr(websocket, "close_code", None)
+            ws_close_reason = str(getattr(websocket, "close_reason", "") or "").strip()
+            if (
+                not interview_completed
+                and not client_hangup
+                and close_source == "client_ws"
+                and ws_close_code == CLIENT_HANGUP_CLOSE_CODE
+            ):
+                client_hangup = True
+                interview_log(
+                    "event=session.client_hangup source=ws_close_frame "
+                    f"close_code={ws_close_code} close_reason={ws_close_reason or '-'}"
+                )
 
             completed_reason = (
                 INTERVIEW_COMPLETED_REASON_NORMAL_END

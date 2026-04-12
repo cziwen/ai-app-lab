@@ -58,6 +58,10 @@ const resolveReconnectMaxSeconds = () => {
 
 const FRONTEND_RECONNECT_MAX_SECONDS = resolveReconnectMaxSeconds();
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 3000] as const;
+const CLIENT_HANGUP_DRAIN_HOLD_MS = 120;
+const CLIENT_HANGUP_DRAIN_MAX_WAIT_MS = 450;
+const CLIENT_HANGUP_CLOSE_CODE = 4000;
+const CLIENT_HANGUP_CLOSE_REASON = 'client_hangup';
 
 export const useVoiceBotService = () => {
   const {
@@ -294,12 +298,29 @@ export const useVoiceBotService = () => {
     resetWsState();
   };
 
-  const notifyClientHangup = () => {
-    serviceRef.current?.sendMessage({
-      event: EventType.ClientHangup,
-      payload: { source: 'ui_hangup' },
-    });
-    log('send | event:' + EventType.ClientHangup);
+  const notifyClientHangup = async () => {
+    manualDisconnectRef.current = true;
+    autoReconnectEnabledRef.current = false;
+    clearReconnectTimer();
+    stopRecovering();
+    const sent =
+      (await serviceRef.current?.sendMessageWithDrain(
+        {
+          event: EventType.ClientHangup,
+          payload: { source: 'ui_hangup' },
+        },
+        {
+          minHoldMs: CLIENT_HANGUP_DRAIN_HOLD_MS,
+          maxWaitMs: CLIENT_HANGUP_DRAIN_MAX_WAIT_MS,
+          pollIntervalMs: 20,
+        },
+      )) ?? false;
+    log(
+      'send | event:' +
+        EventType.ClientHangup +
+        ` drained=${sent ? '1' : '0'}`,
+    );
+    return sent;
   };
 
   const notifyClientEndAnswer = () => {
@@ -317,7 +338,10 @@ export const useVoiceBotService = () => {
     clearReconnectTimer();
     stopRecovering();
     wsReadyRef.current = false;
-    serviceRef.current?.shutdown();
+    serviceRef.current?.shutdown({
+      wsCloseCode: CLIENT_HANGUP_CLOSE_CODE,
+      wsCloseReason: CLIENT_HANGUP_CLOSE_REASON,
+    });
     resetWsState();
     resetMediaState();
   };

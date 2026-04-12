@@ -15,6 +15,17 @@ import { CONST } from '@/constant';
 
 export type AudioRouteMode = 'media-element' | 'web-audio-fallback';
 
+type WsCloseOptions = {
+  code?: number;
+  reason?: string;
+};
+
+type SendDrainOptions = {
+  minHoldMs?: number;
+  maxWaitMs?: number;
+  pollIntervalMs?: number;
+};
+
 interface IVoiceBotService {
   ws_url: string;
   handleJSONMessage: (json: JSONResponse) => void;
@@ -147,9 +158,40 @@ export default class VoiceBotService {
     }
   }
 
-  public sendMessage(message: WebRequest) {
+  public sendMessage(message: WebRequest): boolean {
     const data = pack(message);
-    this.safeSend(data);
+    return this.safeSend(data);
+  }
+
+  public async sendMessageWithDrain(
+    message: WebRequest,
+    options?: SendDrainOptions,
+  ): Promise<boolean> {
+    const data = pack(message);
+    const ws = this.ws;
+    if (!ws || !this.safeSend(data, ws)) {
+      return false;
+    }
+
+    const pollIntervalMs = Math.max(8, options?.pollIntervalMs ?? 20);
+    const minHoldMs = Math.max(0, options?.minHoldMs ?? 0);
+    const maxWaitMs = Math.max(minHoldMs, options?.maxWaitMs ?? 350);
+    const startAt = Date.now();
+
+    while (Date.now() - startAt < maxWaitMs) {
+      const elapsed = Date.now() - startAt;
+      if (ws.readyState !== WebSocket.OPEN) {
+        break;
+      }
+      if (ws.bufferedAmount <= 0 && elapsed >= minHoldMs) {
+        return true;
+      }
+      await new Promise<void>(resolve => {
+        window.setTimeout(resolve, pollIntervalMs);
+      });
+    }
+
+    return ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= 0;
   }
 
   public onMessage(e: MessageEvent<any>) {
@@ -286,12 +328,17 @@ export default class VoiceBotService {
     this.mediaObjectUrl = null;
   }
 
-  private safeSend(data: Blob | ArrayBuffer | string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+  private safeSend(
+    data: Blob | ArrayBuffer | string,
+    targetWs?: WebSocket,
+  ): boolean {
+    const ws = targetWs ?? this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.warn('[VoiceBotService] skip send: websocket is not OPEN');
-      return;
+      return false;
     }
-    this.ws.send(data);
+    ws.send(data);
+    return true;
   }
 
   public stopAllMedia() {
@@ -327,23 +374,26 @@ export default class VoiceBotService {
     this.onAudioUnlockedChange?.(false);
   }
 
-  public disconnectWsOnly() {
+  public disconnectWsOnly(options?: WsCloseOptions) {
     if (
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN ||
         this.ws.readyState === WebSocket.CONNECTING)
     ) {
-      this.ws.close();
+      this.ws.close(options?.code, options?.reason);
     }
     this.ws = undefined;
   }
 
-  public shutdown() {
+  public shutdown(options?: { wsCloseCode?: number; wsCloseReason?: string }) {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
-    this.disconnectWsOnly();
+    this.disconnectWsOnly({
+      code: options?.wsCloseCode,
+      reason: options?.wsCloseReason,
+    });
     this.stopAllMedia();
   }
 

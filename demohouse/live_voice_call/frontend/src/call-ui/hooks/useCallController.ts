@@ -175,14 +175,14 @@ export const useCallController = (): CallController => {
     disconnectSession,
   ]);
 
-  const finishImmediately = useCallback(() => {
+  const finishImmediately = useCallback(async () => {
     endingRef.current = true;
     connectingRef.current = false;
     setEndPhase('idle');
     setEndCountdownSec(null);
     cleanupCaptureResources();
     setElapsedSec(0);
-    notifyClientHangup();
+    await notifyClientHangup();
     shutdownSession();
     navigate(`/hangup-result${location.search}`);
   }, [
@@ -424,7 +424,7 @@ export const useCallController = (): CallController => {
           navigate(`/hangup-result${location.search}`);
           return;
         }
-        finishImmediately();
+        void finishImmediately();
         return;
       case 'connect':
         if (mode === 'mock') {

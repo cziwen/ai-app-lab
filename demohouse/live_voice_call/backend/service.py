@@ -58,6 +58,10 @@ RESUME_MODE_NONE = "none"
 RESUME_MODE_QUESTION_START = "question_start"
 RESUME_MODE_WRAP_UP = "wrap_up"
 RESUME_MODE_DONE = "done"
+RESUME_FIRST_TURN_GUARD_REMIND_TEXT = (
+    "我听到了，请继续围绕刚才这道题补充更完整的回答，"
+    "可以从你的具体做法、关键判断和结果展开。"
+)
 
 
 def _load_asr_silence_timeout_ms() -> int:
@@ -184,6 +188,7 @@ class VoiceBotService(BaseModel):
     responses_adapter: Optional[Any] = None
     interview_resumed_from_checkpoint: bool = False
     interview_resume_mode: str = RESUME_MODE_NONE
+    interview_resume_low_signal_guard_active: bool = False
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
     segment_history_messages: Dict[str, List[ArkMessage]] = {}
@@ -255,6 +260,7 @@ class VoiceBotService(BaseModel):
             self._build_question_context_segments(flow_questions)
             self.interview_resume_mode = RESUME_MODE_NONE
             self.interview_resumed_from_checkpoint = False
+            self.interview_resume_low_signal_guard_active = False
             runtime_checkpoint = self.interview_runtime_checkpoint
             if isinstance(runtime_checkpoint, dict):
                 restored = self.interview_flow.restore_runtime_checkpoint(
@@ -273,6 +279,7 @@ class VoiceBotService(BaseModel):
                         if rewound:
                             self.interview_resume_mode = RESUME_MODE_QUESTION_START
                             self.interview_resumed_from_checkpoint = True
+                            self.interview_resume_low_signal_guard_active = True
                             self._emit_interview_runtime_checkpoint()
                     self._log(
                         "[Interview] Runtime checkpoint restored "
@@ -358,6 +365,52 @@ class VoiceBotService(BaseModel):
             if sanitized == before:
                 break
         return sanitized or original
+
+    def _normalize_candidate_answer_for_guard(self, answer: str) -> str:
+        normalized = re.sub(r"[，。！？、；：,.!?;:\-\s~…]+", "", str(answer or ""))
+        return normalized.strip().lower()
+
+    def _is_low_signal_candidate_answer(self, answer: str) -> bool:
+        normalized = self._normalize_candidate_answer_for_guard(answer)
+        if not normalized:
+            return True
+        if len(normalized) > 6:
+            return False
+
+        filler_tokens = {
+            "嗯",
+            "嗯嗯",
+            "啊",
+            "啊啊",
+            "呃",
+            "额",
+            "哦",
+            "噢",
+            "唔",
+            "哎",
+            "诶",
+            "欸",
+            "哈",
+            "然后",
+            "就是",
+            "那个",
+            "这个",
+            "好的",
+            "好吧",
+            "嗯哼",
+            "uh",
+            "um",
+            "hmm",
+            "hm",
+        }
+        if normalized in filler_tokens:
+            return True
+        return bool(
+            re.fullmatch(
+                r"(?:嗯+|啊+|呃+|额+|哦+|噢+|唔+|哎+|诶+|欸+|哈+|uh+|um+|hmm+|hm+)",
+                normalized,
+            )
+        )
 
     def _wall_time_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -1352,10 +1405,41 @@ class VoiceBotService(BaseModel):
                     yield WebEvent.from_payload(asr_recognized)
                     candidate_text = asr_recognized.sentence
                     self._log(f"[Interview] Candidate answer: '{candidate_text}'")
-                    self._emit_candidate_text(candidate_text)
                     if flow.current_question_index < len(flow.questions):
                         current_question_id = flow.questions[flow.current_question_index].question_id
                         self._activate_context_segment(current_question_id)
+
+                    if (
+                        self.interview_resume_low_signal_guard_active
+                        and self._is_low_signal_candidate_answer(candidate_text)
+                    ):
+                        normalized_answer = self._normalize_candidate_answer_for_guard(
+                            candidate_text
+                        )
+                        self._log(
+                            "[Interview] Resume guard blocked low-signal first answer "
+                            f"normalized='{normalized_answer or '-'}'"
+                        )
+                        self._log_turn_event(
+                            "resume_guard_low_signal_ignored",
+                            extra={
+                                "raw_len": len(candidate_text or ""),
+                                "normalized_len": len(normalized_answer),
+                            },
+                        )
+                        async for event in self._send_scripted_text(
+                            RESUME_FIRST_TURN_GUARD_REMIND_TEXT
+                        ):
+                            yield event
+                        self.state = StateIdle
+                        self._log_turn_latency_breakdown(status="done")
+                        self._end_turn()
+                        continue
+                    if self.interview_resume_low_signal_guard_active:
+                        self.interview_resume_low_signal_guard_active = False
+                        self._log("[Interview] Resume guard cleared by valid first answer")
+
+                    self._emit_candidate_text(candidate_text)
 
                     # Add candidate answer to conversation history
                     self._append_history_message("user", candidate_text)
