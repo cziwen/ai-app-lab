@@ -1,0 +1,44 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: backend-server-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: backend-server
+          app: live-voice-call
+          __path__: /var/log/live-voice/backend_logs/backend-*.log
+
+  - job_name: interview-backend-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: interview-logs
+          stream: backend
+          app: live-voice-call
+          __path__: /var/log/live-voice/interview_logs/*/backend.log
+    relabel_configs:
+      - source_labels: [__path__]
+        regex: .*/interview_logs/([^/]+)/backend\.log
+        target_label: token
+
+  - job_name: interview-frontend-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: interview-logs
+          stream: frontend
+          app: live-voice-call
+          __path__: /var/log/live-voice/interview_logs/*/frontend.log
+    relabel_configs:
+      - source_labels: [__path__]
+        regex: .*/interview_logs/([^/]+)/frontend\.log
+        target_label: token
