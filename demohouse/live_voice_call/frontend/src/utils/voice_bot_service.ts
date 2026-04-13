@@ -292,7 +292,9 @@ export default class VoiceBotService {
         return;
       }
       this.releaseMediaObjectUrl();
-      this.log(`audio media-element play() rejected, fallback error=${String(error)}`);
+      this.log(
+        `audio media-element play() rejected, fallback error=${String(error)}`,
+      );
       this.setAudioRouteMode('web-audio-fallback');
       this.audioChunks.unshift(data);
       void this.playNextAudioChunk(epoch);
@@ -379,6 +381,7 @@ export default class VoiceBotService {
 
   public stopAllMedia() {
     this.clearPlaybackBuffer();
+    this.mediaAudio = null;
     if (this.audioCtx.state !== 'closed') {
       this.audioCtx.close();
     }
@@ -410,10 +413,11 @@ export default class VoiceBotService {
       this.mediaAudio.src = '';
       this.mediaAudio.onended = null;
       this.mediaAudio.onerror = null;
-      this.mediaAudio = null;
     }
     this.releaseMediaObjectUrl();
-    this.log('audio playback cleared');
+    this.log(
+      `audio playback cleared media_audio_retained=${this.mediaAudio ? '1' : '0'}`,
+    );
   }
 
   public disconnectWsOnly(options?: WsCloseOptions) {

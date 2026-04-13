@@ -100,9 +100,12 @@ describe('VoiceBotService playback clear guards', () => {
     (service as any).source = source;
     (service as any).analyser = analyser;
     (service as any).analyserData = new Uint8Array(8);
+    const retainedMediaAudio = new (globalThis as any).Audio();
+    (service as any).mediaAudio = retainedMediaAudio;
 
     const onStopPlayAudio = (service as any).onStopPlayAudio as jest.Mock;
     const onAudioLevelChange = (service as any).onAudioLevelChange as jest.Mock;
+    const onLog = (service as any).onLog as jest.Mock;
     const ctx = (service as any).audioCtx as FakeAudioContext;
 
     service.clearPlaybackBuffer();
@@ -114,7 +117,13 @@ describe('VoiceBotService playback clear guards', () => {
     expect(source.stop).toHaveBeenCalledTimes(1);
     expect(source.disconnect).toHaveBeenCalledTimes(1);
     expect(analyser.disconnect).toHaveBeenCalledTimes(1);
+    expect((service as any).mediaAudio).toBe(retainedMediaAudio);
+    expect(retainedMediaAudio.pause).toHaveBeenCalledTimes(1);
+    expect(retainedMediaAudio.src).toBe('');
     expect(ctx.close).not.toHaveBeenCalled();
+    expect(onLog).toHaveBeenCalledWith(
+      '[AudioRuntime] audio playback cleared media_audio_retained=1',
+    );
   });
 
   it('drops stale decode result after clearPlaybackBuffer epoch bump', async () => {
