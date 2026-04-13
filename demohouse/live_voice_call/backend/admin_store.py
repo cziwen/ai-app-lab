@@ -3036,19 +3036,65 @@ def finalize_canonical_artifacts(
                 (token,),
             ).fetchall()
 
-            candidate_rows = [row for row in audio_rows if str(row["track"]) == "candidate"]
-            interviewer_rows = [
-                row for row in audio_rows if str(row["track"]) == "interviewer"
-            ]
-            candidate_path = _copy_or_merge_audio_track_rows(
-                candidate_rows, token=token, track="candidate", flags=consistency_flags
-            )
-            interviewer_path = _copy_or_merge_audio_track_rows(
-                interviewer_rows,
-                token=token,
-                track="interviewer",
-                flags=consistency_flags,
-            )
+            preferred_attempt_seq = 0
+            if (
+                canonical_source == CANONICAL_SOURCE_CHECKPOINT
+                and isinstance(checkpoint_meta, dict)
+            ):
+                try:
+                    preferred_attempt_seq = int(checkpoint_meta.get("attempt_seq", 0) or 0)
+                except (TypeError, ValueError):
+                    preferred_attempt_seq = 0
+
+            candidate_path: Optional[str] = None
+            interviewer_path: Optional[str] = None
+            if preferred_attempt_seq > 0:
+                preferred_audio_rows = [
+                    row
+                    for row in audio_rows
+                    if int(row["attempt_seq"] or 0) == preferred_attempt_seq
+                ]
+                preferred_candidate_rows = [
+                    row for row in preferred_audio_rows if str(row["track"]) == "candidate"
+                ]
+                preferred_interviewer_rows = [
+                    row for row in preferred_audio_rows if str(row["track"]) == "interviewer"
+                ]
+                candidate_path = _copy_or_merge_audio_track_rows(
+                    preferred_candidate_rows,
+                    token=token,
+                    track="candidate",
+                    flags=consistency_flags,
+                )
+                interviewer_path = _copy_or_merge_audio_track_rows(
+                    preferred_interviewer_rows,
+                    token=token,
+                    track="interviewer",
+                    flags=consistency_flags,
+                )
+                if candidate_path and interviewer_path:
+                    consistency_flags.append("audio_attempt_pinned_to_checkpoint")
+                else:
+                    consistency_flags.append("audio_attempt_fallback_used")
+                    candidate_path = None
+                    interviewer_path = None
+
+            if not candidate_path or not interviewer_path:
+                candidate_rows = [
+                    row for row in audio_rows if str(row["track"]) == "candidate"
+                ]
+                interviewer_rows = [
+                    row for row in audio_rows if str(row["track"]) == "interviewer"
+                ]
+                candidate_path = _copy_or_merge_audio_track_rows(
+                    candidate_rows, token=token, track="candidate", flags=consistency_flags
+                )
+                interviewer_path = _copy_or_merge_audio_track_rows(
+                    interviewer_rows,
+                    token=token,
+                    track="interviewer",
+                    flags=consistency_flags,
+                )
 
             score_inputs = build_score_inputs_from_canonical_turns(
                 token,

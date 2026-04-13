@@ -1987,3 +1987,280 @@ def test_finalize_canonical_artifacts_marks_echo_risk_flag(monkeypatch, tmp_path
     detail = admin_store.get_interview_detail(token)
     assert detail is not None
     assert "candidate_echo_suspected" in detail["echo_risk_flags"]
+
+
+def test_finalize_canonical_artifacts_pins_audio_to_checkpoint_attempt(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-1", owner_id="owner-1") == 1
+    assert admin_store.start_interview_attempt(token, "attempt-2", owner_id="owner-2") == 2
+
+    checkpoint_payload = {
+        "version": 1,
+        "state": "WAIT_ANSWER",
+        "current_question_index": 0,
+        "total_candidate_turns": 1,
+        "latest_follow_up": "",
+        "latest_clarify": "",
+        "questions": [
+            {
+                "question_id": "q1",
+                "status": "in_progress",
+                "question_epoch": 1,
+                "follow_up_count": 0,
+                "clarify_count": 0,
+                "coverage_score": 0.0,
+                "turns": [
+                    {"role": "interviewer", "content": "第一题，请你介绍一个项目"},
+                    {"role": "candidate", "content": "新轮次有效回答"},
+                ],
+            }
+        ],
+    }
+    assert (
+        admin_store.save_interview_checkpoint_journal(
+            token,
+            "attempt-2",
+            1,
+            checkpoint_payload,
+            source="flush",
+        )
+        is True
+    )
+
+    attempt1_candidate_pcm = (b"\x01\x00\x02\x00") * 400
+    attempt2_candidate_pcm = (b"\x01\x00\x02\x00") * 900
+    interviewer_raw_1 = b"\x01\x02\x03\x04" * 200
+    interviewer_raw_2 = b"\x05\x06\x07\x08" * 300
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-1",
+        candidate_pcm_bytes=attempt1_candidate_pcm,
+        interviewer_encoded_bytes=interviewer_raw_1,
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-2",
+        candidate_pcm_bytes=attempt2_candidate_pcm,
+        interviewer_encoded_bytes=interviewer_raw_2,
+    )
+    admin_store.close_interview_attempt(
+        "attempt-1",
+        status="in_progress",
+        close_source="client_ws",
+    )
+    admin_store.close_interview_attempt(
+        "attempt-2",
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert finalized["canonical_source"] == admin_store.CANONICAL_SOURCE_CHECKPOINT
+    assert "audio_attempt_pinned_to_checkpoint" in finalized["consistency_flags"]
+    assert "audio_attempt_fallback_used" not in finalized["consistency_flags"]
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    canonical_candidate_path = Path(str(detail["candidate_audio_path"] or ""))
+    assert canonical_candidate_path.exists()
+    with admin_store.get_conn() as conn:
+        attempt2_candidate_row = conn.execute(
+            """
+            SELECT file_path
+            FROM interview_audio_segments s
+            JOIN interview_attempts a ON a.attempt_id = s.attempt_id
+            WHERE s.interview_token = ?
+              AND s.track = 'candidate'
+              AND a.attempt_seq = 2
+            ORDER BY s.segment_seq ASC, s.id ASC
+            LIMIT 1
+            """,
+            (token,),
+        ).fetchone()
+    assert attempt2_candidate_row is not None
+    attempt2_candidate_path = Path(str(attempt2_candidate_row["file_path"] or ""))
+    assert attempt2_candidate_path.exists()
+    assert canonical_candidate_path.read_bytes() == attempt2_candidate_path.read_bytes()
+
+
+def test_finalize_canonical_artifacts_falls_back_when_checkpoint_attempt_audio_incomplete(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-1", owner_id="owner-1") == 1
+    assert admin_store.start_interview_attempt(token, "attempt-2", owner_id="owner-2") == 2
+
+    checkpoint_payload = {
+        "version": 1,
+        "state": "WAIT_ANSWER",
+        "current_question_index": 0,
+        "total_candidate_turns": 1,
+        "latest_follow_up": "",
+        "latest_clarify": "",
+        "questions": [
+            {
+                "question_id": "q1",
+                "status": "in_progress",
+                "question_epoch": 1,
+                "follow_up_count": 0,
+                "clarify_count": 0,
+                "coverage_score": 0.0,
+                "turns": [
+                    {"role": "interviewer", "content": "第一题，请你介绍一个项目"},
+                    {"role": "candidate", "content": "新轮次有效回答"},
+                ],
+            }
+        ],
+    }
+    assert (
+        admin_store.save_interview_checkpoint_journal(
+            token,
+            "attempt-2",
+            1,
+            checkpoint_payload,
+            source="flush",
+        )
+        is True
+    )
+
+    # attempt-1 has both tracks, attempt-2 intentionally misses interviewer track.
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-1",
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 400,
+        interviewer_encoded_bytes=b"\x01\x02\x03\x04" * 200,
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-2",
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 900,
+        interviewer_encoded_bytes=b"",
+    )
+    admin_store.close_interview_attempt(
+        "attempt-1",
+        status="in_progress",
+        close_source="client_ws",
+    )
+    admin_store.close_interview_attempt(
+        "attempt-2",
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert finalized["canonical_source"] == admin_store.CANONICAL_SOURCE_CHECKPOINT
+    assert "audio_attempt_fallback_used" in finalized["consistency_flags"]
+    assert "audio_attempt_pinned_to_checkpoint" not in finalized["consistency_flags"]
+
+
+def test_finalize_canonical_artifacts_turn_events_fallback_does_not_set_checkpoint_audio_flags(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-fallback", owner_id="owner-1") == 1
+
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-fallback",
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+            {
+                "seq_no": 2,
+                "role": "candidate",
+                "text": "我负责订单系统重构。",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+        ],
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-fallback",
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 500,
+        interviewer_encoded_bytes=b"\x01\x02\x03\x04" * 200,
+    )
+    admin_store.close_interview_attempt(
+        "attempt-fallback",
+        status="completed",
+        close_source="client_ws",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(
+        token,
+        completed_reason=admin_store.INTERVIEW_COMPLETED_REASON_HANGUP,
+    )
+    assert finalized["ok"] is True
+    assert finalized["canonical_source"] == admin_store.CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+    assert "audio_attempt_pinned_to_checkpoint" not in finalized["consistency_flags"]
+    assert "audio_attempt_fallback_used" not in finalized["consistency_flags"]
