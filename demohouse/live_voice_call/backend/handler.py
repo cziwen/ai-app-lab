@@ -931,6 +931,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         on_interview_runtime_checkpoint=persist_runtime_checkpoint,
         log_fn=interview_log,
         session_id=ws_session_id,
+        interview_token=token,
     )
     async def async_gen(
         ws: websockets.WebSocketCommonProtocol,

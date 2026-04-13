@@ -46,6 +46,11 @@ from prompt import INTERVIEWER_SYSTEM_PROMPT, VoiceBotPrompt
 from llm_limiter import llm_slot
 from ark_responses_adapter import ArkResponsesAdapter, build_input_messages
 from sauc_asr_client import DEFAULT_ASR_WS_URL, SaucASRClient, SaucASRFullServerResponse
+from scripted_tts_memory_cache import (
+    SCRIPTED_TTS_MEMORY_CACHE,
+    CachedTTSSentence,
+    ScriptedTTSMemoryCache,
+)
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -189,6 +194,8 @@ class VoiceBotService(BaseModel):
     interview_resumed_from_checkpoint: bool = False
     interview_resume_mode: str = RESUME_MODE_NONE
     interview_resume_low_signal_guard_active: bool = False
+    interview_token: str = ""
+    scripted_tts_cache: Optional[ScriptedTTSMemoryCache] = None
 
     history_messages: List[ArkMessage] = []  # Store historical dialogue information
     segment_history_messages: Dict[str, List[ArkMessage]] = {}
@@ -1071,9 +1078,92 @@ class VoiceBotService(BaseModel):
 
     async def _send_scripted_text(self, text: str) -> AsyncIterable[WebEvent]:
         """Send a pre-determined text string through TTS without an LLM call."""
+        if self.scripted_tts_cache is None:
+            self.scripted_tts_cache = SCRIPTED_TTS_MEMORY_CACHE
+
+        cache_token = (self.interview_token or "").strip()
+        cache_speaker = (self.tts_speaker or "").strip()
+        cache_text = (text or "").strip()
+        use_scripted_cache = bool(cache_token and cache_text and self.scripted_tts_cache)
+        scripted_cache_hit: Optional[List[CachedTTSSentence]] = None
+
+        if use_scripted_cache and self.scripted_tts_cache:
+            try:
+                scripted_cache_hit = self.scripted_tts_cache.get(
+                    cache_token,
+                    cache_speaker,
+                    cache_text,
+                )
+            except Exception as cache_err:
+                self._log(
+                    f"[ScriptedTTSCache] read error token={cache_token} "
+                    f"text_len={len(cache_text)} error={cache_err}"
+                )
+                self._log_turn_event(
+                    "tts_scripted_cache_read_error",
+                    extra={"error": str(cache_err)},
+                )
+                scripted_cache_hit = None
+
+        if scripted_cache_hit:
+            self._log_turn_event(
+                "tts_scripted_cache_hit",
+                extra={"sentences": len(scripted_cache_hit), "text_len": len(cache_text)},
+            )
+            for sentence in scripted_cache_hit:
+                yield WebEvent.from_payload(
+                    TTSSentenceStartPayload(sentence=sentence.transcript)
+                )
+                self._emit_bot_audio_chunk(sentence.audio)
+                yield WebEvent.from_payload(TTSSentenceEndPayload(data=sentence.audio))
+            self._log_turn_event("tts_done")
+            yield WebEvent.from_payload(TTSDonePayload())
+            self._append_history_message("assistant", text)
+            self._emit_bot_text(text)
+            return
+
+        if use_scripted_cache:
+            self._log_turn_event(
+                "tts_scripted_cache_miss",
+                extra={"text_len": len(cache_text)},
+            )
+
+        cached_sentences: List[CachedTTSSentence] = []
+        pending_transcripts: List[str] = []
         text_stream = self._greeting_text_stream(text)
         async for payload in self.handle_tts_response(text_stream):
+            if isinstance(payload, TTSSentenceStartPayload):
+                pending_transcripts.append(payload.sentence or "")
+            elif isinstance(payload, TTSSentenceEndPayload):
+                transcript = pending_transcripts.pop(0) if pending_transcripts else ""
+                audio = bytes(payload.data or b"")
+                if audio:
+                    cached_sentences.append(
+                        CachedTTSSentence(transcript=transcript, audio=audio)
+                    )
             yield WebEvent.from_payload(payload)
+
+        if use_scripted_cache and cached_sentences and self.scripted_tts_cache:
+            try:
+                if self.scripted_tts_cache.set(
+                    cache_token,
+                    cache_speaker,
+                    cache_text,
+                    cached_sentences,
+                ):
+                    self._log_turn_event(
+                        "tts_scripted_cache_store_ok",
+                        extra={"sentences": len(cached_sentences)},
+                    )
+            except Exception as cache_err:
+                self._log(
+                    f"[ScriptedTTSCache] write error token={cache_token} "
+                    f"text_len={len(cache_text)} error={cache_err}"
+                )
+                self._log_turn_event(
+                    "tts_scripted_cache_store_error",
+                    extra={"error": str(cache_err)},
+                )
         self._append_history_message("assistant", text)
         self._emit_bot_text(text)
 
