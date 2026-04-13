@@ -47,7 +47,29 @@ tail -f "$latest_log"
 - 检查 LLM2 配置（`LLM2_ENDPOINT_ID`、`ARK_API_KEY`）。
 - 检查 `backend/tests/test_service_interview_llm.py` 对应上下文构建与 prompt 约束。
 
-## 4. 占用无法释放 / 并发长期满载
+## 4. iOS 切后台后回到面试页出现“无声 + 不切用户说话”
+该问题常见于 iOS Safari / WKWebView：外部 App 抢占音频焦点后，`HTMLAudioElement` 进入 pause，但不触发 ended/error。
+
+当前前端已增加三层保护：
+- 播放层：`media-element` 增加 `onpause` 恢复尝试，必要时降级为“清空队列并触发 stop”防止死锁。
+- 生命周期层：监听页面 `visibilitychange/pageshow/focus`，回前台主动调用恢复逻辑。
+- 门控层：`TTSDone` 后启动 watchdog（默认 1500ms），若仍卡在 paused 状态则兜底放行录音。
+
+取证日志关键字（前端）：
+- `audio foreground resume trigger=...`
+- `audio resume check trigger=...`
+- `audio resume success trigger=...`
+- `audio resume failed trigger=... allow_degrade=1`
+- `gate: playback watchdog fired ...`
+- `gate: playback watchdog forced playback stopped`
+
+回归步骤（iOS Safari 实机）：
+1. 进入实时面试页并触发 bot 播报。
+2. 切到可外放音频的 App/网页播放声音。
+3. 返回面试页，观察 bot 是否恢复播放或直接进入下一轮录音。
+4. 连续完成 3 轮问答，确认无“无声 + 卡住不录音”。
+
+## 5. 占用无法释放 / 并发长期满载
 当前准入由 `InterviewOccupancy` 管理（TTL + heartbeat）。
 
 排查：
@@ -55,7 +77,7 @@ tail -f "$latest_log"
 - 检查 `INTERVIEW_OCCUPANCY_TTL_SECONDS` 与 `INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS`。
 - 检查会话是否异常退出导致 heartbeat 中断。
 
-## 5. Prompt 质量回归
+## 6. Prompt 质量回归
 可运行 live QA（默认跳过）：
 ```bash
 cd backend
@@ -69,7 +91,7 @@ pytest -q -o addopts='' tests/test_prompt_quality_live_api.py
 - `PROMPT_QA_LIMIT`
 - `PROMPT_QA_OUTPUT`
 
-## 6. 建议的最小回归集
+## 7. 建议的最小回归集
 ```bash
 cd backend
 PYTHONPATH=. pytest -q -o addopts='' \

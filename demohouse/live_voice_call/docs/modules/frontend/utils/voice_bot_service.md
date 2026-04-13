@@ -26,6 +26,8 @@ class VoiceBotService {
 
   // 音频控制
   unlockAudio(): Promise<void>
+  handleForegroundResume(trigger: string): Promise<void>
+  getPlaybackSnapshot(): PlaybackSnapshot
   stopAllMedia(): void
 
   // 消息发送
@@ -52,6 +54,16 @@ interface IVoiceBotService {
 ### 音频路由模式
 ```typescript
 type AudioRouteMode = 'media-element' | 'web-audio-fallback'
+
+type PlaybackSnapshot = {
+  route: AudioRouteMode
+  playing: boolean
+  queueLength: number
+  audioPaused: boolean | null
+  audioEnded: boolean | null
+  audioReadyState: number | null
+  audioCtxState: AudioContextState
+}
 ```
 
 ## WebSocket 二进制协议实现
@@ -202,12 +214,34 @@ async playChunkViaMediaElement(data: ArrayBuffer) {
     this.audioChunks.unshift(data)
     this.playNextAudioChunk()
   }
+
+  // iOS 焦点切换时可能只触发 pause，不触发 ended/error
+  this.mediaAudio.onpause = () => {
+    this.tryResumeMediaPlayback('media_onpause', true)
+  }
 }
 ```
 
 #### 优势与局限
 - **优势**：iOS Safari 兼容性好，内联播放稳定
 - **局限**：无法实时分析音频波形，仅提供固定音量值
+
+### 前台恢复与降级策略（iOS）
+```typescript
+async handleForegroundResume(trigger: string) {
+  await this.unlockAudio()
+  const snapshot = this.getPlaybackSnapshot()
+  this.logPlaybackSnapshot(`audio foreground resume trigger=${trigger}`, snapshot)
+  if (snapshot.route !== 'media-element') return
+  await this.tryResumeMediaPlayback(`foreground_${trigger}`, true)
+}
+```
+
+恢复判定与兜底：
+- 仅在 `media-element + audio.paused + !audio.ended + 页面可见` 时尝试恢复。
+- 恢复成功：继续当前播报与队列消费。
+- 恢复失败：执行降级 `clearPlaybackBuffer()`，触发 `onStopPlayAudio()`，避免门控无限等待。
+- 所有恢复路径会打印 snapshot（`route/playing/queue/paused/ended/ready/ctx`）便于定位。
 
 ### 策略 2：web-audio-fallback（桌面端默认）
 ```typescript
