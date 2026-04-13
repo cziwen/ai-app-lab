@@ -1,7 +1,9 @@
 import {
+  isStuckMediaPlayback,
   shouldAbortReconnectFlow,
   shouldAcceptReconnectSuccess,
   shouldClearPlaybackOnSocketClose,
+  shouldRunPlaybackWatchdog,
 } from './useVoiceBotService';
 
 describe('shouldAbortReconnectFlow', () => {
@@ -43,5 +45,56 @@ describe('shouldClearPlaybackOnSocketClose', () => {
 
   it('returns false when manual disconnect is active', () => {
     expect(shouldClearPlaybackOnSocketClose(true, true)).toBe(false);
+  });
+});
+
+describe('isStuckMediaPlayback', () => {
+  it('returns true for paused media-element playback that is still marked playing', () => {
+    expect(
+      isStuckMediaPlayback({
+        route: 'media-element',
+        playing: true,
+        queueLength: 1,
+        audioPaused: true,
+        audioEnded: false,
+        audioReadyState: 2,
+        audioCtxState: 'running',
+      }),
+    ).toBe(true);
+  });
+
+  it('returns false for non-stuck snapshots', () => {
+    expect(
+      isStuckMediaPlayback({
+        route: 'media-element',
+        playing: true,
+        queueLength: 1,
+        audioPaused: false,
+        audioEnded: false,
+        audioReadyState: 4,
+        audioCtxState: 'running',
+      }),
+    ).toBe(false);
+    expect(
+      isStuckMediaPlayback({
+        route: 'web-audio-fallback',
+        playing: true,
+        queueLength: 0,
+        audioPaused: null,
+        audioEnded: null,
+        audioReadyState: null,
+        audioCtxState: 'running',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('shouldRunPlaybackWatchdog', () => {
+  it('returns true only when gate is waiting for playback stop after tts done', () => {
+    expect(shouldRunPlaybackWatchdog(true, true, false, true)).toBe(true);
+    expect(shouldRunPlaybackWatchdog(false, true, false, true)).toBe(false);
+    expect(shouldRunPlaybackWatchdog(true, false, false, true)).toBe(false);
+    expect(shouldRunPlaybackWatchdog(true, true, true, true)).toBe(false);
+    expect(shouldRunPlaybackWatchdog(true, true, false, false)).toBe(false);
   });
 });

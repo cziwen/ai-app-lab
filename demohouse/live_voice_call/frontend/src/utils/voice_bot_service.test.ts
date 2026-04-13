@@ -64,8 +64,16 @@ describe('VoiceBotService playback clear guards', () => {
       src = '';
       onended: (() => void) | null = null;
       onerror: (() => void) | null = null;
-      play = jest.fn(async () => undefined);
-      pause = jest.fn();
+      onpause: (() => void) | null = null;
+      paused = false;
+      ended = false;
+      readyState = 4;
+      play = jest.fn(async () => {
+        this.paused = false;
+      });
+      pause = jest.fn(() => {
+        this.paused = true;
+      });
     };
     g.AudioContext = FakeAudioContext;
     g.webkitAudioContext = undefined;
@@ -92,6 +100,14 @@ describe('VoiceBotService playback clear guards', () => {
       onAudioRouteModeChange: jest.fn(),
       onLog: jest.fn(),
     });
+
+  const createSafariService = () => {
+    (globalThis as any).navigator = {
+      userAgent:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1',
+    };
+    return createService();
+  };
 
   it('clearPlaybackBuffer clears queue without closing AudioContext', () => {
     const service = createService();
@@ -143,5 +159,62 @@ describe('VoiceBotService playback clear guards', () => {
 
     expect(ctx.createBufferSource).not.toHaveBeenCalled();
     expect(source.start).not.toHaveBeenCalled();
+  });
+
+  it('returns playback snapshot fields for media-element route', () => {
+    const service = createSafariService();
+    const mediaAudio = new (globalThis as any).Audio();
+    mediaAudio.paused = true;
+    mediaAudio.ended = false;
+    mediaAudio.readyState = 2;
+    (service as any).mediaAudio = mediaAudio;
+    (service as any).playing = true;
+    (service as any).audioChunks = [new ArrayBuffer(4)];
+
+    expect(service.getPlaybackSnapshot()).toEqual({
+      route: 'media-element',
+      playing: true,
+      queueLength: 1,
+      audioPaused: true,
+      audioEnded: false,
+      audioReadyState: 2,
+      audioCtxState: 'running',
+    });
+  });
+
+  it('tries to resume when media element is paused unexpectedly', async () => {
+    const service = createSafariService();
+    const mediaAudio = new (globalThis as any).Audio();
+    (service as any).mediaAudio = mediaAudio;
+    (service as any).playing = true;
+    (service as any).audioChunks = [new ArrayBuffer(4)];
+
+    await (service as any).playChunkViaMediaElement(new ArrayBuffer(8), 0);
+    mediaAudio.paused = true;
+    mediaAudio.ended = false;
+    mediaAudio.onpause?.();
+    await Promise.resolve();
+
+    expect(mediaAudio.play).toHaveBeenCalledTimes(2);
+  });
+
+  it('degrades to stop playback when foreground resume cannot recover', async () => {
+    const service = createSafariService();
+    const onStopPlayAudio = (service as any).onStopPlayAudio as jest.Mock;
+    const mediaAudio = new (globalThis as any).Audio();
+    mediaAudio.paused = true;
+    mediaAudio.ended = false;
+    mediaAudio.play = jest.fn(async () => {
+      throw new Error('blocked');
+    });
+    (service as any).mediaAudio = mediaAudio;
+    (service as any).playing = true;
+    (service as any).audioChunks = [new ArrayBuffer(4), new ArrayBuffer(8)];
+
+    await service.handleForegroundResume('test');
+
+    expect(onStopPlayAudio).toHaveBeenCalledTimes(1);
+    expect((service as any).audioChunks).toHaveLength(0);
+    expect((service as any).playing).toBe(false);
   });
 });

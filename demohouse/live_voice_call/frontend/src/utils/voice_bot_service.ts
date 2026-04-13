@@ -14,6 +14,15 @@ import type { JSONResponse, WebRequest } from '@/types';
 import { CONST } from '@/constant';
 
 export type AudioRouteMode = 'media-element' | 'web-audio-fallback';
+export type PlaybackSnapshot = {
+  route: AudioRouteMode;
+  playing: boolean;
+  queueLength: number;
+  audioPaused: boolean | null;
+  audioEnded: boolean | null;
+  audioReadyState: number | null;
+  audioCtxState: AudioContextState;
+};
 
 type WsCloseOptions = {
   code?: number;
@@ -85,6 +94,7 @@ export default class VoiceBotService {
   private playbackEpoch = 0;
   protected playing = false;
   private disposed = false;
+  private mediaRecoveryInFlight = false;
 
   constructor(props: IVoiceBotService) {
     this.ws_url = props.ws_url;
@@ -157,6 +167,35 @@ export default class VoiceBotService {
     } catch (error) {
       this.log(`audio unlock failed error=${String(error)}`);
     }
+  }
+
+  public getPlaybackSnapshot(): PlaybackSnapshot {
+    const audio = this.mediaAudio;
+    return {
+      route: this.audioRouteMode,
+      playing: this.playing,
+      queueLength: this.audioChunks.length,
+      audioPaused: audio ? audio.paused : null,
+      audioEnded: audio ? audio.ended : null,
+      audioReadyState: audio ? audio.readyState : null,
+      audioCtxState: this.audioCtx.state,
+    };
+  }
+
+  public async handleForegroundResume(trigger: string) {
+    if (this.disposed) {
+      return;
+    }
+    await this.unlockAudio();
+    const snapshot = this.getPlaybackSnapshot();
+    this.logPlaybackSnapshot(
+      `audio foreground resume trigger=${trigger}`,
+      snapshot,
+    );
+    if (snapshot.route !== 'media-element') {
+      return;
+    }
+    await this.tryResumeMediaPlayback(`foreground_${trigger}`, true);
   }
 
   public sendMessage(message: WebRequest): boolean {
@@ -277,6 +316,13 @@ export default class VoiceBotService {
       this.setAudioRouteMode('web-audio-fallback');
       this.audioChunks.unshift(data);
       void this.playNextAudioChunk(epoch);
+    };
+
+    currentAudio.onpause = () => {
+      if (epoch !== this.playbackEpoch || this.disposed) {
+        return;
+      }
+      void this.tryResumeMediaPlayback('media_onpause', true);
     };
 
     try {
@@ -413,6 +459,7 @@ export default class VoiceBotService {
       this.mediaAudio.src = '';
       this.mediaAudio.onended = null;
       this.mediaAudio.onerror = null;
+      this.mediaAudio.onpause = null;
     }
     this.releaseMediaObjectUrl();
     this.log(
@@ -475,5 +522,72 @@ export default class VoiceBotService {
 
   private log(message: string) {
     this.onLog?.(`[AudioRuntime] ${message}`);
+  }
+
+  private isDocumentVisible() {
+    if (typeof document === 'undefined') {
+      return true;
+    }
+    if (typeof document.visibilityState === 'string') {
+      return document.visibilityState === 'visible';
+    }
+    return !document.hidden;
+  }
+
+  private formatPlaybackSnapshot(snapshot: PlaybackSnapshot) {
+    return (
+      `route=${snapshot.route}` +
+      ` playing=${snapshot.playing ? '1' : '0'}` +
+      ` queue=${snapshot.queueLength}` +
+      ` paused=${snapshot.audioPaused === null ? 'na' : snapshot.audioPaused ? '1' : '0'}` +
+      ` ended=${snapshot.audioEnded === null ? 'na' : snapshot.audioEnded ? '1' : '0'}` +
+      ` ready=${snapshot.audioReadyState === null ? 'na' : String(snapshot.audioReadyState)}` +
+      ` ctx=${snapshot.audioCtxState}`
+    );
+  }
+
+  private logPlaybackSnapshot(prefix: string, snapshot: PlaybackSnapshot) {
+    this.log(`${prefix} ${this.formatPlaybackSnapshot(snapshot)}`);
+  }
+
+  private async tryResumeMediaPlayback(trigger: string, allowDegrade: boolean) {
+    const audio = this.mediaAudio;
+    if (!audio || this.audioRouteMode !== 'media-element') {
+      return;
+    }
+    if (!this.isDocumentVisible()) {
+      this.log(`audio resume skipped trigger=${trigger} reason=hidden`);
+      return;
+    }
+    const before = this.getPlaybackSnapshot();
+    this.logPlaybackSnapshot(`audio resume check trigger=${trigger}`, before);
+    if (!audio.paused || audio.ended) {
+      return;
+    }
+    if (this.mediaRecoveryInFlight) {
+      this.log(`audio resume skipped trigger=${trigger} reason=in_flight`);
+      return;
+    }
+    this.mediaRecoveryInFlight = true;
+    try {
+      await audio.play();
+      this.logPlaybackSnapshot(
+        `audio resume success trigger=${trigger}`,
+        this.getPlaybackSnapshot(),
+      );
+    } catch (error) {
+      this.log(
+        `audio resume failed trigger=${trigger} error=${String(error)} allow_degrade=${allowDegrade ? '1' : '0'}`,
+      );
+      if (allowDegrade) {
+        this.clearPlaybackBuffer();
+        this.logPlaybackSnapshot(
+          `audio resume degraded trigger=${trigger}`,
+          this.getPlaybackSnapshot(),
+        );
+      }
+    } finally {
+      this.mediaRecoveryInFlight = false;
+    }
   }
 }

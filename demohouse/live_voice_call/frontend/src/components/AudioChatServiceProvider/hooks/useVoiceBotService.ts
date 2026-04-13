@@ -15,7 +15,7 @@ import { Message } from '@arco-design/web-react';
 import { useAudioChatState } from '@/components/AudioChatProvider/hooks/useAudioChatState';
 import { useLogContent } from '@/components/AudioChatServiceProvider/hooks/useLogContent';
 import { useAudioRecorder } from '@/components/AudioChatServiceProvider/hooks/useAudioRecorder';
-import VoiceBotService from '@/utils/voice_bot_service';
+import VoiceBotService, { type PlaybackSnapshot } from '@/utils/voice_bot_service';
 import { EventType, type BotErrorPayload } from '@/types';
 import { useSpeakerConfig } from '@/components/AudioChatServiceProvider/hooks/useSpeakerConfig';
 import { useMessageList } from '@/components/AudioChatProvider/hooks/useMessageList';
@@ -82,6 +82,7 @@ const CLIENT_HANGUP_DRAIN_HOLD_MS = 120;
 const CLIENT_HANGUP_DRAIN_MAX_WAIT_MS = 450;
 const CLIENT_HANGUP_CLOSE_CODE = 4000;
 const CLIENT_HANGUP_CLOSE_REASON = 'client_hangup';
+const PLAYBACK_WATCHDOG_TIMEOUT_MS = 1500;
 
 export const shouldAbortReconnectFlow = (
   autoReconnectEnabled: boolean,
@@ -104,6 +105,27 @@ export const shouldClearPlaybackOnSocketClose = (
   autoReconnectEnabled: boolean,
   manualDisconnect: boolean,
 ) => !shouldAbortReconnectFlow(autoReconnectEnabled, manualDisconnect);
+
+export const isStuckMediaPlayback = (
+  snapshot?: PlaybackSnapshot | null,
+) => {
+  if (!snapshot) {
+    return false;
+  }
+  return (
+    snapshot.route === 'media-element' &&
+    snapshot.playing &&
+    snapshot.audioPaused === true &&
+    snapshot.audioEnded === false
+  );
+};
+
+export const shouldRunPlaybackWatchdog = (
+  wsReady: boolean,
+  ttsDone: boolean,
+  playbackStopped: boolean,
+  botTurnStarted: boolean,
+) => wsReady && ttsDone && !playbackStopped && botTurnStarted;
 
 export const useVoiceBotService = () => {
   const {
@@ -135,6 +157,7 @@ export const useVoiceBotService = () => {
   const playbackStoppedRef = useRef(false);
   const botTurnStartedRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
+  const playbackWatchdogTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectStartAtRef = useRef(0);
   const autoReconnectEnabledRef = useRef(true);
@@ -149,6 +172,13 @@ export const useVoiceBotService = () => {
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
+    }
+  };
+
+  const clearPlaybackWatchdog = () => {
+    if (playbackWatchdogTimerRef.current !== null) {
+      window.clearTimeout(playbackWatchdogTimerRef.current);
+      playbackWatchdogTimerRef.current = null;
     }
   };
 
@@ -263,12 +293,14 @@ export const useVoiceBotService = () => {
     }, nextDelay);
   };
   const clearRecorderGate = () => {
+    clearPlaybackWatchdog();
     ttsDoneRef.current = false;
     playbackStoppedRef.current = false;
     botTurnStartedRef.current = false;
   };
 
   const resetRecorderGateForBotTurn = () => {
+    clearPlaybackWatchdog();
     ttsDoneRef.current = false;
     playbackStoppedRef.current = false;
     botTurnStartedRef.current = true;
@@ -286,6 +318,69 @@ export const useVoiceBotService = () => {
     recStart();
     log('gate: recorder started');
     clearRecorderGate();
+  };
+
+  const formatPlaybackSnapshot = (snapshot: PlaybackSnapshot) =>
+    `route=${snapshot.route} playing=${snapshot.playing ? '1' : '0'} queue=${snapshot.queueLength} paused=${snapshot.audioPaused === null ? 'na' : snapshot.audioPaused ? '1' : '0'} ended=${snapshot.audioEnded === null ? 'na' : snapshot.audioEnded ? '1' : '0'} ready=${snapshot.audioReadyState === null ? 'na' : String(snapshot.audioReadyState)} ctx=${snapshot.audioCtxState}`;
+
+  const schedulePlaybackWatchdog = () => {
+    clearPlaybackWatchdog();
+    if (
+      !shouldRunPlaybackWatchdog(
+        wsReadyRef.current,
+        ttsDoneRef.current,
+        playbackStoppedRef.current,
+        botTurnStartedRef.current,
+      )
+    ) {
+      return;
+    }
+    playbackWatchdogTimerRef.current = window.setTimeout(() => {
+      playbackWatchdogTimerRef.current = null;
+      if (
+        !shouldRunPlaybackWatchdog(
+          wsReadyRef.current,
+          ttsDoneRef.current,
+          playbackStoppedRef.current,
+          botTurnStartedRef.current,
+        )
+      ) {
+        return;
+      }
+      const service = serviceRef.current;
+      if (!service) {
+        return;
+      }
+      const before = service.getPlaybackSnapshot();
+      log(`gate: playback watchdog fired ${formatPlaybackSnapshot(before)}`);
+      if (!isStuckMediaPlayback(before)) {
+        return;
+      }
+      log('gate: playback watchdog detected stuck media, trying recovery');
+      void (async () => {
+        await service.handleForegroundResume('tts_watchdog');
+        if (
+          !shouldRunPlaybackWatchdog(
+            wsReadyRef.current,
+            ttsDoneRef.current,
+            playbackStoppedRef.current,
+            botTurnStartedRef.current,
+          )
+        ) {
+          return;
+        }
+        const after = service.getPlaybackSnapshot();
+        log(
+          `gate: playback watchdog post-recovery ${formatPlaybackSnapshot(after)}`,
+        );
+        if (!isStuckMediaPlayback(after)) {
+          return;
+        }
+        playbackStoppedRef.current = true;
+        log('gate: playback watchdog forced playback stopped');
+        maybeStartRecorder();
+      })();
+    }, PLAYBACK_WATCHDOG_TIMEOUT_MS);
   };
 
   const parseBotError = (payload?: Record<string, any> | BotErrorPayload) => {
@@ -363,6 +458,7 @@ export const useVoiceBotService = () => {
     autoReconnectEnabledRef.current = false;
     markReconnectExhausted(false);
     clearReconnectTimer();
+    clearPlaybackWatchdog();
     stopRecovering();
     wsReadyRef.current = false;
     serviceRef.current?.disconnectWsOnly();
@@ -373,6 +469,7 @@ export const useVoiceBotService = () => {
     manualDisconnectRef.current = true;
     autoReconnectEnabledRef.current = false;
     clearReconnectTimer();
+    clearPlaybackWatchdog();
     stopRecovering();
     const sent =
       (await serviceRef.current?.sendMessageWithDrain(
@@ -407,6 +504,7 @@ export const useVoiceBotService = () => {
     autoReconnectEnabledRef.current = false;
     markReconnectExhausted(false);
     clearReconnectTimer();
+    clearPlaybackWatchdog();
     stopRecovering();
     wsReadyRef.current = false;
     serviceRef.current?.shutdown({
@@ -436,6 +534,7 @@ export const useVoiceBotService = () => {
         log(message);
       },
       onStopPlayAudio: () => {
+        clearPlaybackWatchdog();
         setBotAudioPlaying(false);
         setBotAudioLevel(0);
         if (!wsReadyRef.current) {
@@ -446,6 +545,7 @@ export const useVoiceBotService = () => {
         maybeStartRecorder();
       },
       onClose: () => {
+        clearPlaybackWatchdog();
         log('ws closed');
         resetWsState();
         const shouldReconnect = shouldClearPlaybackOnSocketClose(
@@ -497,6 +597,7 @@ export const useVoiceBotService = () => {
             ]);
             break;
           case EventType.TTSSentenceStart:
+            clearPlaybackWatchdog();
             if (!botTurnStartedRef.current) {
               resetRecorderGateForBotTurn();
             }
@@ -540,6 +641,7 @@ export const useVoiceBotService = () => {
             ttsDoneRef.current = true;
             log('gate: tts done');
             maybeStartRecorder();
+            schedulePlaybackWatchdog();
             if (configNeedUpdateRef.current) {
               handleBotUpdateConfig();
               configNeedUpdateRef.current = false;
@@ -554,11 +656,29 @@ export const useVoiceBotService = () => {
     document.addEventListener('click', tryUnlockAudio, { passive: true });
     document.addEventListener('touchstart', tryUnlockAudio, { passive: true });
     document.addEventListener('keydown', tryUnlockAudio, { passive: true });
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void service.handleForegroundResume('visibilitychange');
+      }
+    };
+    const onPageShow = () => {
+      void service.handleForegroundResume('pageshow');
+    };
+    const onWindowFocus = () => {
+      void service.handleForegroundResume('focus');
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('focus', onWindowFocus);
     return () => {
       document.removeEventListener('click', tryUnlockAudio);
       document.removeEventListener('touchstart', tryUnlockAudio);
       document.removeEventListener('keydown', tryUnlockAudio);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('focus', onWindowFocus);
       clearReconnectTimer();
+      clearPlaybackWatchdog();
       recoveringRef.current = false;
       reconnectExhaustedRef.current = false;
       service.shutdown();
