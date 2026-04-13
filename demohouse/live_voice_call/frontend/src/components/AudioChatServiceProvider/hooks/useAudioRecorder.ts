@@ -25,6 +25,13 @@ const AUDIO_TRACK_SET = {
   channelCount: 1,
 };
 
+const readEnv = (name: string) => {
+  const value = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env?.[name];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+};
+
 const resolveEnvMs = (value: string | undefined, fallback: number) => {
   const parsed = Number.parseInt(String(value || '').trim(), 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -35,8 +42,8 @@ const resolveEnvMs = (value: string | undefined, fallback: number) => {
 
 export const resolveRecorderPrerollDropMs = () =>
   resolveEnvMs(
-    process.env.MODERN_PUBLIC_RECORDER_PREROLL_DROP_MS ||
-      process.env.RECORDER_PREROLL_DROP_MS,
+    readEnv('MODERN_PUBLIC_RECORDER_PREROLL_DROP_MS') ||
+      readEnv('RECORDER_PREROLL_DROP_MS'),
     300,
   );
 

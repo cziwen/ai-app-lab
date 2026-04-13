@@ -1,8 +1,7 @@
 const readEnv = (name: string) => {
-  if (typeof process === 'undefined' || !process.env) {
-    return undefined;
-  }
-  const value = process.env[name];
+  const value = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env?.[name];
   return typeof value === 'string' && value.trim() ? value : undefined;
 };
 

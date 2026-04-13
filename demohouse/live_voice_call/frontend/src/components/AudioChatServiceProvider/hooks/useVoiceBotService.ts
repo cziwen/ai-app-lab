@@ -60,14 +60,17 @@ const appendTokenToWsUrl = (
   return `${base}&client_id=${encodeURIComponent(normalizedClientId)}`;
 };
 
+const readEnv = (name: string) => {
+  const value = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env?.[name];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+};
+
 const resolveReconnectMaxSeconds = () => {
   const fallback = 15;
-  if (typeof process === 'undefined' || !process.env) {
-    return fallback;
-  }
-  const raw =
-    process.env.MODERN_PUBLIC_FRONTEND_RECONNECT_MAX_SECONDS ||
-    process.env.FRONTEND_RECONNECT_MAX_SECONDS ||
+  const raw = readEnv('MODERN_PUBLIC_FRONTEND_RECONNECT_MAX_SECONDS') ||
+    readEnv('FRONTEND_RECONNECT_MAX_SECONDS') ||
     '15';
   const parsed = Number.parseInt(String(raw).trim(), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -87,12 +90,8 @@ const INTERVIEW_COMPLETED_CLOSE_REASON = 'interview_completed';
 const PLAYBACK_WATCHDOG_TIMEOUT_MS = 1500;
 export const resolveRecorderStartDelayMs = () => {
   const fallback = 250;
-  if (typeof process === 'undefined' || !process.env) {
-    return fallback;
-  }
-  const raw =
-    process.env.MODERN_PUBLIC_RECORDER_START_DELAY_MS ||
-    process.env.RECORDER_START_DELAY_MS ||
+  const raw = readEnv('MODERN_PUBLIC_RECORDER_START_DELAY_MS') ||
+    readEnv('RECORDER_START_DELAY_MS') ||
     '250';
   const parsed = Number.parseInt(String(raw).trim(), 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
