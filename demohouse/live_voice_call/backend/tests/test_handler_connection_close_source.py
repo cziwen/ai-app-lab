@@ -116,6 +116,11 @@ def _patch_start_attempt(monkeypatch):
         "start_interview_attempt",
         lambda *_args, **_kwargs: 1,
     )
+    monkeypatch.setattr(
+        handler,
+        "save_interview_checkpoint_journal",
+        lambda *_args, **_kwargs: True,
+    )
 
 
 def _fake_session_data(token: str):

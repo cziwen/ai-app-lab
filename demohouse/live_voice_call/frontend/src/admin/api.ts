@@ -41,6 +41,13 @@ export type InterviewListItem = {
   question_count: number;
   notes?: string | null;
   status: string;
+  attempt_count?: number;
+  canonical_status?: string;
+  canonical_version?: number;
+  canonical_source?: 'checkpoint' | 'turn_events_fallback' | string;
+  discarded_turn_count?: number;
+  echo_risk_flags?: string[];
+  consistency_flags?: string[];
   created_at: string;
   completed_at?: string | null;
   completed_reason?: string | null;
@@ -56,6 +63,13 @@ export type InterviewDetail = {
   question_count: number;
   notes?: string | null;
   status: string;
+  attempt_count?: number;
+  canonical_status?: string;
+  canonical_version?: number;
+  canonical_source?: 'checkpoint' | 'turn_events_fallback' | string;
+  discarded_turn_count?: number;
+  echo_risk_flags?: string[];
+  consistency_flags?: string[];
   created_at: string;
   completed_at?: string | null;
   completed_reason?: string | null;

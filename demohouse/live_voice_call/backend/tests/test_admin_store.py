@@ -1404,3 +1404,236 @@ def test_finalize_canonical_artifacts_fails_without_candidate_turns(
     detail = admin_store.get_interview_detail(token)
     assert detail is not None
     assert detail["canonical_status"] == admin_store.INTERVIEW_CANONICAL_STATUS_FAILED
+
+
+def test_finalize_canonical_artifacts_prefers_checkpoint_and_discards_rewound_turns(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-1", owner_id="owner-1") == 1
+    assert admin_store.start_interview_attempt(token, "attempt-2", owner_id="owner-2") == 2
+
+    # stale turns from old attempt should be discarded once checkpoint source is used.
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-1",
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+                "question_epoch": 0,
+            },
+            {
+                "seq_no": 2,
+                "role": "candidate",
+                "text": "旧轮次回答，应该被回滚丢弃",
+                "question_id": "q1",
+                "question_index": 1,
+                "question_epoch": 0,
+            },
+        ],
+    )
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-2",
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+                "question_epoch": 1,
+            },
+            {
+                "seq_no": 2,
+                "role": "candidate",
+                "text": "新轮次有效回答",
+                "question_id": "q1",
+                "question_index": 1,
+                "question_epoch": 1,
+            },
+        ],
+    )
+
+    checkpoint_payload = {
+        "version": 1,
+        "state": "WAIT_ANSWER",
+        "current_question_index": 0,
+        "total_candidate_turns": 1,
+        "latest_follow_up": "",
+        "latest_clarify": "",
+        "questions": [
+            {
+                "question_id": "q1",
+                "status": "in_progress",
+                "question_epoch": 1,
+                "follow_up_count": 0,
+                "clarify_count": 0,
+                "coverage_score": 0.0,
+                "turns": [
+                    {
+                        "role": "interviewer",
+                        "content": "第一题，请你介绍一个项目",
+                        "created_at": admin_store.utc_now_iso(),
+                    },
+                    {
+                        "role": "candidate",
+                        "content": "新轮次有效回答",
+                        "created_at": admin_store.utc_now_iso(),
+                    },
+                ],
+            }
+        ],
+    }
+    assert (
+        admin_store.save_interview_checkpoint_journal(
+            token,
+            "attempt-2",
+            1,
+            checkpoint_payload,
+            source="flush",
+        )
+        is True
+    )
+
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-1",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-2",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.close_interview_attempt(
+        "attempt-1",
+        status="in_progress",
+        close_source="client_ws",
+    )
+    admin_store.close_interview_attempt(
+        "attempt-2",
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert finalized["canonical_source"] == admin_store.CANONICAL_SOURCE_CHECKPOINT
+    assert finalized["discarded_turn_count"] >= 1
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["canonical_source"] == admin_store.CANONICAL_SOURCE_CHECKPOINT
+    candidate_turns = [item["content"] for item in detail["turns"] if item["role"] == "candidate"]
+    assert "新轮次有效回答" in candidate_turns
+    assert "旧轮次回答，应该被回滚丢弃" not in candidate_turns
+
+
+def test_finalize_canonical_artifacts_marks_echo_risk_flag(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-echo", owner_id="owner-1") == 1
+
+    now_iso = admin_store.utc_now_iso()
+    checkpoint_payload = {
+        "version": 1,
+        "state": "WAIT_ANSWER",
+        "current_question_index": 0,
+        "total_candidate_turns": 1,
+        "latest_follow_up": "",
+        "latest_clarify": "",
+        "questions": [
+            {
+                "question_id": "q1",
+                "status": "in_progress",
+                "question_epoch": 0,
+                "follow_up_count": 0,
+                "clarify_count": 0,
+                "coverage_score": 0.0,
+                "turns": [
+                    {"role": "interviewer", "content": "你怎么看加班这件事", "created_at": now_iso},
+                    {"role": "candidate", "content": "你怎么看加班这件事", "created_at": now_iso},
+                ],
+            }
+        ],
+    }
+    assert (
+        admin_store.save_interview_checkpoint_journal(
+            token,
+            "attempt-echo",
+            1,
+            checkpoint_payload,
+            source="flush",
+        )
+        is True
+    )
+
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-echo",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.close_interview_attempt(
+        "attempt-echo",
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert "candidate_echo_suspected" in finalized["echo_risk_flags"]
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert "candidate_echo_suspected" in detail["echo_risk_flags"]

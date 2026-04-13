@@ -434,11 +434,17 @@ def test_runtime_checkpoint_restore_and_rewind_to_current_question_start():
         assert resumed.restore_runtime_checkpoint(checkpoint) is True
         assert resumed.current_question_index == 1
         assert resumed.questions[0].status == "done"
-        assert resumed.questions[0].turns[0]["content"] == "第一题回答"
+        restored_q1_candidate_turns = [
+            turn["content"]
+            for turn in resumed.questions[0].turns
+            if turn.get("role") == "candidate"
+        ]
+        assert restored_q1_candidate_turns == ["第一题回答"]
         assert resumed.rewind_to_question_start(resumed.current_question_index) is True
         assert resumed.state == ASK_QUESTION
         assert resumed.questions[1].status == "pending"
         assert resumed.questions[1].turns == []
+        assert resumed.questions[1].question_epoch == 1
         assert resumed.total_candidate_turns == 1
 
     asyncio.run(_run())

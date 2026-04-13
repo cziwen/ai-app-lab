@@ -47,6 +47,7 @@ from admin_store import (
     resolve_all_interview_timeouts,
     save_interview_scorecard_failed,
     save_interview_scorecard_success,
+    save_interview_checkpoint_journal,
     save_interview_turn_events,
     start_interview_attempt,
     sweep_expired_interviews,
@@ -893,6 +894,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     checkpoint_flush_task: Optional[asyncio.Task] = None
     checkpoint_target_version = 0
     checkpoint_flushed_version = 0
+    checkpoint_journal_seq = 0
 
     def record_turn(role: str, text: str):
         nonlocal turn_event_seq
@@ -900,6 +902,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             return
         question_id = ""
         question_index = 0
+        question_epoch = 0
         flow = getattr(service, "interview_flow", None)
         if flow is not None:
             try:
@@ -907,13 +910,28 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             except (TypeError, ValueError):
                 current_index = -1
             flow_state = str(getattr(flow, "state", "") or "").strip()
-            if (
-                flow_state not in {"INTRO", "WRAP_UP", "DONE"}
-                and 0 <= current_index < len(getattr(flow, "questions", []))
-            ):
+            if 0 <= current_index < len(getattr(flow, "questions", [])):
                 current_question = flow.questions[current_index]
-                question_id = str(getattr(current_question, "question_id", "") or "").strip()
-                question_index = current_index + 1
+                current_question_status = str(
+                    getattr(current_question, "status", "") or ""
+                ).strip()
+                is_intro_turn = (
+                    role == "interviewer"
+                    and flow_state == "ASK_QUESTION"
+                    and current_question_status == "pending"
+                    and int(getattr(flow, "total_candidate_turns", 0) or 0) == 0
+                )
+                if flow_state not in {"INTRO", "WRAP_UP", "DONE"} and not is_intro_turn:
+                    question_id = str(
+                        getattr(current_question, "question_id", "") or ""
+                    ).strip()
+                    question_index = current_index + 1
+                    try:
+                        question_epoch = int(
+                            getattr(current_question, "question_epoch", 0) or 0
+                        )
+                    except (TypeError, ValueError):
+                        question_epoch = 0
         turn_event_seq += 1
         turn_events.append(
             {
@@ -921,8 +939,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 "role": role,
                 "text": text,
                 "event_ts": datetime.now(timezone.utc).isoformat(),
+                "event_kind": "transcript",
                 "question_id": question_id,
                 "question_index": question_index,
+                "question_epoch": max(0, question_epoch),
+                "commit_state": "live",
             }
         )
 
@@ -936,10 +957,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     async def _flush_runtime_checkpoint_loop() -> None:
         nonlocal checkpoint_flushed_version
         nonlocal checkpoint_flush_task
+        nonlocal checkpoint_journal_seq
         while checkpoint_flushed_version < checkpoint_target_version:
             target_version = checkpoint_target_version
             checkpoint = latest_runtime_checkpoint
-            if checkpoint:
+            if isinstance(checkpoint, dict):
                 try:
                     await asyncio.to_thread(RUNTIME_CHECKPOINTS.save, token, checkpoint)
                 except Exception as checkpoint_err:
@@ -947,19 +969,35 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                         "[InterviewPersist] failed to save runtime checkpoint "
                         f"token={token} error={checkpoint_err}"
                     )
+                checkpoint_journal_seq += 1
+                try:
+                    await asyncio.to_thread(
+                        save_interview_checkpoint_journal,
+                        token,
+                        ws_session_id,
+                        checkpoint_journal_seq,
+                        checkpoint,
+                        source="flush",
+                    )
+                except Exception as checkpoint_journal_err:
+                    interview_log(
+                        "[InterviewPersist] failed to save checkpoint journal "
+                        f"token={token} error={checkpoint_journal_err}"
+                    )
             checkpoint_flushed_version = target_version
         checkpoint_flush_task = None
 
     async def wait_for_runtime_checkpoint_flush(force_latest: bool = False) -> None:
         nonlocal checkpoint_flushed_version
         nonlocal checkpoint_flush_task
+        nonlocal checkpoint_journal_seq
         task = checkpoint_flush_task
         if task is not None:
             with contextlib.suppress(Exception):
                 await task
         if (
             force_latest
-            and latest_runtime_checkpoint
+            and isinstance(latest_runtime_checkpoint, dict)
             and checkpoint_flushed_version < checkpoint_target_version
         ):
             try:
@@ -971,6 +1009,21 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 interview_log(
                     "[InterviewPersist] failed to save runtime checkpoint "
                     f"token={token} error={checkpoint_err}"
+                )
+            checkpoint_journal_seq += 1
+            try:
+                await asyncio.to_thread(
+                    save_interview_checkpoint_journal,
+                    token,
+                    ws_session_id,
+                    checkpoint_journal_seq,
+                    latest_runtime_checkpoint,
+                    source="force_latest",
+                )
+            except Exception as checkpoint_journal_err:
+                interview_log(
+                    "[InterviewPersist] failed to save checkpoint journal "
+                    f"token={token} error={checkpoint_journal_err}"
                 )
 
     def persist_runtime_checkpoint(checkpoint: Dict[str, Any]) -> None:
@@ -1183,6 +1236,22 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             await wait_for_runtime_checkpoint_flush(
                 force_latest=bool(latest_runtime_checkpoint)
             )
+            if isinstance(latest_runtime_checkpoint, dict):
+                checkpoint_journal_seq += 1
+                try:
+                    await asyncio.to_thread(
+                        save_interview_checkpoint_journal,
+                        token,
+                        ws_session_id,
+                        checkpoint_journal_seq,
+                        latest_runtime_checkpoint,
+                        source="close_final",
+                    )
+                except Exception as checkpoint_journal_err:
+                    interview_log(
+                        "[InterviewPersist] failed to save final checkpoint journal "
+                        f"token={token} error={checkpoint_journal_err}"
+                    )
             ws_close_code = getattr(websocket, "close_code", None)
             ws_close_reason = str(getattr(websocket, "close_reason", "") or "").strip()
             if (

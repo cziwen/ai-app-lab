@@ -1,6 +1,7 @@
 import {
   isInterviewCompletedSocketClose,
   isStuckMediaPlayback,
+  resolveRecorderStartDelayMs,
   shouldAbortReconnectFlow,
   shouldAcceptReconnectSuccess,
   shouldClearPlaybackOnSocketClose,
@@ -114,5 +115,28 @@ describe('shouldRunPlaybackWatchdog', () => {
     expect(shouldRunPlaybackWatchdog(true, false, false, true)).toBe(false);
     expect(shouldRunPlaybackWatchdog(true, true, true, true)).toBe(false);
     expect(shouldRunPlaybackWatchdog(true, true, false, false)).toBe(false);
+  });
+});
+
+describe('resolveRecorderStartDelayMs', () => {
+  const originalEnv = process.env;
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('uses default when env is invalid', () => {
+    process.env = {
+      ...originalEnv,
+      MODERN_PUBLIC_RECORDER_START_DELAY_MS: 'invalid',
+    };
+    expect(resolveRecorderStartDelayMs()).toBe(250);
+  });
+
+  it('uses configured delay when env is valid', () => {
+    process.env = {
+      ...originalEnv,
+      MODERN_PUBLIC_RECORDER_START_DELAY_MS: '320',
+    };
+    expect(resolveRecorderStartDelayMs()).toBe(320);
   });
 });

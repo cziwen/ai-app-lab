@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from interview_judge import Decision, InterviewJudge
@@ -20,6 +21,7 @@ class QuestionContext:
     question_id: str
     main_question: str
     evidence: Dict[str, Any] = field(default_factory=dict)
+    question_epoch: int = 0
     max_followups: int = 0
     follow_up_count: int = 0
     max_clarifies: int = 0
@@ -81,6 +83,10 @@ class InterviewFlow:
         self.latest_follow_up: str = ""
         self.latest_clarify: str = ""
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
     def export_runtime_checkpoint(self) -> Dict[str, Any]:
         return {
             "version": 1,
@@ -93,6 +99,7 @@ class InterviewFlow:
                 {
                     "question_id": q.question_id,
                     "status": q.status,
+                    "question_epoch": int(q.question_epoch or 0),
                     "follow_up_count": q.follow_up_count,
                     "clarify_count": q.clarify_count,
                     "coverage_score": q.coverage_score,
@@ -100,6 +107,7 @@ class InterviewFlow:
                         {
                             "role": str(turn.get("role", "")),
                             "content": str(turn.get("content", "")),
+                            "created_at": str(turn.get("created_at", "") or ""),
                         }
                         for turn in q.turns
                         if isinstance(turn, dict)
@@ -127,6 +135,10 @@ class InterviewFlow:
             if status not in {"pending", "in_progress", "done"}:
                 status = q.status
             q.status = status
+            try:
+                q.question_epoch = max(0, int(raw_q.get("question_epoch", 0) or 0))
+            except (TypeError, ValueError):
+                q.question_epoch = 0
             q.follow_up_count = max(0, int(raw_q.get("follow_up_count", 0) or 0))
             q.clarify_count = max(0, int(raw_q.get("clarify_count", 0) or 0))
             try:
@@ -145,7 +157,14 @@ class InterviewFlow:
                         continue
                     if not content:
                         continue
-                    q.turns.append({"role": role, "content": content})
+                    created_at = str(turn.get("created_at", "") or "").strip()
+                    q.turns.append(
+                        {
+                            "role": role,
+                            "content": content,
+                            "created_at": created_at or self._utc_now_iso(),
+                        }
+                    )
                     if role == "candidate":
                         restored_turn_count += 1
 
@@ -189,6 +208,7 @@ class InterviewFlow:
             1 for turn in q.turns if str(turn.get("role", "")) == "candidate"
         )
         q.turns = []
+        q.question_epoch = int(q.question_epoch or 0) + 1
         q.follow_up_count = 0
         q.clarify_count = 0
         q.coverage_score = 0.0
@@ -253,6 +273,14 @@ class InterviewFlow:
                 q.status = "in_progress"
             trace.append(f"{ASK_QUESTION} -> {WAIT_ANSWER}")
             self.state = WAIT_ANSWER
+            if q.main_question:
+                q.turns.append(
+                    {
+                        "role": "interviewer",
+                        "content": q.main_question,
+                        "created_at": self._utc_now_iso(),
+                    }
+                )
             return FlowResponse(
                 state_before=before,
                 state_after=self.state,
@@ -266,6 +294,14 @@ class InterviewFlow:
             q = self._current_question()
             trace.append(f"{ASK_FOLLOWUP} -> {WAIT_ANSWER}")
             self.state = WAIT_ANSWER
+            if self.latest_follow_up:
+                q.turns.append(
+                    {
+                        "role": "interviewer",
+                        "content": self.latest_follow_up,
+                        "created_at": self._utc_now_iso(),
+                    }
+                )
             return FlowResponse(
                 state_before=before,
                 state_after=self.state,
@@ -279,6 +315,14 @@ class InterviewFlow:
             q = self._current_question()
             trace.append(f"{ASK_CLARIFY} -> {WAIT_ANSWER}")
             self.state = WAIT_ANSWER
+            if self.latest_clarify:
+                q.turns.append(
+                    {
+                        "role": "interviewer",
+                        "content": self.latest_clarify,
+                        "created_at": self._utc_now_iso(),
+                    }
+                )
             return FlowResponse(
                 state_before=before,
                 state_after=self.state,
@@ -320,7 +364,13 @@ class InterviewFlow:
         before = self.state
         q = self._current_question()
 
-        q.turns.append({"role": "candidate", "content": answer})
+        q.turns.append(
+            {
+                "role": "candidate",
+                "content": answer,
+                "created_at": self._utc_now_iso(),
+            }
+        )
         self.total_candidate_turns += 1
 
         trace.append(f"{WAIT_ANSWER} -> {EVAL_ANSWER}")

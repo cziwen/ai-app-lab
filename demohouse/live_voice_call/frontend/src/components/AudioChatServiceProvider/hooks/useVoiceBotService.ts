@@ -85,6 +85,22 @@ const CLIENT_HANGUP_CLOSE_REASON = 'client_hangup';
 const INTERVIEW_COMPLETED_CLOSE_CODE = 4001;
 const INTERVIEW_COMPLETED_CLOSE_REASON = 'interview_completed';
 const PLAYBACK_WATCHDOG_TIMEOUT_MS = 1500;
+export const resolveRecorderStartDelayMs = () => {
+  const fallback = 250;
+  if (typeof process === 'undefined' || !process.env) {
+    return fallback;
+  }
+  const raw =
+    process.env.MODERN_PUBLIC_RECORDER_START_DELAY_MS ||
+    process.env.RECORDER_START_DELAY_MS ||
+    '250';
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+};
+const RECORDER_START_DELAY_MS = resolveRecorderStartDelayMs();
 
 export const shouldAbortReconnectFlow = (
   autoReconnectEnabled: boolean,
@@ -169,6 +185,7 @@ export const useVoiceBotService = () => {
   const playbackStoppedRef = useRef(false);
   const botTurnStartedRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
+  const recorderStartTimerRef = useRef<number | null>(null);
   const playbackWatchdogTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectStartAtRef = useRef(0);
@@ -191,6 +208,13 @@ export const useVoiceBotService = () => {
     if (playbackWatchdogTimerRef.current !== null) {
       window.clearTimeout(playbackWatchdogTimerRef.current);
       playbackWatchdogTimerRef.current = null;
+    }
+  };
+
+  const clearRecorderStartTimer = () => {
+    if (recorderStartTimerRef.current !== null) {
+      window.clearTimeout(recorderStartTimerRef.current);
+      recorderStartTimerRef.current = null;
     }
   };
 
@@ -305,6 +329,7 @@ export const useVoiceBotService = () => {
     }, nextDelay);
   };
   const clearRecorderGate = () => {
+    clearRecorderStartTimer();
     clearPlaybackWatchdog();
     ttsDoneRef.current = false;
     playbackStoppedRef.current = false;
@@ -325,11 +350,21 @@ export const useVoiceBotService = () => {
     if (!ttsDoneRef.current || !playbackStoppedRef.current) {
       return;
     }
-    setCurrentUserSentence('');
-    setCurrentBotSentence('');
-    recStart();
-    log('gate: recorder started');
-    clearRecorderGate();
+    if (recorderStartTimerRef.current !== null) {
+      return;
+    }
+    recorderStartTimerRef.current = window.setTimeout(() => {
+      recorderStartTimerRef.current = null;
+      if (!wsReadyRef.current || !ttsDoneRef.current || !playbackStoppedRef.current) {
+        return;
+      }
+      setCurrentUserSentence('');
+      setCurrentBotSentence('');
+      recStart();
+      log('gate: recorder started');
+      clearRecorderGate();
+    }, RECORDER_START_DELAY_MS);
+    log(`gate: recorder start delayed delay_ms=${RECORDER_START_DELAY_MS}`);
   };
 
   const formatPlaybackSnapshot = (snapshot: PlaybackSnapshot) =>
@@ -447,6 +482,7 @@ export const useVoiceBotService = () => {
   };
 
   const resetWsState = () => {
+    clearRecorderStartTimer();
     wsReadyRef.current = false;
     clearRecorderGate();
     setWsConnected(false);
@@ -454,6 +490,7 @@ export const useVoiceBotService = () => {
   };
 
   const resetMediaState = () => {
+    clearRecorderStartTimer();
     clearRecorderGate();
     setBotSpeaking(false);
     setBotAudioPlaying(false);
@@ -470,6 +507,7 @@ export const useVoiceBotService = () => {
     autoReconnectEnabledRef.current = false;
     markReconnectExhausted(false);
     clearReconnectTimer();
+    clearRecorderStartTimer();
     clearPlaybackWatchdog();
     stopRecovering();
     wsReadyRef.current = false;
@@ -481,6 +519,7 @@ export const useVoiceBotService = () => {
     manualDisconnectRef.current = true;
     autoReconnectEnabledRef.current = false;
     clearReconnectTimer();
+    clearRecorderStartTimer();
     clearPlaybackWatchdog();
     stopRecovering();
     const sent =
@@ -516,6 +555,7 @@ export const useVoiceBotService = () => {
     autoReconnectEnabledRef.current = false;
     markReconnectExhausted(false);
     clearReconnectTimer();
+    clearRecorderStartTimer();
     clearPlaybackWatchdog();
     stopRecovering();
     wsReadyRef.current = false;
@@ -698,6 +738,7 @@ export const useVoiceBotService = () => {
       window.removeEventListener('pageshow', onPageShow);
       window.removeEventListener('focus', onWindowFocus);
       clearReconnectTimer();
+      clearRecorderStartTimer();
       clearPlaybackWatchdog();
       recoveringRef.current = false;
       reconnectExhaustedRef.current = false;

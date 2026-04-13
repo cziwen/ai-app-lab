@@ -9,7 +9,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. 
 
-import { useContext } from 'react';
+import { useContext, useRef } from 'react';
 import { AudioChatServiceContext } from '@/components/AudioChatServiceProvider/context';
 import Recorder from 'recorder-core';
 import { BIT_RATE, FRAME_SIZE, SAMPLE_RATE } from '@/constant';
@@ -22,7 +22,25 @@ const AUDIO_TRACK_SET = {
   autoGainControl: true,
   echoCancellation: true,
   noiseSuppression: true,
+  channelCount: 1,
 };
+
+const resolveEnvMs = (value: string | undefined, fallback: number) => {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+};
+
+export const resolveRecorderPrerollDropMs = () =>
+  resolveEnvMs(
+    process.env.MODERN_PUBLIC_RECORDER_PREROLL_DROP_MS ||
+      process.env.RECORDER_PREROLL_DROP_MS,
+    300,
+  );
+
+const RECORDER_PREROLL_DROP_MS = resolveRecorderPrerollDropMs();
 
 export const useAudioRecorder = () => {
   const {
@@ -35,10 +53,12 @@ export const useAudioRecorder = () => {
   const { selectedMicId } = useSessionAuth();
   const { log } = useLogContent();
   const { setUserSpeaking, setUserAudioLevel } = useAudioChatState();
+  const prerollDropSamplesRef = useRef(0);
   const handleReset = () => {
     sendPcmBufferRef.current = new Int16Array(0);
     sendChunkRef.current = null;
     sendLastFrameRef.current = null;
+    prerollDropSamplesRef.current = 0;
   };
   const handleSend = (pcmFrame: Int16Array, isClose: boolean) => {
     if (isClose && pcmFrame.length === 0) {
@@ -75,6 +95,11 @@ export const useAudioRecorder = () => {
       sendChunkRef.current = chunk;
 
       pcm = chunk.data;
+      if (prerollDropSamplesRef.current > 0 && pcm.length > 0) {
+        const dropSamples = Math.min(prerollDropSamplesRef.current, pcm.length);
+        prerollDropSamplesRef.current -= dropSamples;
+        pcm = new Int16Array(pcm.subarray(dropSamples));
+      }
     }
 
     let pcmBuffer = sendPcmBufferRef.current;
@@ -116,6 +141,15 @@ export const useAudioRecorder = () => {
     handleReset();
     let clearBufferIdx = 0;
     const normalizedSelectedMicId = selectedMicId.trim();
+    prerollDropSamplesRef.current = Math.max(
+      0,
+      Math.round((SAMPLE_RATE * RECORDER_PREROLL_DROP_MS) / 1000),
+    );
+    if (prerollDropSamplesRef.current > 0) {
+      log(
+        `mic preroll drop enabled drop_ms=${RECORDER_PREROLL_DROP_MS} drop_samples=${prerollDropSamplesRef.current}`,
+      );
+    }
 
     const buildRecorder = (
       audioTrackSet:
@@ -168,6 +202,36 @@ export const useAudioRecorder = () => {
       recorderRef.current = recorder;
       recorder.open(
         () => {
+          try {
+            const stream = (
+              recorder as unknown as {
+                stream?: MediaStream;
+              }
+            ).stream;
+            const track = stream?.getAudioTracks?.()[0];
+            if (track) {
+              const settings = track.getSettings();
+              const echoCancellation = settings.echoCancellation;
+              const noiseSuppression = settings.noiseSuppression;
+              const autoGainControl = settings.autoGainControl;
+              const channelCount = settings.channelCount;
+              log(
+                `mic settings channel_count=${String(channelCount ?? '-')}` +
+                  ` aec=${String(echoCancellation ?? '-')}` +
+                  ` ns=${String(noiseSuppression ?? '-')}` +
+                  ` agc=${String(autoGainControl ?? '-')}`,
+              );
+              if (
+                echoCancellation === false ||
+                noiseSuppression === false ||
+                autoGainControl === false
+              ) {
+                log('mic risk: aec_or_ns_or_agc_disabled');
+              }
+            }
+          } catch (_error) {
+            // best effort only
+          }
           recorder.start();
           setUserSpeaking(true);
         },

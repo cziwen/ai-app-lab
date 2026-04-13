@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 import json
 import os
@@ -35,6 +36,8 @@ INTERVIEW_STATUS_DELETED = "deleted"
 INTERVIEW_CANONICAL_STATUS_READY = "ready"
 INTERVIEW_CANONICAL_STATUS_BUILDING = "building"
 INTERVIEW_CANONICAL_STATUS_FAILED = "failed"
+CANONICAL_SOURCE_CHECKPOINT = "checkpoint"
+CANONICAL_SOURCE_TURN_EVENTS_FALLBACK = "turn_events_fallback"
 SCORECARD_STATUS_PENDING = "pending"
 SCORECARD_STATUS_COMPLETED = "completed"
 SCORECARD_STATUS_FAILED = "failed"
@@ -219,6 +222,9 @@ CREATE TABLE IF NOT EXISTS interviews (
   reconnect_deadline_at TEXT,
   canonical_status TEXT NOT NULL DEFAULT 'ready',
   canonical_version INTEGER NOT NULL DEFAULT 0,
+  canonical_source TEXT NOT NULL DEFAULT 'turn_events_fallback',
+  discarded_turn_count INTEGER NOT NULL DEFAULT 0,
+  echo_risk_flags TEXT NOT NULL DEFAULT '',
   consistency_flags TEXT NOT NULL DEFAULT '',
   candidate_audio_path TEXT,
   interviewer_audio_path TEXT,
@@ -247,8 +253,11 @@ CREATE TABLE IF NOT EXISTS interview_turn_events (
   event_ts TEXT NOT NULL,
   role TEXT NOT NULL,
   text TEXT NOT NULL,
+  event_kind TEXT NOT NULL DEFAULT 'transcript',
   question_id TEXT NOT NULL DEFAULT '',
   question_index INTEGER NOT NULL DEFAULT 0,
+  question_epoch INTEGER NOT NULL DEFAULT 0,
+  commit_state TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
   FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
   UNIQUE(attempt_id, seq_no)
@@ -267,6 +276,19 @@ CREATE TABLE IF NOT EXISTS interview_audio_segments (
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
   FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
   UNIQUE(attempt_id, track, segment_seq)
+);
+
+CREATE TABLE IF NOT EXISTS interview_checkpoint_journal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  interview_token TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  checkpoint_seq INTEGER NOT NULL,
+  checkpoint_ts TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
+  FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
+  UNIQUE(attempt_id, checkpoint_seq)
 );
 
 CREATE TABLE IF NOT EXISTS interview_turns (
@@ -318,6 +340,9 @@ ON interview_turn_events(interview_token, event_ts, id);
 
 CREATE INDEX IF NOT EXISTS idx_interview_audio_segments_token_track_seq
 ON interview_audio_segments(interview_token, track, id);
+
+CREATE INDEX IF NOT EXISTS idx_interview_checkpoint_journal_token_seq
+ON interview_checkpoint_journal(interview_token, id);
 
 """
 
@@ -430,6 +455,18 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN consistency_flags TEXT NOT NULL DEFAULT ''"
         )
+    if "canonical_source" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN canonical_source TEXT NOT NULL DEFAULT 'turn_events_fallback'"
+        )
+    if "discarded_turn_count" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN discarded_turn_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "echo_risk_flags" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN echo_risk_flags TEXT NOT NULL DEFAULT ''"
+        )
     expires_rows = conn.execute(
         "SELECT token, created_at FROM interviews WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
     ).fetchall()
@@ -446,6 +483,35 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         "UPDATE interviews SET consistency_flags = '' "
         "WHERE consistency_flags IS NULL"
     )
+    conn.execute(
+        "UPDATE interviews SET canonical_source = 'turn_events_fallback' "
+        "WHERE canonical_source IS NULL OR TRIM(canonical_source) = ''"
+    )
+    conn.execute(
+        "UPDATE interviews SET discarded_turn_count = 0 "
+        "WHERE discarded_turn_count IS NULL"
+    )
+    conn.execute(
+        "UPDATE interviews SET echo_risk_flags = '' "
+        "WHERE echo_risk_flags IS NULL"
+    )
+
+    turn_event_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(interview_turn_events)").fetchall()
+    }
+    if "event_kind" not in turn_event_columns:
+        conn.execute(
+            "ALTER TABLE interview_turn_events ADD COLUMN event_kind TEXT NOT NULL DEFAULT 'transcript'"
+        )
+    if "question_epoch" not in turn_event_columns:
+        conn.execute(
+            "ALTER TABLE interview_turn_events ADD COLUMN question_epoch INTEGER NOT NULL DEFAULT 0"
+        )
+    if "commit_state" not in turn_event_columns:
+        conn.execute(
+            "ALTER TABLE interview_turn_events ADD COLUMN commit_state TEXT NOT NULL DEFAULT ''"
+        )
 
     question_columns = {
         row["name"]
@@ -1459,7 +1525,8 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             f"""
             SELECT i.token, i.candidate_name, i.question_count,
                    i.notes, i.status, i.created_at, i.completed_at, i.completed_reason, i.interruption_count,
-                   i.expires_at, i.canonical_status, i.canonical_version, i.consistency_flags,
+                   i.expires_at, i.canonical_status, i.canonical_version, i.canonical_source,
+                   i.discarded_turn_count, i.echo_risk_flags, i.consistency_flags,
                    (
                      SELECT COUNT(*)
                      FROM interview_attempts a
@@ -1492,6 +1559,15 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
                 row["canonical_status"] or INTERVIEW_CANONICAL_STATUS_READY
             ),
             "canonical_version": int(row["canonical_version"] or 0),
+            "canonical_source": str(
+                row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+            ),
+            "discarded_turn_count": int(row["discarded_turn_count"] or 0),
+            "echo_risk_flags": [
+                chunk
+                for chunk in str(row["echo_risk_flags"] or "").split(",")
+                if chunk.strip()
+            ],
             "consistency_flags": [
                 chunk
                 for chunk in str(row["consistency_flags"] or "").split(",")
@@ -1589,6 +1665,15 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             row["canonical_status"] or INTERVIEW_CANONICAL_STATUS_READY
         ),
         "canonical_version": int(row["canonical_version"] or 0),
+        "canonical_source": str(
+            row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+        ),
+        "discarded_turn_count": int(row["discarded_turn_count"] or 0),
+        "echo_risk_flags": [
+            chunk
+            for chunk in str(row["echo_risk_flags"] or "").split(",")
+            if chunk.strip()
+        ],
         "consistency_flags": [
             chunk
             for chunk in str(row["consistency_flags"] or "").split(",")
@@ -1965,6 +2050,9 @@ def save_interview_turn_events(
                 seq_no = idx + 1
             seq_no = max(1, seq_no)
             event_ts = str(item.get("event_ts", "") or "").strip() or utc_now_iso()
+            event_kind = str(item.get("event_kind", "transcript") or "transcript").strip()
+            if not event_kind:
+                event_kind = "transcript"
             question_id = str(item.get("question_id", "") or "").strip()
             raw_question_index = item.get("question_index", 0)
             try:
@@ -1972,19 +2060,29 @@ def save_interview_turn_events(
             except (TypeError, ValueError):
                 question_index = 0
             question_index = max(0, question_index)
+            raw_question_epoch = item.get("question_epoch", 0)
+            try:
+                question_epoch = int(raw_question_epoch or 0)
+            except (TypeError, ValueError):
+                question_epoch = 0
+            question_epoch = max(0, question_epoch)
+            commit_state = str(item.get("commit_state", "") or "").strip()
             conn.execute(
                 """
                 INSERT INTO interview_turn_events (
                     attempt_id, interview_token, seq_no, event_ts, role, text,
-                    question_id, question_index
+                    event_kind, question_id, question_index, question_epoch, commit_state
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(attempt_id, seq_no) DO UPDATE SET
                     event_ts = excluded.event_ts,
                     role = excluded.role,
                     text = excluded.text,
+                    event_kind = excluded.event_kind,
                     question_id = excluded.question_id,
-                    question_index = excluded.question_index
+                    question_index = excluded.question_index,
+                    question_epoch = excluded.question_epoch,
+                    commit_state = excluded.commit_state
                 """,
                 (
                     normalized_attempt_id,
@@ -1993,14 +2091,65 @@ def save_interview_turn_events(
                     event_ts,
                     role,
                     text,
+                    event_kind,
                     question_id,
                     question_index,
+                    question_epoch,
+                    commit_state,
                 ),
             )
             inserted += 1
         conn.commit()
     _invalidate_interview_cache(token)
     return inserted
+
+
+def save_interview_checkpoint_journal(
+    token: str,
+    attempt_id: str,
+    checkpoint_seq: int,
+    checkpoint: Dict[str, Any],
+    *,
+    source: str = "flush",
+    checkpoint_ts: Optional[str] = None,
+) -> bool:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if not token or not normalized_attempt_id:
+        return False
+    if not isinstance(checkpoint, dict):
+        return False
+    try:
+        normalized_seq = max(1, int(checkpoint_seq))
+    except (TypeError, ValueError):
+        return False
+    payload_json = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
+    normalized_ts = str(checkpoint_ts or "").strip() or utc_now_iso()
+    normalized_source = str(source or "").strip()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO interview_checkpoint_journal (
+                interview_token, attempt_id, checkpoint_seq, checkpoint_ts,
+                payload_json, source
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attempt_id, checkpoint_seq) DO UPDATE SET
+                checkpoint_ts = excluded.checkpoint_ts,
+                payload_json = excluded.payload_json,
+                source = excluded.source
+            """,
+            (
+                token,
+                normalized_attempt_id,
+                normalized_seq,
+                normalized_ts,
+                payload_json,
+                normalized_source,
+            ),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    return True
 
 
 def _normalize_turn_text_for_dedupe(text: str) -> str:
@@ -2284,6 +2433,247 @@ def build_score_inputs_from_canonical_turns(
             working_conn.close()
 
 
+def _load_latest_checkpoint_payload_in_conn(
+    conn: sqlite3.Connection,
+    token: str,
+) -> Optional[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT j.payload_json, j.source, j.attempt_id, j.checkpoint_seq, j.checkpoint_ts,
+               a.attempt_seq
+        FROM interview_checkpoint_journal j
+        LEFT JOIN interview_attempts a ON a.attempt_id = j.attempt_id
+        WHERE j.interview_token = ?
+        ORDER BY COALESCE(a.attempt_seq, 0) DESC, j.checkpoint_seq DESC, j.id DESC
+        """,
+        (token,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        return {
+            "payload": payload,
+            "source": str(row["source"] or "").strip(),
+            "attempt_id": str(row["attempt_id"] or "").strip(),
+            "attempt_seq": int(row["attempt_seq"] or 0),
+            "checkpoint_seq": int(row["checkpoint_seq"] or 0),
+            "checkpoint_ts": str(row["checkpoint_ts"] or "").strip(),
+        }
+    return None
+
+
+def _load_latest_attempt_bookend_turns_in_conn(
+    conn: sqlite3.Connection,
+    token: str,
+) -> List[Dict[str, Any]]:
+    attempt_row = conn.execute(
+        """
+        SELECT attempt_id, attempt_seq
+        FROM interview_attempts
+        WHERE interview_token = ?
+        ORDER BY attempt_seq DESC, id DESC
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    if not attempt_row:
+        return []
+    attempt_id = str(attempt_row["attempt_id"] or "").strip()
+    attempt_seq = int(attempt_row["attempt_seq"] or 0)
+    if not attempt_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT role, text, event_ts
+        FROM interview_turn_events
+        WHERE interview_token = ? AND attempt_id = ?
+          AND role = 'interviewer'
+          AND COALESCE(question_index, 0) <= 0
+        ORDER BY event_ts ASC, id ASC
+        """,
+        (token, attempt_id),
+    ).fetchall()
+    events: List[Dict[str, Any]] = []
+    last_key = ""
+    for row in rows:
+        text = str(row["text"] or "").strip()
+        if not text:
+            continue
+        normalized_key = _normalize_turn_text_for_dedupe(text)
+        if normalized_key and normalized_key == last_key:
+            continue
+        last_key = normalized_key
+        event_ts = str(row["event_ts"] or "").strip() or utc_now_iso()
+        events.append(
+            {
+                "role": "interviewer",
+                "content": text,
+                "created_at": event_ts,
+                "question_id": "",
+                "question_index": 0,
+                "question_epoch": 0,
+                "attempt_seq": attempt_seq,
+            }
+        )
+    if len(events) <= 1:
+        return events
+    first = events[0]
+    last = events[-1]
+    if _normalize_turn_text_for_dedupe(first["content"]) == _normalize_turn_text_for_dedupe(
+        last["content"]
+    ):
+        return [first]
+    return [first, last]
+
+
+def _build_canonical_events_from_checkpoint(
+    *,
+    payload: Dict[str, Any],
+    selected_questions: Sequence[Dict[str, Any]],
+    attempt_seq: int,
+    checkpoint_ts: str,
+    intro_wrap_events: Optional[Sequence[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    raw_questions = payload.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    question_by_id: Dict[str, Dict[str, Any]] = {}
+    for item in raw_questions:
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        question_by_id[question_id] = item
+
+    canonical_events: List[Dict[str, Any]] = []
+    bookend_first: Optional[Dict[str, Any]] = None
+    bookend_last: Optional[Dict[str, Any]] = None
+    if intro_wrap_events:
+        normalized_events = [
+            event for event in intro_wrap_events if isinstance(event, dict)
+        ]
+        if normalized_events:
+            first = normalized_events[0]
+            bookend_first = {
+                "role": str(first.get("role", "") or "").strip(),
+                "content": str(first.get("content", "") or "").strip(),
+                "created_at": str(first.get("created_at", "") or "").strip()
+                or checkpoint_ts
+                or utc_now_iso(),
+                "question_id": "",
+                "question_index": 0,
+                "question_epoch": 0,
+                "attempt_seq": attempt_seq,
+            }
+            if len(normalized_events) > 1:
+                last = normalized_events[-1]
+                bookend_last = {
+                    "role": str(last.get("role", "") or "").strip(),
+                    "content": str(last.get("content", "") or "").strip(),
+                    "created_at": str(last.get("created_at", "") or "").strip()
+                    or checkpoint_ts
+                    or utc_now_iso(),
+                    "question_id": "",
+                    "question_index": 0,
+                    "question_epoch": 0,
+                    "attempt_seq": attempt_seq,
+                }
+                if _normalize_turn_text_for_dedupe(bookend_first["content"]) == _normalize_turn_text_for_dedupe(
+                    bookend_last["content"]
+                ):
+                    bookend_last = None
+
+    if bookend_first and bookend_first["content"]:
+        canonical_events.append(bookend_first)
+
+    for selected in selected_questions:
+        question_id = str(selected.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        question_index = int(selected.get("sort_order", 0) or 0)
+        raw_question = question_by_id.get(question_id) or {}
+        raw_turns = raw_question.get("turns")
+        if not isinstance(raw_turns, list):
+            continue
+        try:
+            question_epoch = max(0, int(raw_question.get("question_epoch", 0) or 0))
+        except (TypeError, ValueError):
+            question_epoch = 0
+        for turn in raw_turns:
+            if not isinstance(turn, dict):
+                continue
+            role = str(turn.get("role", "") or "").strip()
+            content = str(turn.get("content", "") or "").strip()
+            if role not in {"candidate", "interviewer"} or not content:
+                continue
+            created_at = str(turn.get("created_at", "") or "").strip() or checkpoint_ts
+            canonical_events.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "created_at": created_at or utc_now_iso(),
+                    "question_id": question_id,
+                    "question_index": max(0, question_index),
+                    "question_epoch": question_epoch,
+                    "attempt_seq": attempt_seq,
+                }
+            )
+    if bookend_last and bookend_last["content"]:
+        canonical_events.append(bookend_last)
+    return canonical_events
+
+
+def _compute_echo_risk_flags(
+    canonical_events: Sequence[Dict[str, Any]],
+    *,
+    window_seconds: int = 20,
+    ratio_threshold: float = 0.9,
+) -> List[str]:
+    recent_interviewer: List[Tuple[Optional[datetime], str]] = []
+    for event in canonical_events:
+        if not isinstance(event, dict):
+            continue
+        role = str(event.get("role", "") or "").strip()
+        text = str(event.get("content", "") or "").strip()
+        if not text:
+            continue
+        normalized = _normalize_turn_text_for_dedupe(text)
+        if not normalized:
+            continue
+        event_dt = parse_iso_or_none(str(event.get("created_at", "") or ""))
+        if role == "interviewer":
+            recent_interviewer.append((event_dt, normalized))
+            if len(recent_interviewer) > 16:
+                recent_interviewer = recent_interviewer[-16:]
+            continue
+        if role != "candidate":
+            continue
+        for interviewer_dt, interviewer_text in reversed(recent_interviewer):
+            if event_dt and interviewer_dt:
+                delta = (event_dt - interviewer_dt).total_seconds()
+                if delta < 0:
+                    continue
+                if delta > max(1, int(window_seconds)):
+                    break
+            similarity = difflib.SequenceMatcher(
+                None,
+                normalized,
+                interviewer_text,
+            ).ratio()
+            if similarity >= ratio_threshold:
+                return ["candidate_echo_suspected"]
+            if len(normalized) >= 10 and normalized in interviewer_text:
+                return ["candidate_echo_suspected"]
+            if len(interviewer_text) >= 10 and interviewer_text in normalized:
+                return ["candidate_echo_suspected"]
+    return []
+
+
 def _merge_wav_files(paths: Sequence[Path], output_path: Path) -> bool:
     if not paths:
         return False
@@ -2405,21 +2795,44 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 (token,),
             ).fetchall()
             attempt_count = len(attempts)
-            turn_rows = conn.execute(
-                """
-                SELECT e.role, e.text, e.event_ts, e.question_id, e.question_index,
-                       a.attempt_seq
-                FROM interview_turn_events e
-                JOIN interview_attempts a ON a.attempt_id = e.attempt_id
-                WHERE e.interview_token = ?
-                ORDER BY a.attempt_seq ASC, e.event_ts ASC, e.seq_no ASC, e.id ASC
-                """,
-                (token,),
-            ).fetchall()
-            canonical_events, dedupe_dropped = _dedupe_turn_event_rows(turn_rows)
+            selected_questions = _load_selected_question_blueprint_in_conn(conn, token)
             consistency_flags: List[str] = []
-            if dedupe_dropped > 0:
-                consistency_flags.append(f"dedupe_drop:{dedupe_dropped}")
+            canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+            canonical_events: List[Dict[str, Any]] = []
+
+            checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
+            if checkpoint_meta:
+                canonical_source = CANONICAL_SOURCE_CHECKPOINT
+                intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
+                canonical_events = _build_canonical_events_from_checkpoint(
+                    payload=checkpoint_meta["payload"],
+                    selected_questions=selected_questions,
+                    attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
+                    checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
+                    intro_wrap_events=intro_wrap_events,
+                )
+                if not canonical_events:
+                    consistency_flags.append("checkpoint_empty_fallback")
+                    canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+            else:
+                consistency_flags.append("checkpoint_missing_fallback")
+
+            dedupe_dropped = 0
+            if not canonical_events:
+                turn_rows = conn.execute(
+                    """
+                    SELECT e.role, e.text, e.event_ts, e.question_id, e.question_index,
+                           a.attempt_seq
+                    FROM interview_turn_events e
+                    JOIN interview_attempts a ON a.attempt_id = e.attempt_id
+                    WHERE e.interview_token = ?
+                    ORDER BY a.attempt_seq ASC, e.event_ts ASC, e.seq_no ASC, e.id ASC
+                    """,
+                    (token,),
+                ).fetchall()
+                canonical_events, dedupe_dropped = _dedupe_turn_event_rows(turn_rows)
+                if dedupe_dropped > 0:
+                    consistency_flags.append(f"dedupe_drop:{dedupe_dropped}")
             if attempt_count > 1:
                 consistency_flags.append("reconnect_merged")
             if not canonical_events:
@@ -2463,6 +2876,19 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                         idx,
                     ),
                 )
+
+            total_turn_events_row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM interview_turn_events
+                WHERE interview_token = ?
+                  AND role IN ('candidate', 'interviewer')
+                  AND TRIM(text) != ''
+                """,
+                (token,),
+            ).fetchone()
+            total_turn_events = int(total_turn_events_row["c"] or 0) if total_turn_events_row else 0
+            discarded_turn_count = max(0, total_turn_events - len(canonical_events))
 
             audio_rows = conn.execute(
                 """
@@ -2512,6 +2938,7 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 consistency_flags.append("score_input_empty")
                 raise RuntimeError("score_input_empty")
 
+            echo_risk_flags = _compute_echo_risk_flags(canonical_events)
             canonical_version_row = conn.execute(
                 "SELECT COALESCE(canonical_version, 0) + 1 AS next_version FROM interviews WHERE token = ?",
                 (token,),
@@ -2524,6 +2951,9 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                     interviewer_audio_path = ?,
                     canonical_status = ?,
                     canonical_version = ?,
+                    canonical_source = ?,
+                    discarded_turn_count = ?,
+                    echo_risk_flags = ?,
                     consistency_flags = ?,
                     updated_at = ?
                 WHERE token = ?
@@ -2533,6 +2963,9 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                     interviewer_path,
                     INTERVIEW_CANONICAL_STATUS_READY,
                     next_version,
+                    canonical_source,
+                    discarded_turn_count,
+                    ",".join(sorted(set(echo_risk_flags))),
                     ",".join(sorted(set(consistency_flags))),
                     now_iso,
                     token,
@@ -2544,6 +2977,9 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
             "ok": True,
             "attempt_count": attempt_count,
             "score_inputs": score_inputs,
+            "canonical_source": canonical_source,
+            "discarded_turn_count": discarded_turn_count,
+            "echo_risk_flags": echo_risk_flags,
             "consistency_flags": sorted(set(consistency_flags)),
         }
     except Exception as finalize_error:
