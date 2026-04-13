@@ -82,6 +82,8 @@ const CLIENT_HANGUP_DRAIN_HOLD_MS = 120;
 const CLIENT_HANGUP_DRAIN_MAX_WAIT_MS = 450;
 const CLIENT_HANGUP_CLOSE_CODE = 4000;
 const CLIENT_HANGUP_CLOSE_REASON = 'client_hangup';
+const INTERVIEW_COMPLETED_CLOSE_CODE = 4001;
+const INTERVIEW_COMPLETED_CLOSE_REASON = 'interview_completed';
 const PLAYBACK_WATCHDOG_TIMEOUT_MS = 1500;
 
 export const shouldAbortReconnectFlow = (
@@ -105,6 +107,16 @@ export const shouldClearPlaybackOnSocketClose = (
   autoReconnectEnabled: boolean,
   manualDisconnect: boolean,
 ) => !shouldAbortReconnectFlow(autoReconnectEnabled, manualDisconnect);
+
+export const isInterviewCompletedSocketClose = (
+  event?: Pick<CloseEvent, 'code' | 'reason'> | null,
+) => {
+  if (!event || event.code !== INTERVIEW_COMPLETED_CLOSE_CODE) {
+    return false;
+  }
+  const reason = String(event.reason || '').trim();
+  return !reason || reason === INTERVIEW_COMPLETED_CLOSE_REASON;
+};
 
 export const isStuckMediaPlayback = (
   snapshot?: PlaybackSnapshot | null,
@@ -544,10 +556,18 @@ export const useVoiceBotService = () => {
         log('gate: playback stopped');
         maybeStartRecorder();
       },
-      onClose: () => {
+      onClose: event => {
         clearPlaybackWatchdog();
-        log('ws closed');
+        log(`ws closed code=${event.code} reason=${event.reason || '-'}`);
         resetWsState();
+        if (isInterviewCompletedSocketClose(event)) {
+          autoReconnectEnabledRef.current = false;
+          manualDisconnectRef.current = true;
+          markReconnectExhausted(false);
+          stopRecovering();
+          clearReconnectTimer();
+          return;
+        }
         const shouldReconnect = shouldClearPlaybackOnSocketClose(
           autoReconnectEnabledRef.current,
           manualDisconnectRef.current,

@@ -1,4 +1,5 @@
 import {
+  isInterviewCompletedSocketClose,
   isStuckMediaPlayback,
   shouldAbortReconnectFlow,
   shouldAcceptReconnectSuccess,
@@ -45,6 +46,23 @@ describe('shouldClearPlaybackOnSocketClose', () => {
 
   it('returns false when manual disconnect is active', () => {
     expect(shouldClearPlaybackOnSocketClose(true, true)).toBe(false);
+  });
+});
+
+describe('isInterviewCompletedSocketClose', () => {
+  it('returns true when close code indicates normal interview completion', () => {
+    expect(
+      isInterviewCompletedSocketClose({ code: 4001, reason: 'interview_completed' }),
+    ).toBe(true);
+    expect(isInterviewCompletedSocketClose({ code: 4001, reason: '' })).toBe(true);
+  });
+
+  it('returns false when close code/reason does not match completion semantics', () => {
+    expect(isInterviewCompletedSocketClose({ code: 1006, reason: '' })).toBe(false);
+    expect(
+      isInterviewCompletedSocketClose({ code: 4001, reason: 'unexpected_reason' }),
+    ).toBe(false);
+    expect(isInterviewCompletedSocketClose(undefined)).toBe(false);
   });
 });
 

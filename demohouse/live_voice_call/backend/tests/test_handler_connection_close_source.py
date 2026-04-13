@@ -182,6 +182,55 @@ def test_handler_close_source_client_ws(monkeypatch):
     asyncio.run(_run())
 
 
+def test_handler_closes_ws_with_completed_code_on_normal_end(monkeypatch):
+    class _FakeService:
+        def __init__(self, **kwargs):
+            self._completed_cb = kwargs.get("on_interview_completed")
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            yield WebEvent.from_payload(TTSDonePayload())
+            if callable(self._completed_cb):
+                self._completed_cb()
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-NORMAL-END-CLOSE-CODE"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError)
+
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
+        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
+        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert ws.close_code == handler.INTERVIEW_COMPLETED_CLOSE_CODE
+        assert ws.close_reason == handler.INTERVIEW_COMPLETED_CLOSE_REASON
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].should_mark_completed is True
+        assert any(
+            "event=session.normal_end_close_request" in line for line in interview_logger.lines
+        )
+
+    asyncio.run(_run())
+
+
 def test_handler_close_source_asr_upstream(monkeypatch):
     class DummyConnectionClosed(Exception):
         pass

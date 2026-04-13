@@ -614,6 +614,8 @@ SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
 CLIENT_HANGUP_CLOSE_CODE = 4000
 CLIENT_HANGUP_CLOSE_REASON = "client_hangup"
+INTERVIEW_COMPLETED_CLOSE_CODE = 4001
+INTERVIEW_COMPLETED_CLOSE_REASON = "interview_completed"
 
 
 class ClientWebSocketClosedError(RuntimeError):
@@ -1010,6 +1012,16 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             {fetch_task, wait_closed_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if fetch_task in done and interview_completed and not websocket.closed:
+            interview_log(
+                "event=session.normal_end_close_request "
+                f"close_code={INTERVIEW_COMPLETED_CLOSE_CODE} "
+                f"close_reason={INTERVIEW_COMPLETED_CLOSE_REASON}"
+            )
+            await websocket.close(
+                code=INTERVIEW_COMPLETED_CLOSE_CODE,
+                reason=INTERVIEW_COMPLETED_CLOSE_REASON,
+            )
         if wait_closed_task in done:
             # Release occupancy as soon as transport-level close is observed.
             # The handler may still be unwinding service tasks for a short time.
