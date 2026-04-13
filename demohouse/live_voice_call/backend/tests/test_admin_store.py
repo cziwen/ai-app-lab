@@ -1142,3 +1142,265 @@ def test_interview_scorecard_failed_clears_question_scores(monkeypatch, tmp_path
     assert scorecard["status"] == admin_store.SCORECARD_STATUS_FAILED
     assert scorecard["error_message"] == "mock scoring error"
     assert scorecard["question_scores"] == []
+
+
+def test_finalize_canonical_artifacts_merges_attempts_and_preserves_history(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+
+    attempt_1 = "attempt-1"
+    attempt_2 = "attempt-2"
+    assert (
+        admin_store.start_interview_attempt(
+            token,
+            attempt_1,
+            client_id="cid-1",
+            owner_id="owner-1",
+        )
+        == 1
+    )
+    assert (
+        admin_store.start_interview_attempt(
+            token,
+            attempt_2,
+            client_id="cid-1",
+            owner_id="owner-2",
+        )
+        == 2
+    )
+
+    admin_store.save_interview_turn_events(
+        token,
+        attempt_1,
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+            {
+                "seq_no": 2,
+                "role": "candidate",
+                "text": "我负责订单系统重构。",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+        ],
+    )
+    admin_store.save_interview_turn_events(
+        token,
+        attempt_2,
+        [
+            {
+                "seq_no": 1,
+                "role": "candidate",
+                "text": "补充说明：我还负责上线压测与回滚预案。",
+                "question_id": "q1",
+                "question_index": 1,
+            }
+        ],
+    )
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id=attempt_1,
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id=attempt_2,
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.close_interview_attempt(
+        attempt_1,
+        status="in_progress",
+        close_source="client_ws",
+    )
+    admin_store.close_interview_attempt(
+        attempt_2,
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert finalized["attempt_count"] == 2
+    assert finalized["score_inputs"]
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["attempt_count"] == 2
+    assert detail["canonical_status"] == admin_store.INTERVIEW_CANONICAL_STATUS_READY
+    turn_texts = [item["content"] for item in detail["turns"]]
+    assert "我负责订单系统重构。" in turn_texts
+    assert "补充说明：我还负责上线压测与回滚预案。" in turn_texts
+    assert detail["candidate_audio_path"] is not None
+    assert "/canonical/" in detail["candidate_audio_path"]
+
+
+def test_finalize_canonical_artifacts_prefers_later_attempt_for_overlap(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+
+    assert admin_store.start_interview_attempt(token, "attempt-old", owner_id="owner-1") == 1
+    assert admin_store.start_interview_attempt(token, "attempt-new", owner_id="owner-2") == 2
+
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-old",
+        [
+            {
+                "seq_no": 1,
+                "role": "candidate",
+                "text": "我负责开发",
+                "event_ts": t0.isoformat(),
+                "question_id": "q1",
+                "question_index": 1,
+            }
+        ],
+    )
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-new",
+        [
+            {
+                "seq_no": 1,
+                "role": "candidate",
+                "text": "我 负责开发",
+                "event_ts": (t0 + timedelta(seconds=2)).isoformat(),
+                "question_id": "q1",
+                "question_index": 1,
+            }
+        ],
+    )
+
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-old",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-new",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    candidate_turns = [item["content"] for item in detail["turns"] if item["role"] == "candidate"]
+    assert candidate_turns.count("我负责开发") == 0
+    assert candidate_turns.count("我 负责开发") == 1
+
+
+def test_finalize_canonical_artifacts_fails_without_candidate_turns(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-1", owner_id="owner-1") == 1
+
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-1",
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+            }
+        ],
+    )
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-1",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+    admin_store.close_interview_attempt(
+        "attempt-1",
+        status="completed",
+        close_source="normal_end",
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is False
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["canonical_status"] == admin_store.INTERVIEW_CANONICAL_STATUS_FAILED

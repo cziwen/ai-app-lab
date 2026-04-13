@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import admin_store
 import handler
+import pytest
 from event import TTSDonePayload, WebEvent
 
 
@@ -106,6 +107,15 @@ class _FakeWebSocket:
     async def __anext__(self):
         self.closed = True
         raise StopAsyncIteration
+
+
+@pytest.fixture(autouse=True)
+def _patch_start_attempt(monkeypatch):
+    monkeypatch.setattr(
+        handler,
+        "start_interview_attempt",
+        lambda *_args, **_kwargs: 1,
+    )
 
 
 def _fake_session_data(token: str):

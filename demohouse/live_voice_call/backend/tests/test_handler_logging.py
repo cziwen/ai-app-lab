@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import admin_store
 import handler
+import pytest
 import service
 
 
@@ -36,6 +37,15 @@ def _setup_tmp_store(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(admin_store, "INTERVIEW_LOG_DIR", interview_log_dir)
     monkeypatch.setattr(admin_store, "DB_PATH", db_path)
     monkeypatch.setattr(admin_store, "INTERVIEW_EXPIRY_INDEX", _FakeExpiryIndex())
+
+
+@pytest.fixture(autouse=True)
+def _patch_start_attempt(monkeypatch):
+    monkeypatch.setattr(
+        handler,
+        "start_interview_attempt",
+        lambda *_args, **_kwargs: 1,
+    )
 
 
 def _reset_handler_loggers(monkeypatch, tmp_path: Path) -> None:
@@ -289,15 +299,17 @@ def test_persistence_process_logs_error_on_final_failure(monkeypatch):
     def _raise_save(*args, **kwargs):
         raise RuntimeError("save failed")
 
-    monkeypatch.setattr(handler, "save_interview_turns", _raise_save)
+    monkeypatch.setattr(handler, "save_interview_turn_events", _raise_save)
 
     queue = handler.PersistenceQueue(capture_logger)
     task = handler.PersistenceTask(
         token="INT-PERSIST-ERR",
-        turns=[],
+        attempt_id="ATTEMPT-ERR",
+        attempt_seq=1,
+        close_source="internal_error",
+        turn_events=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        score_inputs=[],
         should_mark_completed=True,
         completed_reason="disconnect",
         expected_owner_id="OWNER-PERSIST-ERR",
@@ -327,8 +339,17 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
         async def submit(self, task):
             captured["scoring_tasks"].append(task)
 
-    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "save_interview_turn_events", lambda *args, **kwargs: None)
     monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(handler, "close_interview_attempt", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        handler,
+        "finalize_canonical_artifacts",
+        lambda _token: {
+            "ok": True,
+            "score_inputs": [{"question_id": "scene-1", "question_index": 1}],
+        },
+    )
     monkeypatch.setattr(
         handler,
         "mark_interview_completed",
@@ -349,10 +370,12 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
     queue = handler.PersistenceQueue(logging.getLogger("test.persistence.scoring"))
     task = handler.PersistenceTask(
         token="INT-PERSIST-SCORING",
-        turns=[],
+        attempt_id="ATTEMPT-SCORING",
+        attempt_seq=1,
+        close_source="normal_end",
+        turn_events=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        score_inputs=[{"question_id": "q1"}],
         should_mark_completed=True,
         completed_reason="normal_end",
         expected_owner_id="OWNER-PERSIST-SCORING",
@@ -391,8 +414,17 @@ def test_persistence_process_skips_completion_when_owner_changed(monkeypatch):
     capture_logger.addHandler(CaptureHandler())
     capture_logger.propagate = False
 
-    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "save_interview_turn_events", lambda *args, **kwargs: None)
     monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(handler, "close_interview_attempt", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        handler,
+        "finalize_canonical_artifacts",
+        lambda _token: {
+            "ok": True,
+            "score_inputs": [{"question_id": "scene-1", "question_index": 1}],
+        },
+    )
     monkeypatch.setattr(
         handler,
         "mark_interview_completed",
@@ -413,10 +445,12 @@ def test_persistence_process_skips_completion_when_owner_changed(monkeypatch):
     queue = handler.PersistenceQueue(capture_logger)
     task = handler.PersistenceTask(
         token="INT-PERSIST-SKIP",
-        turns=[],
+        attempt_id="ATTEMPT-SKIP",
+        attempt_seq=1,
+        close_source="client_ws",
+        turn_events=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        score_inputs=[{"question_id": "q1"}],
         should_mark_completed=True,
         completed_reason="normal_end",
         expected_owner_id="OWNER-OLD",
@@ -448,8 +482,17 @@ def test_persistence_process_completes_when_owner_is_missing_or_unchanged(monkey
         async def submit(self, task):
             captured["scoring_tasks"].append(task)
 
-    monkeypatch.setattr(handler, "save_interview_turns", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "save_interview_turn_events", lambda *args, **kwargs: None)
     monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(handler, "close_interview_attempt", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        handler,
+        "finalize_canonical_artifacts",
+        lambda token: {
+            "ok": True,
+            "score_inputs": [{"question_id": f"{token}-scene", "question_index": 1}],
+        },
+    )
     monkeypatch.setattr(
         handler,
         "mark_interview_completed",
@@ -475,10 +518,12 @@ def test_persistence_process_completes_when_owner_is_missing_or_unchanged(monkey
     queue = handler.PersistenceQueue(logging.getLogger("test.persistence.owner_allow"))
     task_none = handler.PersistenceTask(
         token="INT-PERSIST-OWNER-NONE",
-        turns=[],
+        attempt_id="ATTEMPT-OWNER-NONE",
+        attempt_seq=1,
+        close_source="normal_end",
+        turn_events=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        score_inputs=[{"question_id": "q1"}],
         should_mark_completed=True,
         completed_reason="normal_end",
         expected_owner_id="OWNER-NONE",
@@ -488,10 +533,12 @@ def test_persistence_process_completes_when_owner_is_missing_or_unchanged(monkey
     )
     task_same = handler.PersistenceTask(
         token="INT-PERSIST-OWNER-SAME",
-        turns=[],
+        attempt_id="ATTEMPT-OWNER-SAME",
+        attempt_seq=2,
+        close_source="normal_end",
+        turn_events=[],
         candidate_pcm_bytes=b"",
         interviewer_encoded_bytes=b"",
-        score_inputs=[{"question_id": "q2"}],
         should_mark_completed=True,
         completed_reason="normal_end",
         expected_owner_id="OWNER-SAME",

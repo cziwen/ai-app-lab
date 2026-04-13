@@ -32,6 +32,9 @@ INTERVIEW_STATUS_IN_PROGRESS = "in_progress"
 INTERVIEW_STATUS_COMPLETED = "completed"
 INTERVIEW_STATUS_FAILED = "failed"
 INTERVIEW_STATUS_DELETED = "deleted"
+INTERVIEW_CANONICAL_STATUS_READY = "ready"
+INTERVIEW_CANONICAL_STATUS_BUILDING = "building"
+INTERVIEW_CANONICAL_STATUS_FAILED = "failed"
 SCORECARD_STATUS_PENDING = "pending"
 SCORECARD_STATUS_COMPLETED = "completed"
 SCORECARD_STATUS_FAILED = "failed"
@@ -214,9 +217,56 @@ CREATE TABLE IF NOT EXISTS interviews (
   completed_reason TEXT,
   interruption_count INTEGER NOT NULL DEFAULT 0,
   reconnect_deadline_at TEXT,
+  canonical_status TEXT NOT NULL DEFAULT 'ready',
+  canonical_version INTEGER NOT NULL DEFAULT 0,
+  consistency_flags TEXT NOT NULL DEFAULT '',
   candidate_audio_path TEXT,
   interviewer_audio_path TEXT,
   FOREIGN KEY(job_uid) REFERENCES jobs(job_uid) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS interview_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL UNIQUE,
+  interview_token TEXT NOT NULL,
+  client_id TEXT NOT NULL DEFAULT '',
+  owner_id TEXT NOT NULL DEFAULT '',
+  attempt_seq INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'in_progress',
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  close_source TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS interview_turn_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL,
+  interview_token TEXT NOT NULL,
+  seq_no INTEGER NOT NULL,
+  event_ts TEXT NOT NULL,
+  role TEXT NOT NULL,
+  text TEXT NOT NULL,
+  question_id TEXT NOT NULL DEFAULT '',
+  question_index INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
+  FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
+  UNIQUE(attempt_id, seq_no)
+);
+
+CREATE TABLE IF NOT EXISTS interview_audio_segments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL,
+  interview_token TEXT NOT NULL,
+  track TEXT NOT NULL,
+  segment_seq INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
+  FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
+  UNIQUE(attempt_id, track, segment_seq)
 );
 
 CREATE TABLE IF NOT EXISTS interview_turns (
@@ -259,6 +309,15 @@ CREATE TABLE IF NOT EXISTS interview_question_scores (
   comment TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_interview_attempts_token_seq
+ON interview_attempts(interview_token, attempt_seq);
+
+CREATE INDEX IF NOT EXISTS idx_interview_turn_events_token_ts
+ON interview_turn_events(interview_token, event_ts, id);
+
+CREATE INDEX IF NOT EXISTS idx_interview_audio_segments_token_track_seq
+ON interview_audio_segments(interview_token, track, id);
 
 """
 
@@ -359,6 +418,18 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN question_bank_version INTEGER NOT NULL DEFAULT 1"
         )
+    if "canonical_status" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN canonical_status TEXT NOT NULL DEFAULT 'ready'"
+        )
+    if "canonical_version" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 0"
+        )
+    if "consistency_flags" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN consistency_flags TEXT NOT NULL DEFAULT ''"
+        )
     expires_rows = conn.execute(
         "SELECT token, created_at FROM interviews WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
     ).fetchall()
@@ -367,6 +438,14 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
             "UPDATE interviews SET expires_at = ? WHERE token = ?",
             (_compute_interview_expires_at(row["created_at"]), row["token"]),
         )
+    conn.execute(
+        "UPDATE interviews SET canonical_status = 'ready' "
+        "WHERE canonical_status IS NULL OR TRIM(canonical_status) = ''"
+    )
+    conn.execute(
+        "UPDATE interviews SET consistency_flags = '' "
+        "WHERE consistency_flags IS NULL"
+    )
 
     question_columns = {
         row["name"]
@@ -1380,7 +1459,12 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             f"""
             SELECT i.token, i.candidate_name, i.question_count,
                    i.notes, i.status, i.created_at, i.completed_at, i.completed_reason, i.interruption_count,
-                   i.expires_at,
+                   i.expires_at, i.canonical_status, i.canonical_version, i.consistency_flags,
+                   (
+                     SELECT COUNT(*)
+                     FROM interview_attempts a
+                     WHERE a.interview_token = i.token
+                   ) AS attempt_count,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -1403,6 +1487,16 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             "completed_at": row["completed_at"],
             "completed_reason": row["completed_reason"],
             "expires_at": row["expires_at"],
+            "attempt_count": int(row["attempt_count"] or 0),
+            "canonical_status": str(
+                row["canonical_status"] or INTERVIEW_CANONICAL_STATUS_READY
+            ),
+            "canonical_version": int(row["canonical_version"] or 0),
+            "consistency_flags": [
+                chunk
+                for chunk in str(row["consistency_flags"] or "").split(",")
+                if chunk.strip()
+            ],
             "job": {
                 "job_uid": row["job_uid"],
                 "name": row["job_name"],
@@ -1441,6 +1535,11 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
             """,
             (token,),
         ).fetchall()
+        attempt_count_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM interview_attempts WHERE interview_token = ?",
+            (token,),
+        ).fetchone()
+        attempt_count = int(attempt_count_row["c"] or 0) if attempt_count_row else 0
 
         selected_ids = [
             int(chunk)
@@ -1485,6 +1584,16 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "completed_at": row["completed_at"],
         "completed_reason": row["completed_reason"],
         "reconnect_deadline_at": row["reconnect_deadline_at"],
+        "attempt_count": attempt_count,
+        "canonical_status": str(
+            row["canonical_status"] or INTERVIEW_CANONICAL_STATUS_READY
+        ),
+        "canonical_version": int(row["canonical_version"] or 0),
+        "consistency_flags": [
+            chunk
+            for chunk in str(row["consistency_flags"] or "").split(",")
+            if chunk.strip()
+        ],
         "candidate_audio_path": row["candidate_audio_path"],
         "interviewer_audio_path": row["interviewer_audio_path"],
         "job": {
@@ -1723,6 +1832,738 @@ def mark_interview_in_progress(token: str) -> bool:
         conn.commit()
     _invalidate_interview_cache(token)
     return True
+
+
+def start_interview_attempt(
+    token: str,
+    attempt_id: str,
+    *,
+    client_id: str = "",
+    owner_id: str = "",
+    started_at: Optional[str] = None,
+) -> Optional[int]:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if not token or not normalized_attempt_id:
+        return None
+    now_iso = (started_at or "").strip() or utc_now_iso()
+    normalized_client_id = str(client_id or "").strip()
+    normalized_owner_id = str(owner_id or "").strip()
+    with get_conn() as conn:
+        _begin_immediate(conn)
+        row = conn.execute(
+            "SELECT status, expires_at FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return None
+        if not _is_interview_active(str(row["status"] or "")):
+            return None
+        if _is_interview_expired(row["expires_at"], datetime.now(timezone.utc)):
+            return None
+        existing = conn.execute(
+            "SELECT attempt_seq FROM interview_attempts WHERE attempt_id = ?",
+            (normalized_attempt_id,),
+        ).fetchone()
+        if existing:
+            conn.commit()
+            return int(existing["attempt_seq"] or 0)
+        next_seq_row = conn.execute(
+            "SELECT COALESCE(MAX(attempt_seq), 0) + 1 AS next_seq "
+            "FROM interview_attempts WHERE interview_token = ?",
+            (token,),
+        ).fetchone()
+        attempt_seq = int(next_seq_row["next_seq"] or 1)
+        conn.execute(
+            """
+            INSERT INTO interview_attempts (
+                attempt_id, interview_token, client_id, owner_id, attempt_seq,
+                status, started_at, close_source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_attempt_id,
+                token,
+                normalized_client_id,
+                normalized_owner_id,
+                attempt_seq,
+                INTERVIEW_STATUS_IN_PROGRESS,
+                now_iso,
+                "",
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE interviews
+            SET canonical_status = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_CANONICAL_STATUS_BUILDING, now_iso, token),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    return attempt_seq
+
+
+def close_interview_attempt(
+    attempt_id: str,
+    *,
+    status: str,
+    close_source: str,
+    ended_at: Optional[str] = None,
+) -> bool:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if not normalized_attempt_id:
+        return False
+    ended_at_iso = (ended_at or "").strip() or utc_now_iso()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT interview_token FROM interview_attempts WHERE attempt_id = ?",
+            (normalized_attempt_id,),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            """
+            UPDATE interview_attempts
+            SET status = ?, ended_at = ?, close_source = ?
+            WHERE attempt_id = ?
+            """,
+            (
+                str(status or INTERVIEW_STATUS_IN_PROGRESS),
+                ended_at_iso,
+                str(close_source or "").strip(),
+                normalized_attempt_id,
+            ),
+        )
+        conn.commit()
+        token = str(row["interview_token"] or "")
+    if token:
+        _invalidate_interview_cache(token)
+    return True
+
+
+def save_interview_turn_events(
+    token: str, attempt_id: str, events: Sequence[Dict[str, Any]]
+) -> int:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if not token or not normalized_attempt_id:
+        return 0
+    inserted = 0
+    with get_conn() as conn:
+        for idx, item in enumerate(events):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "") or "").strip()
+            text = str(item.get("text", "") or "").strip()
+            if role not in {"candidate", "interviewer"} or not text:
+                continue
+            raw_seq_no = item.get("seq_no")
+            try:
+                seq_no = int(raw_seq_no)
+            except (TypeError, ValueError):
+                seq_no = idx + 1
+            seq_no = max(1, seq_no)
+            event_ts = str(item.get("event_ts", "") or "").strip() or utc_now_iso()
+            question_id = str(item.get("question_id", "") or "").strip()
+            raw_question_index = item.get("question_index", 0)
+            try:
+                question_index = int(raw_question_index or 0)
+            except (TypeError, ValueError):
+                question_index = 0
+            question_index = max(0, question_index)
+            conn.execute(
+                """
+                INSERT INTO interview_turn_events (
+                    attempt_id, interview_token, seq_no, event_ts, role, text,
+                    question_id, question_index
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id, seq_no) DO UPDATE SET
+                    event_ts = excluded.event_ts,
+                    role = excluded.role,
+                    text = excluded.text,
+                    question_id = excluded.question_id,
+                    question_index = excluded.question_index
+                """,
+                (
+                    normalized_attempt_id,
+                    token,
+                    seq_no,
+                    event_ts,
+                    role,
+                    text,
+                    question_id,
+                    question_index,
+                ),
+            )
+            inserted += 1
+        conn.commit()
+    _invalidate_interview_cache(token)
+    return inserted
+
+
+def _normalize_turn_text_for_dedupe(text: str) -> str:
+    collapsed = "".join(str(text or "").strip().split())
+    return collapsed.lower()
+
+
+def _dedupe_turn_event_rows(
+    rows: Sequence[sqlite3.Row], *, window_seconds: int = 12
+) -> Tuple[List[Dict[str, Any]], int]:
+    dedupe_window = max(0, int(window_seconds))
+    canonical: List[Dict[str, Any]] = []
+    latest_by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    dropped = 0
+
+    for row in rows:
+        role = str(row["role"] or "").strip()
+        text = str(row["text"] or "").strip()
+        if role not in {"candidate", "interviewer"} or not text:
+            continue
+        question_id = str(row["question_id"] or "").strip()
+        question_index = int(row["question_index"] or 0)
+        attempt_seq = int(row["attempt_seq"] or 0)
+        event_ts = str(row["event_ts"] or "").strip() or utc_now_iso()
+        event_dt = parse_iso_or_none(event_ts)
+        qkey = question_id or (f"qidx:{question_index}" if question_index > 0 else "-")
+        key = (role, qkey, _normalize_turn_text_for_dedupe(text))
+        previous = latest_by_key.get(key)
+        if previous:
+            prev_dt = previous["event_dt"]
+            within_window = False
+            if event_dt and prev_dt:
+                within_window = abs((event_dt - prev_dt).total_seconds()) <= dedupe_window
+            if within_window:
+                if attempt_seq >= int(previous["attempt_seq"] or 0):
+                    canonical[int(previous["index"])] = {
+                        "role": role,
+                        "content": text,
+                        "created_at": event_ts,
+                        "question_id": question_id,
+                        "question_index": question_index,
+                        "attempt_seq": attempt_seq,
+                        "event_dt": event_dt,
+                    }
+                    latest_by_key[key] = {
+                        "index": int(previous["index"]),
+                        "attempt_seq": attempt_seq,
+                        "event_dt": event_dt,
+                    }
+                dropped += 1
+                continue
+        canonical.append(
+            {
+                "role": role,
+                "content": text,
+                "created_at": event_ts,
+                "question_id": question_id,
+                "question_index": question_index,
+                "attempt_seq": attempt_seq,
+                "event_dt": event_dt,
+            }
+        )
+        latest_by_key[key] = {
+            "index": len(canonical) - 1,
+            "attempt_seq": attempt_seq,
+            "event_dt": event_dt,
+        }
+    return canonical, dropped
+
+
+def _load_selected_question_blueprint_in_conn(
+    conn: sqlite3.Connection, token: str
+) -> List[Dict[str, Any]]:
+    interview_row = conn.execute(
+        """
+        SELECT token, job_uid, question_bank_version, selected_question_ids
+        FROM interviews
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+    if not interview_row:
+        return []
+    selected_ids = [
+        int(chunk)
+        for chunk in (interview_row["selected_question_ids"] or "").split(",")
+        if chunk.strip().isdigit()
+    ]
+    if not selected_ids:
+        return []
+    question_rows = _load_job_questions(
+        conn,
+        interview_row["job_uid"],
+        bank_version=int(interview_row["question_bank_version"] or 1),
+    )
+    by_id = {int(item["id"]): item for item in question_rows}
+    selected_questions: List[Dict[str, Any]] = []
+    for idx, qid in enumerate(selected_ids):
+        q = by_id.get(qid)
+        if not q:
+            continue
+        evidence = _build_question_evidence(q)
+        selected_questions.append(
+            {
+                "sort_order": idx + 1,
+                "question_id": f"q{qid}",
+                "scenario": str(q["scenario"] or "").strip(),
+                "question": str(q["question"] or "").strip(),
+                "evidence": evidence,
+                "ability_dimension": str(evidence.get("ability_dimension", "") or "").strip(),
+                "scoring_boundary": str(evidence.get("scoring_boundary", "") or "").strip(),
+                "score_format": str(evidence.get("score_format", "") or "").strip(),
+                "comment_requirement": str(
+                    evidence.get("comment_requirement", "") or ""
+                ).strip(),
+            }
+        )
+    return selected_questions
+
+
+def build_score_inputs_from_canonical_turns(
+    token: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    canonical_events: Optional[Sequence[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    owned_conn = conn is None
+    working_conn = conn or get_conn()
+    try:
+        selected_questions = _load_selected_question_blueprint_in_conn(working_conn, token)
+        if not selected_questions:
+            return []
+        turns = working_conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM interview_turns
+            WHERE interview_token = ?
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (token,),
+        ).fetchall()
+        question_answers: Dict[str, List[str]] = {
+            str(item["question_id"]): [] for item in selected_questions
+        }
+        question_id_order = [str(item["question_id"]) for item in selected_questions]
+        index_to_question_id = {
+            idx + 1: qid for idx, qid in enumerate(question_id_order)
+        }
+
+        if canonical_events is not None:
+            for event in canonical_events:
+                if not isinstance(event, dict):
+                    continue
+                role = str(event.get("role", "") or "").strip()
+                if role != "candidate":
+                    continue
+                text = str(event.get("content", "") or "").strip()
+                if not text:
+                    continue
+                question_id = str(event.get("question_id", "") or "").strip()
+                if not question_id:
+                    try:
+                        raw_index = int(event.get("question_index", 0) or 0)
+                    except (TypeError, ValueError):
+                        raw_index = 0
+                    question_id = index_to_question_id.get(raw_index, "")
+                if question_id in question_answers:
+                    question_answers[question_id].append(text)
+        else:
+            events = working_conn.execute(
+                """
+                SELECT role, text, question_id, question_index, event_ts
+                FROM interview_turn_events
+                WHERE interview_token = ?
+                ORDER BY event_ts ASC, id ASC
+                """,
+                (token,),
+            ).fetchall()
+            for row in events:
+                role = str(row["role"] or "").strip()
+                if role != "candidate":
+                    continue
+                text = str(row["text"] or "").strip()
+                if not text:
+                    continue
+                question_id = str(row["question_id"] or "").strip()
+                if not question_id:
+                    raw_index = int(row["question_index"] or 0)
+                    question_id = index_to_question_id.get(raw_index, "")
+                if question_id in question_answers:
+                    question_answers[question_id].append(text)
+
+        if canonical_events is None and question_id_order and not any(question_answers.values()):
+            for row in turns:
+                if str(row["role"] or "").strip() != "candidate":
+                    continue
+                text = str(row["content"] or "").strip()
+                if not text:
+                    continue
+                question_answers[question_id_order[-1]].append(text)
+
+        segments: List[Dict[str, Any]] = []
+        previous_scene = ""
+        for item in selected_questions:
+            scene = str(item["scenario"] or "").strip()
+            start_new_segment = False
+            if scene:
+                start_new_segment = (not segments) or (scene != previous_scene)
+            else:
+                start_new_segment = True
+            if start_new_segment:
+                segments.append(
+                    {
+                        "scene": scene,
+                        "questions": [],
+                        "candidate_answers": [],
+                        "scoring_boundary": "",
+                        "score_format": "",
+                        "ability_dimension": "",
+                        "comment_requirement": "",
+                    }
+                )
+            segment = segments[-1]
+            segment["questions"].append(str(item["question"] or "").strip())
+            segment["candidate_answers"].extend(
+                question_answers.get(str(item["question_id"]), [])
+            )
+            if not segment["scoring_boundary"]:
+                segment["scoring_boundary"] = str(item["scoring_boundary"] or "").strip()
+            if not segment["score_format"]:
+                segment["score_format"] = str(item["score_format"] or "").strip()
+            if not segment["ability_dimension"]:
+                segment["ability_dimension"] = str(item["ability_dimension"] or "").strip()
+            if not segment["comment_requirement"]:
+                segment["comment_requirement"] = str(
+                    item["comment_requirement"] or ""
+                ).strip()
+            previous_scene = scene
+
+        score_inputs: List[Dict[str, Any]] = []
+        for idx, segment in enumerate(segments, start=1):
+            questions = [q for q in segment["questions"] if str(q or "").strip()]
+            answers = [
+                str(answer or "").strip()
+                for answer in segment["candidate_answers"]
+                if str(answer or "").strip()
+            ]
+            scene = str(segment.get("scene", "") or "").strip()
+            if scene:
+                question_text = f"[场景] {scene}\n" + "\n".join(
+                    f"{order + 1}. {q}" for order, q in enumerate(questions)
+                )
+            else:
+                question_text = "\n".join(questions)
+            score_inputs.append(
+                {
+                    "question_id": f"scene-{idx}",
+                    "question_index": idx,
+                    "sort_order": idx,
+                    "question": question_text.strip(),
+                    "ability_dimension": str(
+                        segment.get("ability_dimension", "") or ""
+                    ).strip(),
+                    "scoring_boundary": str(
+                        segment.get("scoring_boundary", "") or ""
+                    ).strip(),
+                    "best_standard": "",
+                    "medium_standard": "",
+                    "worst_standard": "",
+                    "score_format": str(segment.get("score_format", "") or "").strip(),
+                    "comment_requirement": str(
+                        segment.get("comment_requirement", "") or ""
+                    ).strip(),
+                    "candidate_answers": answers,
+                    "aggregated_answer": "\n".join(answers).strip(),
+                }
+            )
+        return score_inputs
+    finally:
+        if owned_conn:
+            working_conn.close()
+
+
+def _merge_wav_files(paths: Sequence[Path], output_path: Path) -> bool:
+    if not paths:
+        return False
+    try:
+        with wave.open(str(paths[0]), "rb") as first:
+            params = (
+                first.getnchannels(),
+                first.getsampwidth(),
+                first.getframerate(),
+            )
+        with wave.open(str(output_path), "wb") as out_wav:
+            out_wav.setnchannels(params[0])
+            out_wav.setsampwidth(params[1])
+            out_wav.setframerate(params[2])
+            for path in paths:
+                with wave.open(str(path), "rb") as src:
+                    current = (
+                        src.getnchannels(),
+                        src.getsampwidth(),
+                        src.getframerate(),
+                    )
+                    if current != params:
+                        return False
+                    out_wav.writeframes(src.readframes(src.getnframes()))
+    except Exception:
+        return False
+    return True
+
+
+def _merge_mp3_files(paths: Sequence[Path], output_path: Path) -> bool:
+    if not paths:
+        return False
+    try:
+        with output_path.open("wb") as out_file:
+            for path in paths:
+                out_file.write(path.read_bytes())
+    except Exception:
+        return False
+    return True
+
+
+def _copy_or_merge_audio_track_rows(
+    rows: Sequence[sqlite3.Row], *, token: str, track: str, flags: List[str]
+) -> Optional[str]:
+    existing_rows = []
+    for row in rows:
+        raw_path = str(row["file_path"] or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.exists() or not path.is_file():
+            continue
+        existing_rows.append((row, path))
+    if not existing_rows:
+        return None
+
+    canonical_dir = AUDIO_DIR / token / "canonical"
+    canonical_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = [path for _, path in existing_rows]
+    suffixes = {path.suffix.lower() for path in paths}
+    suffix = paths[0].suffix.lower() if paths else ""
+    output_suffix = suffix if suffix else ".raw"
+    output_path = canonical_dir / f"{track}{output_suffix}"
+
+    if len(paths) == 1:
+        shutil.copyfile(paths[0], output_path)
+        return str(output_path)
+
+    if len(suffixes) == 1 and output_suffix == ".wav":
+        if _merge_wav_files(paths, output_path):
+            return str(output_path)
+    elif len(suffixes) == 1 and output_suffix == ".mp3":
+        if _merge_mp3_files(paths, output_path):
+            return str(output_path)
+
+    fallback_row, fallback_path = existing_rows[-1]
+    shutil.copyfile(fallback_path, output_path)
+    flags.append(f"{track}_merge_fallback")
+    if len(suffixes) > 1:
+        flags.append(f"{track}_mixed_format")
+    if int(fallback_row["attempt_seq"] or 0) <= 0:
+        flags.append(f"{track}_attempt_seq_missing")
+    return str(output_path)
+
+
+def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
+    now_iso = utc_now_iso()
+    try:
+        with get_conn() as conn:
+            _begin_immediate(conn)
+            interview_row = conn.execute(
+                """
+                SELECT token, candidate_name
+                FROM interviews
+                WHERE token = ?
+                """,
+                (token,),
+            ).fetchone()
+            if not interview_row:
+                return {"ok": False, "error": "interview_not_found"}
+
+            conn.execute(
+                """
+                UPDATE interviews
+                SET canonical_status = ?, updated_at = ?
+                WHERE token = ?
+                """,
+                (INTERVIEW_CANONICAL_STATUS_BUILDING, now_iso, token),
+            )
+
+            attempts = conn.execute(
+                """
+                SELECT attempt_id, attempt_seq
+                FROM interview_attempts
+                WHERE interview_token = ?
+                ORDER BY attempt_seq ASC, id ASC
+                """,
+                (token,),
+            ).fetchall()
+            attempt_count = len(attempts)
+            turn_rows = conn.execute(
+                """
+                SELECT e.role, e.text, e.event_ts, e.question_id, e.question_index,
+                       a.attempt_seq
+                FROM interview_turn_events e
+                JOIN interview_attempts a ON a.attempt_id = e.attempt_id
+                WHERE e.interview_token = ?
+                ORDER BY a.attempt_seq ASC, e.event_ts ASC, e.seq_no ASC, e.id ASC
+                """,
+                (token,),
+            ).fetchall()
+            canonical_events, dedupe_dropped = _dedupe_turn_event_rows(turn_rows)
+            consistency_flags: List[str] = []
+            if dedupe_dropped > 0:
+                consistency_flags.append(f"dedupe_drop:{dedupe_dropped}")
+            if attempt_count > 1:
+                consistency_flags.append("reconnect_merged")
+            if not canonical_events:
+                consistency_flags.append("canonical_turns_empty")
+                raise RuntimeError("canonical_turns_empty")
+            candidate_turn_count = sum(
+                1 for event in canonical_events if str(event.get("role", "")) == "candidate"
+            )
+            if candidate_turn_count <= 0:
+                consistency_flags.append("candidate_turns_empty")
+                raise RuntimeError("candidate_turns_empty")
+            candidate_scorable_turn_count = 0
+            for event in canonical_events:
+                if str(event.get("role", "")) != "candidate":
+                    continue
+                question_id = str(event.get("question_id", "") or "").strip()
+                try:
+                    question_index = int(event.get("question_index", 0) or 0)
+                except (TypeError, ValueError):
+                    question_index = 0
+                if question_id or question_index > 0:
+                    candidate_scorable_turn_count += 1
+
+            conn.execute(
+                "DELETE FROM interview_turns WHERE interview_token = ?",
+                (token,),
+            )
+            for idx, event in enumerate(canonical_events):
+                conn.execute(
+                    """
+                    INSERT INTO interview_turns (
+                        interview_token, role, content, created_at, sort_order
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        token,
+                        str(event["role"]),
+                        str(event["content"]),
+                        str(event["created_at"] or now_iso),
+                        idx,
+                    ),
+                )
+
+            audio_rows = conn.execute(
+                """
+                SELECT s.track, s.file_path, s.duration_ms, s.segment_seq, a.attempt_seq
+                FROM interview_audio_segments s
+                JOIN interview_attempts a ON a.attempt_id = s.attempt_id
+                WHERE s.interview_token = ?
+                ORDER BY a.attempt_seq ASC, s.segment_seq ASC, s.id ASC
+                """,
+                (token,),
+            ).fetchall()
+
+            candidate_rows = [row for row in audio_rows if str(row["track"]) == "candidate"]
+            interviewer_rows = [
+                row for row in audio_rows if str(row["track"]) == "interviewer"
+            ]
+            candidate_path = _copy_or_merge_audio_track_rows(
+                candidate_rows, token=token, track="candidate", flags=consistency_flags
+            )
+            interviewer_path = _copy_or_merge_audio_track_rows(
+                interviewer_rows,
+                token=token,
+                track="interviewer",
+                flags=consistency_flags,
+            )
+
+            score_inputs = build_score_inputs_from_canonical_turns(
+                token,
+                conn=conn,
+                canonical_events=canonical_events,
+            )
+            mapped_candidate_turn_count = sum(
+                len(item.get("candidate_answers", []) or [])
+                for item in score_inputs
+                if isinstance(item, dict)
+            )
+            if mapped_candidate_turn_count <= 0:
+                consistency_flags.append("mapped_candidate_turns_empty")
+                raise RuntimeError("mapped_candidate_turns_empty")
+            if candidate_scorable_turn_count > 0 and mapped_candidate_turn_count < candidate_scorable_turn_count:
+                consistency_flags.append("score_turn_mismatch")
+                raise RuntimeError("score_turn_mismatch")
+            if not candidate_path or not interviewer_path:
+                consistency_flags.append("canonical_audio_missing")
+                raise RuntimeError("canonical_audio_missing")
+            if not score_inputs:
+                consistency_flags.append("score_input_empty")
+                raise RuntimeError("score_input_empty")
+
+            canonical_version_row = conn.execute(
+                "SELECT COALESCE(canonical_version, 0) + 1 AS next_version FROM interviews WHERE token = ?",
+                (token,),
+            ).fetchone()
+            next_version = int(canonical_version_row["next_version"] or 1)
+            conn.execute(
+                """
+                UPDATE interviews
+                SET candidate_audio_path = ?,
+                    interviewer_audio_path = ?,
+                    canonical_status = ?,
+                    canonical_version = ?,
+                    consistency_flags = ?,
+                    updated_at = ?
+                WHERE token = ?
+                """,
+                (
+                    candidate_path,
+                    interviewer_path,
+                    INTERVIEW_CANONICAL_STATUS_READY,
+                    next_version,
+                    ",".join(sorted(set(consistency_flags))),
+                    now_iso,
+                    token,
+                ),
+            )
+            conn.commit()
+        _invalidate_interview_cache(token)
+        return {
+            "ok": True,
+            "attempt_count": attempt_count,
+            "score_inputs": score_inputs,
+            "consistency_flags": sorted(set(consistency_flags)),
+        }
+    except Exception as finalize_error:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                UPDATE interviews
+                SET canonical_status = ?, consistency_flags = ?, updated_at = ?
+                WHERE token = ?
+                """,
+                (
+                    INTERVIEW_CANONICAL_STATUS_FAILED,
+                    f"finalize_failed:{type(finalize_error).__name__}",
+                    utc_now_iso(),
+                    token,
+                ),
+            )
+            conn.commit()
+        _invalidate_interview_cache(token)
+        return {"ok": False, "error": str(finalize_error)}
 
 
 def clear_interview_turns(token: str) -> None:
@@ -2073,16 +2914,78 @@ def _ffmpeg_reencode_mp3(
     )
 
 
+def _probe_duration_ms(path: Path) -> int:
+    ffprobe_bin = (os.getenv("FFPROBE_BIN") or "ffprobe").strip() or "ffprobe"
+    if shutil.which(ffprobe_bin) is None:
+        return 0
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return 0
+    if completed.returncode != 0:
+        return 0
+    try:
+        seconds = float((completed.stdout or "").strip() or "0")
+    except ValueError:
+        return 0
+    if seconds <= 0:
+        return 0
+    return max(1, int(round(seconds * 1000)))
+
+
 def persist_interview_audio(
     token: str,
     candidate_pcm_bytes: bytes,
     interviewer_encoded_bytes: bytes,
+    *,
+    attempt_id: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
+    normalized_attempt_id = str(attempt_id or "").strip()
     interview_dir = AUDIO_DIR / token
+    candidate_segment_seq = 1
+    interviewer_segment_seq = 1
+    if normalized_attempt_id:
+        interview_dir = interview_dir / normalized_attempt_id
+        with get_conn() as conn:
+            candidate_segment_seq_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(segment_seq), 0) + 1 AS next_seq
+                FROM interview_audio_segments
+                WHERE attempt_id = ? AND track = 'candidate'
+                """,
+                (normalized_attempt_id,),
+            ).fetchone()
+            interviewer_segment_seq_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(segment_seq), 0) + 1 AS next_seq
+                FROM interview_audio_segments
+                WHERE attempt_id = ? AND track = 'interviewer'
+                """,
+                (normalized_attempt_id,),
+            ).fetchone()
+            candidate_segment_seq = int(candidate_segment_seq_row["next_seq"] or 1)
+            interviewer_segment_seq = int(interviewer_segment_seq_row["next_seq"] or 1)
     interview_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_path: Optional[Path] = None
     interviewer_path: Optional[Path] = None
+    candidate_duration_ms = 0
+    interviewer_duration_ms = 0
     compress_enabled = _env_flag("AUDIO_COMPRESS_ENABLED", True)
     candidate_bitrate_kbps = _env_int(
         "CANDIDATE_MP3_BITRATE_KBPS", 32, minimum=8, maximum=320
@@ -2111,17 +3014,26 @@ def persist_interview_audio(
                 bitrate_kbps=candidate_bitrate_kbps,
             )
         if candidate_mp3_bytes:
-            candidate_path = interview_dir / "candidate.mp3"
+            if normalized_attempt_id:
+                candidate_path = interview_dir / f"candidate-{candidate_segment_seq}.mp3"
+            else:
+                candidate_path = interview_dir / "candidate.mp3"
             candidate_path.write_bytes(candidate_mp3_bytes)
+            candidate_duration_ms = _probe_duration_ms(candidate_path)
             INFO(
                 f"[InterviewPersist] token={token} candidate_format=mp3 "
                 f"candidate_bytes={len(candidate_mp3_bytes)}"
             )
         else:
-            candidate_path = interview_dir / "candidate.wav"
+            if normalized_attempt_id:
+                candidate_path = interview_dir / f"candidate-{candidate_segment_seq}.wav"
+            else:
+                candidate_path = interview_dir / "candidate.wav"
             _write_pcm_to_wav(
                 candidate_path, candidate_pcm_bytes, sample_rate=candidate_sample_rate
             )
+            denominator = max(1, candidate_sample_rate * candidate_channels * 2)
+            candidate_duration_ms = max(1, int(round(len(candidate_pcm_bytes) * 1000 / denominator)))
             INFO(
                 f"[InterviewPersist] token={token} candidate_format=wav "
                 f"candidate_bytes={len(candidate_pcm_bytes)}"
@@ -2139,27 +3051,80 @@ def persist_interview_audio(
             )
             if reencoded_bytes:
                 interviewer_bytes_to_write = reencoded_bytes
-        interviewer_path = interview_dir / f"interviewer.{extension}"
+        if normalized_attempt_id:
+            interviewer_path = interview_dir / f"interviewer-{interviewer_segment_seq}.{extension}"
+        else:
+            interviewer_path = interview_dir / f"interviewer.{extension}"
         interviewer_path.write_bytes(interviewer_bytes_to_write)
+        if extension == "raw":
+            denominator = max(1, interviewer_sample_rate * interviewer_channels * 2)
+            interviewer_duration_ms = max(
+                1, int(round(len(interviewer_bytes_to_write) * 1000 / denominator))
+            )
+        else:
+            interviewer_duration_ms = _probe_duration_ms(interviewer_path)
         INFO(
             f"[InterviewPersist] token={token} interviewer_format={extension} "
             f"interviewer_bytes={len(interviewer_bytes_to_write)}"
         )
 
     with get_conn() as conn:
-        conn.execute(
-            """
-            UPDATE interviews
-            SET candidate_audio_path = ?, interviewer_audio_path = ?, updated_at = ?
-            WHERE token = ?
-            """,
-            (
-                str(candidate_path) if candidate_path else None,
-                str(interviewer_path) if interviewer_path else None,
-                utc_now_iso(),
-                token,
-            ),
-        )
+        if normalized_attempt_id:
+            now_iso = utc_now_iso()
+            if candidate_path:
+                conn.execute(
+                    """
+                    INSERT INTO interview_audio_segments (
+                        attempt_id, interview_token, track, segment_seq, file_path,
+                        duration_ms, started_at, ended_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_attempt_id,
+                        token,
+                        "candidate",
+                        candidate_segment_seq,
+                        str(candidate_path),
+                        int(candidate_duration_ms),
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            if interviewer_path:
+                conn.execute(
+                    """
+                    INSERT INTO interview_audio_segments (
+                        attempt_id, interview_token, track, segment_seq, file_path,
+                        duration_ms, started_at, ended_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_attempt_id,
+                        token,
+                        "interviewer",
+                        interviewer_segment_seq,
+                        str(interviewer_path),
+                        int(interviewer_duration_ms),
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+        else:
+            conn.execute(
+                """
+                UPDATE interviews
+                SET candidate_audio_path = ?, interviewer_audio_path = ?, updated_at = ?
+                WHERE token = ?
+                """,
+                (
+                    str(candidate_path) if candidate_path else None,
+                    str(interviewer_path) if interviewer_path else None,
+                    utc_now_iso(),
+                    token,
+                ),
+            )
         conn.commit()
 
     return {

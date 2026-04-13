@@ -36,16 +36,19 @@ from admin_store import (
     INTERVIEW_LOG_DIR,
     ensure_interview_expiry_ready,
     ensure_default_admin,
+    finalize_canonical_artifacts,
     interview_exists,
     init_interview_scorecard,
     mark_interview_completed,
     mark_interview_disconnected,
     mark_interview_in_progress,
+    close_interview_attempt,
     persist_interview_audio,
     resolve_all_interview_timeouts,
     save_interview_scorecard_failed,
     save_interview_scorecard_success,
-    save_interview_turns,
+    save_interview_turn_events,
+    start_interview_attempt,
     sweep_expired_interviews,
     start_interview_session,
 )
@@ -261,10 +264,12 @@ ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8890"))
 @dataclass
 class PersistenceTask:
     token: str
-    turns: list
+    attempt_id: str
+    attempt_seq: int
+    close_source: str
+    turn_events: List[Dict[str, Any]]
     candidate_pcm_bytes: bytes
     interviewer_encoded_bytes: bytes
-    score_inputs: List[Dict[str, Any]]
     should_mark_completed: bool
     completed_reason: Optional[str]
     expected_owner_id: Optional[str]
@@ -324,16 +329,34 @@ class PersistenceQueue:
 
     async def _process(self, task: PersistenceTask) -> None:
         try:
-            await asyncio.to_thread(save_interview_turns, task.token, task.turns)
+            await asyncio.to_thread(
+                save_interview_turn_events,
+                task.token,
+                task.attempt_id,
+                list(task.turn_events or []),
+            )
             await asyncio.to_thread(
                 persist_interview_audio,
                 token=task.token,
                 candidate_pcm_bytes=task.candidate_pcm_bytes,
                 interviewer_encoded_bytes=task.interviewer_encoded_bytes,
+                attempt_id=task.attempt_id,
+            )
+            await asyncio.to_thread(
+                close_interview_attempt,
+                task.attempt_id,
+                status=(
+                    "completed"
+                    if task.should_mark_completed
+                    else "in_progress"
+                ),
+                close_source=task.close_source,
             )
             self.logger.info(
-                "event=interview_persist.success token=%s candidate_bytes=%s interviewer_bytes=%s candidate_frame_prefixed_count=%s candidate_frame_raw_count=%s candidate_frame_dropped_count=%s",
+                "event=interview_persist.success token=%s attempt_id=%s attempt_seq=%s candidate_bytes=%s interviewer_bytes=%s candidate_frame_prefixed_count=%s candidate_frame_raw_count=%s candidate_frame_dropped_count=%s",
                 task.token,
+                task.attempt_id,
+                task.attempt_seq,
                 len(task.candidate_pcm_bytes),
                 len(task.interviewer_encoded_bytes),
                 task.candidate_frame_prefixed_count,
@@ -355,6 +378,49 @@ class PersistenceQueue:
                             current_owner,
                         )
                         return
+                finalize_result = await asyncio.to_thread(
+                    finalize_canonical_artifacts,
+                    task.token,
+                )
+                if not bool(finalize_result.get("ok")):
+                    self.logger.error(
+                        "event=interview_finalize.failed token=%s attempt_id=%s error=%s",
+                        task.token,
+                        task.attempt_id,
+                        str(finalize_result.get("error", "")),
+                    )
+                    return
+                score_inputs = finalize_result.get("score_inputs")
+                if not isinstance(score_inputs, list) or not score_inputs:
+                    self.logger.error(
+                        "event=interview_finalize.failed token=%s attempt_id=%s reason=missing_score_inputs",
+                        task.token,
+                        task.attempt_id,
+                    )
+                    return
+                normalized_score_inputs: List[Dict[str, Any]] = []
+                invalid_score_input_count = 0
+                for item in score_inputs:
+                    if not isinstance(item, dict):
+                        invalid_score_input_count += 1
+                        continue
+                    question_id = str(item.get("question_id", "") or "").strip()
+                    try:
+                        question_index = int(item.get("question_index", 0) or 0)
+                    except (TypeError, ValueError):
+                        question_index = 0
+                    if not question_id or question_index <= 0:
+                        invalid_score_input_count += 1
+                        continue
+                    normalized_score_inputs.append(item)
+                if not normalized_score_inputs:
+                    self.logger.error(
+                        "event=interview_finalize.failed token=%s attempt_id=%s reason=invalid_score_inputs invalid_count=%s",
+                        task.token,
+                        task.attempt_id,
+                        invalid_score_input_count,
+                    )
+                    return
                 await asyncio.to_thread(
                     mark_interview_completed,
                     task.token,
@@ -364,7 +430,7 @@ class PersistenceQueue:
                 await SCORING.submit(
                     ScoringTask(
                         token=task.token,
-                        score_inputs=list(task.score_inputs or []),
+                        score_inputs=normalized_score_inputs,
                     )
                 )
         except Exception as persist_err:
@@ -388,7 +454,7 @@ class PersistenceQueue:
                 exc_info=True,
             )
             await asyncio.sleep(delay)
-            await self._queue.put(task)
+            await self._process(task)
 
 
 class ScoringQueue:
@@ -780,6 +846,24 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         )
         await websocket.close()
         return
+    ws_session_id = str(uuid.uuid4())
+    attempt_seq = await asyncio.to_thread(
+        start_interview_attempt,
+        token,
+        ws_session_id,
+        client_id=reconnect_client_id,
+        owner_id=occupancy_owner_id,
+    )
+    if not attempt_seq:
+        await release_occupancy_once()
+        unavailable_payload = BotErrorPayload(
+            error=ErrorEvent(code="SERVICE_UNAVAILABLE", message="服务暂时不可用，请稍后重试")
+        )
+        await websocket.send(
+            convert_web_event_to_binary(WebEvent.from_payload(unavailable_payload))
+        )
+        await websocket.close()
+        return
     runtime_checkpoint = await asyncio.to_thread(RUNTIME_CHECKPOINTS.load, token)
     latest_runtime_checkpoint: Optional[Dict[str, Any]] = runtime_checkpoint
 
@@ -792,7 +876,9 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     )
     interview_log(f"[Session] started remote={websocket.remote_address}")
 
-    turns = []
+    service: Optional[VoiceBotService] = None
+    turn_events: List[Dict[str, Any]] = []
+    turn_event_seq = 0
     candidate_audio = bytearray()
     interviewer_audio_encoded = bytearray()
     candidate_frame_prefixed_count = 0
@@ -809,9 +895,36 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     checkpoint_flushed_version = 0
 
     def record_turn(role: str, text: str):
+        nonlocal turn_event_seq
         if not text:
             return
-        turns.append((role, text, datetime.now(timezone.utc).isoformat()))
+        question_id = ""
+        question_index = 0
+        flow = getattr(service, "interview_flow", None)
+        if flow is not None:
+            try:
+                current_index = int(getattr(flow, "current_question_index", 0) or 0)
+            except (TypeError, ValueError):
+                current_index = -1
+            flow_state = str(getattr(flow, "state", "") or "").strip()
+            if (
+                flow_state not in {"INTRO", "WRAP_UP", "DONE"}
+                and 0 <= current_index < len(getattr(flow, "questions", []))
+            ):
+                current_question = flow.questions[current_index]
+                question_id = str(getattr(current_question, "question_id", "") or "").strip()
+                question_index = current_index + 1
+        turn_event_seq += 1
+        turn_events.append(
+            {
+                "seq_no": turn_event_seq,
+                "role": role,
+                "text": text,
+                "event_ts": datetime.now(timezone.utc).isoformat(),
+                "question_id": question_id,
+                "question_index": question_index,
+            }
+        )
 
     def on_interview_completed():
         nonlocal interview_completed
@@ -877,8 +990,6 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         except RuntimeError:
             RUNTIME_CHECKPOINTS.save(token, checkpoint)
             checkpoint_flushed_version = checkpoint_target_version
-
-    ws_session_id = str(uuid.uuid4())
 
     async def run_occupancy_heartbeat() -> None:
         interval_seconds = OCCUPANCY.config.heartbeat_seconds
@@ -1133,27 +1244,15 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     should_mark_completed = False
                     end_status = "disconnected"
                     completed_reason = None
-            score_inputs: List[Dict[str, Any]] = []
-            build_score_inputs = getattr(service, "build_interview_score_inputs", None)
-            if callable(build_score_inputs):
-                try:
-                    raw_score_inputs = build_score_inputs()
-                    if isinstance(raw_score_inputs, list):
-                        score_inputs = [
-                            item for item in raw_score_inputs if isinstance(item, dict)
-                        ]
-                except Exception as scoring_payload_err:
-                    interview_log(
-                        "[InterviewScoring] failed to build score inputs: "
-                        f"{scoring_payload_err}"
-                    )
             await PERSISTENCE.submit(
                 PersistenceTask(
                     token=token,
-                    turns=turns,
+                    attempt_id=ws_session_id,
+                    attempt_seq=int(attempt_seq or 0),
+                    close_source=str(close_source or ""),
+                    turn_events=list(turn_events),
                     candidate_pcm_bytes=bytes(candidate_audio),
                     interviewer_encoded_bytes=bytes(interviewer_audio_encoded),
-                    score_inputs=score_inputs,
                     should_mark_completed=should_mark_completed,
                     completed_reason=completed_reason,
                     expected_owner_id=occupancy_owner_id,
