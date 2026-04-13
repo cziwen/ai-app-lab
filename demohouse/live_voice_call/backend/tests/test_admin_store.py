@@ -1747,9 +1747,12 @@ def test_finalize_canonical_artifacts_partial_mode_allows_no_valid_answers(
     )
     assert finalized["ok"] is True
     assert finalized["score_inputs"] == []
+    assert len(finalized["unanswered_zero_items"]) == 1
+    assert finalized["unanswered_zero_items"][0]["question_id"] == "scene-1"
     assert "missing_candidate_answer" in finalized["consistency_flags"]
     assert "unanswered_questions_skipped" in finalized["consistency_flags"]
     assert "no_valid_answers_for_partial_scoring" in finalized["consistency_flags"]
+    assert "unanswered_questions_scored_zero" in finalized["consistency_flags"]
     assert "partial_scoring" in finalized["consistency_flags"]
 
 

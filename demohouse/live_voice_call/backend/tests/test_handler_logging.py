@@ -474,11 +474,35 @@ def test_persistence_process_marks_failed_on_finalize_error_in_strict_mode(monke
 @pytest.mark.parametrize(
     "finalize_result",
     [
-        {"ok": True, "score_inputs": []},
-        {"ok": True, "score_inputs": [{"question_id": "scene-1", "question_index": 0}]},
+        {
+            "ok": True,
+            "score_inputs": [],
+            "unanswered_zero_items": [
+                {
+                    "question_id": "scene-1",
+                    "sort_order": 1,
+                    "question": "Q1",
+                    "score_format": "0-5",
+                    "comment_requirement": "一句话点评",
+                }
+            ],
+        },
+        {
+            "ok": True,
+            "score_inputs": [{"question_id": "scene-1", "question_index": 0}],
+            "unanswered_zero_items": [
+                {
+                    "question_id": "scene-1",
+                    "sort_order": 1,
+                    "question": "Q1",
+                    "score_format": "0-5",
+                    "comment_requirement": "一句话点评",
+                }
+            ],
+        },
     ],
 )
-def test_persistence_process_marks_completed_with_failed_scorecard_for_partial_mode(
+def test_persistence_process_allows_partial_mode_with_unanswered_zero_items(
     monkeypatch, finalize_result
 ):
     captured = {
@@ -486,7 +510,6 @@ def test_persistence_process_marks_completed_with_failed_scorecard_for_partial_m
         "mark_completed": [],
         "init_scorecard": [],
         "scoring_tasks": [],
-        "scorecard_failed": [],
     }
 
     class _FakeScoringQueue:
@@ -518,11 +541,6 @@ def test_persistence_process_marks_completed_with_failed_scorecard_for_partial_m
     )
     monkeypatch.setattr(
         handler,
-        "save_interview_scorecard_failed",
-        lambda token, message: captured["scorecard_failed"].append((token, message)),
-    )
-    monkeypatch.setattr(
-        handler,
         "OCCUPANCY",
         SimpleNamespace(current_owner=lambda _token: "OWNER-PERSIST-FAIL"),
     )
@@ -549,11 +567,10 @@ def test_persistence_process_marks_completed_with_failed_scorecard_for_partial_m
 
     assert captured["mark_failed"] == []
     assert captured["mark_completed"] == [("INT-PERSIST-PARTIAL-COMPLETE", "hangup")]
-    assert captured["init_scorecard"] == []
-    assert captured["scoring_tasks"] == []
-    assert captured["scorecard_failed"] == [
-        ("INT-PERSIST-PARTIAL-COMPLETE", "no_valid_answers_for_partial_scoring")
-    ]
+    assert captured["init_scorecard"] == ["INT-PERSIST-PARTIAL-COMPLETE"]
+    assert len(captured["scoring_tasks"]) == 1
+    assert captured["scoring_tasks"][0].token == "INT-PERSIST-PARTIAL-COMPLETE"
+    assert captured["scoring_tasks"][0].unanswered_zero_items
 
 
 def test_persistence_process_skips_completion_when_owner_changed(monkeypatch):
@@ -767,6 +784,7 @@ def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):
     task = handler.ScoringTask(
         token="INT-SCORE-FAILED",
         score_inputs=[{"question_id": "q1", "aggregated_answer": "abc"}],
+        unanswered_zero_items=[],
     )
 
     asyncio.run(queue._process(task))
@@ -844,12 +862,30 @@ def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatc
                 "worst_standard": "较差标准",
             }
         ],
+        unanswered_zero_items=[
+            {
+                "question_id": "q2",
+                "sort_order": 2,
+                "question": "Q2",
+                "ability_dimension": "沟通",
+                "score_format": "0-3",
+                "comment_requirement": "一句话点评",
+            }
+        ],
     )
 
     asyncio.run(queue._process(task))
 
     assert len(captured["success"]) == 1
     assert captured["success"][0][0] == "INT-SCORE-SUCCESS"
+    assert captured["success"][0][1] == 4.2
+    assert captured["success"][0][2] == 8.0
+    saved_payload = captured["success"][0][3]
+    assert len(saved_payload) == 2
+    assert saved_payload[0]["question_id"] == "q1"
+    assert saved_payload[1]["question_id"] == "q2"
+    assert saved_payload[1]["numeric_score"] == 0.0
+    assert saved_payload[1]["max_score"] == 3.0
     assert any('"stage": "start"' in line for line in captured_lines)
     assert any('"stage": "question"' in line for line in captured_lines)
     assert any('"stage": "success"' in line for line in captured_lines)

@@ -3055,6 +3055,7 @@ def finalize_canonical_artifacts(
                 conn=conn,
                 canonical_events=canonical_events,
             )
+            unanswered_zero_items: List[Dict[str, Any]] = []
             filtered_score_inputs: List[Dict[str, Any]] = []
             for item in score_inputs:
                 if not isinstance(item, dict):
@@ -3067,7 +3068,28 @@ def finalize_canonical_artifacts(
                     continue
                 if str(item.get("aggregated_answer", "") or "").strip():
                     filtered_score_inputs.append(item)
+                    continue
+                try:
+                    sort_order = int(item.get("sort_order", 0) or 0)
+                except (TypeError, ValueError):
+                    sort_order = 0
+                unanswered_zero_items.append(
+                    {
+                        "question_id": str(item.get("question_id", "") or "").strip(),
+                        "sort_order": sort_order,
+                        "question": str(item.get("question", "") or ""),
+                        "ability_dimension": str(
+                            item.get("ability_dimension", "") or ""
+                        ),
+                        "score_format": str(item.get("score_format", "") or ""),
+                        "comment_requirement": str(
+                            item.get("comment_requirement", "") or ""
+                        ),
+                    }
+                )
             score_inputs = filtered_score_inputs
+            if unanswered_zero_items:
+                consistency_flags.append("unanswered_questions_scored_zero")
             mapped_candidate_turn_count = sum(
                 len(item.get("candidate_answers", []) or [])
                 for item in score_inputs
@@ -3139,6 +3161,7 @@ def finalize_canonical_artifacts(
             "ok": True,
             "attempt_count": attempt_count,
             "score_inputs": score_inputs,
+            "unanswered_zero_items": unanswered_zero_items,
             "canonical_source": canonical_source,
             "discarded_turn_count": discarded_turn_count,
             "echo_risk_flags": echo_risk_flags,

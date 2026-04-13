@@ -27,7 +27,6 @@ import websockets
 from arkitect.utils.event_loop import get_event_loop
 from admin_api import create_admin_app
 from admin_store import (
-    BEST_EFFORT_COMPLETED_REASONS,
     INTERVIEW_COMPLETED_REASON_DISCONNECT,
     INTERVIEW_COMPLETED_REASON_ERROR,
     INTERVIEW_COMPLETED_REASON_HANGUP,
@@ -66,6 +65,7 @@ from startup_self_check import (
     load_runtime_config,
     run_startup_self_check,
 )
+from score_scale import parse_score_scale
 from async_log import build_async_rotating_handler
 from interview_occupancy import InterviewOccupancy, load_occupancy_config
 from llm_limiter import configure_llm_limit, get_llm_limit
@@ -287,6 +287,7 @@ class PersistenceTask:
 class ScoringTask:
     token: str
     score_inputs: List[Dict[str, Any]]
+    unanswered_zero_items: List[Dict[str, Any]]
 
 
 class PersistenceQueue:
@@ -340,11 +341,6 @@ class PersistenceQueue:
                     task.attempt_id,
                     reason,
                 )
-
-            is_best_effort_completion = (
-                str(task.completed_reason or "").strip()
-                in BEST_EFFORT_COMPLETED_REASONS
-            )
 
             await asyncio.to_thread(
                 save_interview_turn_events,
@@ -406,26 +402,12 @@ class PersistenceQueue:
                     )
                     return
                 score_inputs = finalize_result.get("score_inputs")
-                if not isinstance(score_inputs, list) or not score_inputs:
-                    if is_best_effort_completion:
-                        await asyncio.to_thread(
-                            mark_interview_completed,
-                            task.token,
-                            task.completed_reason,
-                        )
-                        await asyncio.to_thread(
-                            save_interview_scorecard_failed,
-                            task.token,
-                            "no_valid_answers_for_partial_scoring",
-                        )
-                        self.logger.info(
-                            "event=interview_finalize.partial_completed token=%s attempt_id=%s reason=no_valid_answers_for_partial_scoring",
-                            task.token,
-                            task.attempt_id,
-                        )
-                        return
+                if not isinstance(score_inputs, list):
                     await _mark_failed_and_return("missing_score_inputs")
                     return
+                unanswered_zero_items = finalize_result.get("unanswered_zero_items")
+                if not isinstance(unanswered_zero_items, list):
+                    unanswered_zero_items = []
                 normalized_score_inputs: List[Dict[str, Any]] = []
                 invalid_score_input_count = 0
                 for item in score_inputs:
@@ -441,24 +423,7 @@ class PersistenceQueue:
                         invalid_score_input_count += 1
                         continue
                     normalized_score_inputs.append(item)
-                if not normalized_score_inputs:
-                    if is_best_effort_completion:
-                        await asyncio.to_thread(
-                            mark_interview_completed,
-                            task.token,
-                            task.completed_reason,
-                        )
-                        await asyncio.to_thread(
-                            save_interview_scorecard_failed,
-                            task.token,
-                            "no_valid_answers_for_partial_scoring",
-                        )
-                        self.logger.info(
-                            "event=interview_finalize.partial_completed token=%s attempt_id=%s reason=invalid_score_inputs",
-                            task.token,
-                            task.attempt_id,
-                        )
-                        return
+                if not normalized_score_inputs and not unanswered_zero_items:
                     await _mark_failed_and_return(
                         f"invalid_score_inputs:{invalid_score_input_count}"
                     )
@@ -473,6 +438,7 @@ class PersistenceQueue:
                     ScoringTask(
                         token=task.token,
                         score_inputs=normalized_score_inputs,
+                        unanswered_zero_items=list(unanswered_zero_items),
                     )
                 )
         except Exception as persist_err:
@@ -576,11 +542,18 @@ class ScoringQueue:
             llm_reasoning_effort=RUNTIME_CONFIG.llm3_reasoning_effort,
             raw_preview_chars=SCORING_LOG_RAW_PREVIEW_CHARS,
         )
+        unanswered_zero_items = [
+            item
+            for item in (task.unanswered_zero_items or [])
+            if isinstance(item, dict)
+        ]
+
         _scoring_log(
             {
                 "stage": "start",
                 "token": task.token,
                 "question_count": len(task.score_inputs or []),
+                "unanswered_zero_count": len(unanswered_zero_items),
             }
         )
         try:
@@ -625,6 +598,48 @@ class ScoringQueue:
                 }
                 for item in result.question_scores
             ]
+            for zero_item in unanswered_zero_items:
+                question_id = str(zero_item.get("question_id", "") or "").strip()
+                try:
+                    sort_order = int(zero_item.get("sort_order", 0) or 0)
+                except (TypeError, ValueError):
+                    sort_order = 0
+                if not question_id or sort_order <= 0:
+                    continue
+                score_format = str(zero_item.get("score_format", "") or "").strip()
+                parsed_max_score, _ = parse_score_scale(score_format)
+                max_score = float(parsed_max_score or 0.0)
+                payload.append(
+                    {
+                        "question_id": question_id,
+                        "sort_order": sort_order,
+                        "question": str(zero_item.get("question", "") or ""),
+                        "ability_dimension": str(
+                            zero_item.get("ability_dimension", "") or ""
+                        ),
+                        "score_format": score_format,
+                        "comment_requirement": str(
+                            zero_item.get("comment_requirement", "") or ""
+                        ),
+                        "aggregated_answer": "",
+                        "max_score": max_score,
+                        "score_error": "",
+                        "numeric_score": 0.0,
+                        "comment": "候选人未作答，系统按0分计入。",
+                    }
+                )
+            payload = sorted(
+                payload,
+                key=lambda item: int(item.get("sort_order", 0) or 0),
+            )
+            merged_total_score = round(
+                sum(float(item.get("numeric_score", 0.0) or 0.0) for item in payload),
+                2,
+            )
+            merged_total_max_score = round(
+                sum(float(item.get("max_score", 0.0) or 0.0) for item in payload),
+                2,
+            )
             for idx, item in enumerate(result.question_scores):
                 meta = input_meta[idx] if idx < len(input_meta) else {}
                 debug_meta = item.debug_meta if isinstance(item.debug_meta, dict) else {}
@@ -667,8 +682,8 @@ class ScoringQueue:
             await asyncio.to_thread(
                 save_interview_scorecard_success,
                 task.token,
-                result.total_score,
-                result.total_max_score,
+                merged_total_score,
+                merged_total_max_score,
                 payload,
             )
             _scoring_log(
@@ -676,8 +691,8 @@ class ScoringQueue:
                     "stage": "success",
                     "token": task.token,
                     "question_count": len(payload),
-                    "total_score": result.total_score,
-                    "total_max_score": result.total_max_score,
+                    "total_score": merged_total_score,
+                    "total_max_score": merged_total_max_score,
                     "elapsed_ms": int((monotonic() - started) * 1000),
                 }
             )
@@ -685,8 +700,8 @@ class ScoringQueue:
                 "event=interview_scoring.success token=%s question_count=%s total_score=%.2f total_max_score=%.2f",
                 task.token,
                 len(payload),
-                result.total_score,
-                result.total_max_score,
+                merged_total_score,
+                merged_total_max_score,
             )
         except Exception as score_err:
             debug_meta = getattr(score_err, "scoring_debug_meta", None)
