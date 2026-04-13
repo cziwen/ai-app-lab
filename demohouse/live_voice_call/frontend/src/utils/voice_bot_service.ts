@@ -82,6 +82,7 @@ export default class VoiceBotService {
   private onErrorCallback?: (event: Event) => void;
   private audioRouteMode: AudioRouteMode;
   private audioUnlocked = false;
+  private playbackEpoch = 0;
   protected playing = false;
   private disposed = false;
 
@@ -216,12 +217,12 @@ export default class VoiceBotService {
     if (!this.playing) {
       this.onStartPlayAudio(data);
       this.playing = true;
-      this.playNextAudioChunk();
+      void this.playNextAudioChunk(this.playbackEpoch);
     }
   }
 
-  private async playNextAudioChunk() {
-    if (this.disposed) {
+  private async playNextAudioChunk(epoch: number) {
+    if (this.disposed || epoch !== this.playbackEpoch) {
       this.playing = false;
       return;
     }
@@ -233,13 +234,16 @@ export default class VoiceBotService {
     }
 
     if (this.audioRouteMode === 'media-element') {
-      await this.playChunkViaMediaElement(data);
+      await this.playChunkViaMediaElement(data, epoch);
       return;
     }
-    await this.playChunkViaWebAudio(data);
+    await this.playChunkViaWebAudio(data, epoch);
   }
 
-  private async playChunkViaMediaElement(data: ArrayBuffer) {
+  private async playChunkViaMediaElement(data: ArrayBuffer, epoch: number) {
+    if (this.disposed || epoch !== this.playbackEpoch) {
+      return;
+    }
     if (!this.mediaAudio) {
       this.mediaAudio = new Audio();
       this.mediaAudio.preload = 'auto';
@@ -257,39 +261,61 @@ export default class VoiceBotService {
     currentAudio.src = this.mediaObjectUrl;
 
     currentAudio.onended = () => {
+      if (epoch !== this.playbackEpoch) {
+        return;
+      }
       this.releaseMediaObjectUrl();
-      this.playNextAudioChunk();
+      void this.playNextAudioChunk(epoch);
     };
 
     currentAudio.onerror = () => {
+      if (epoch !== this.playbackEpoch) {
+        return;
+      }
       this.releaseMediaObjectUrl();
       this.log('audio media-element playback failed, fallback to web-audio');
       this.setAudioRouteMode('web-audio-fallback');
       this.audioChunks.unshift(data);
-      this.playNextAudioChunk();
+      void this.playNextAudioChunk(epoch);
     };
 
     try {
       await currentAudio.play();
+      if (this.disposed || epoch !== this.playbackEpoch) {
+        currentAudio.pause();
+        return;
+      }
       this.onAudioLevelChange?.(0.3);
       this.log('audio chunk played with media-element route');
     } catch (error) {
+      if (epoch !== this.playbackEpoch) {
+        return;
+      }
       this.releaseMediaObjectUrl();
       this.log(`audio media-element play() rejected, fallback error=${String(error)}`);
       this.setAudioRouteMode('web-audio-fallback');
       this.audioChunks.unshift(data);
-      this.playNextAudioChunk();
+      void this.playNextAudioChunk(epoch);
     }
   }
 
-  private async playChunkViaWebAudio(data: ArrayBuffer) {
+  private async playChunkViaWebAudio(data: ArrayBuffer, epoch: number) {
     try {
+      if (this.disposed || epoch !== this.playbackEpoch) {
+        return;
+      }
       if (this.audioCtx.state !== 'running') {
         await this.audioCtx.resume();
+      }
+      if (this.disposed || epoch !== this.playbackEpoch) {
+        return;
       }
       const audioBuffer = await this.audioCtx.decodeAudioData(
         new Uint8Array(data).buffer,
       );
+      if (this.disposed || epoch !== this.playbackEpoch) {
+        return;
+      }
       const source = this.audioCtx.createBufferSource();
       const analyser = this.audioCtx.createAnalyser();
       analyser.fftSize = 1024;
@@ -298,16 +324,26 @@ export default class VoiceBotService {
       source.buffer = audioBuffer;
       source.connect(analyser);
       analyser.connect(this.audioCtx.destination);
-      source.addEventListener('ended', () => this.playNextAudioChunk());
+      source.addEventListener('ended', () => {
+        void this.playNextAudioChunk(epoch);
+      });
       this.source = source;
       this.startAnalyserLoop();
+      if (this.disposed || epoch !== this.playbackEpoch) {
+        source.disconnect();
+        this.source = undefined;
+        return;
+      }
       source.start(0);
       this.log('audio chunk played with web-audio route');
     } catch (error) {
+      if (epoch !== this.playbackEpoch) {
+        return;
+      }
       this.log(
         `audio web-audio decode/play failed error=${String(error)} ctx=${this.audioCtx.state}`,
       );
-      this.playNextAudioChunk();
+      void this.playNextAudioChunk(epoch);
     }
   }
 
@@ -342,6 +378,16 @@ export default class VoiceBotService {
   }
 
   public stopAllMedia() {
+    this.clearPlaybackBuffer();
+    if (this.audioCtx.state !== 'closed') {
+      this.audioCtx.close();
+    }
+    this.audioUnlocked = false;
+    this.onAudioUnlockedChange?.(false);
+  }
+
+  public clearPlaybackBuffer() {
+    this.playbackEpoch += 1;
     this.audioChunks = [];
     this.playing = false;
     this.stopAnalyserLoop();
@@ -367,11 +413,7 @@ export default class VoiceBotService {
       this.mediaAudio = null;
     }
     this.releaseMediaObjectUrl();
-    if (this.audioCtx.state !== 'closed') {
-      this.audioCtx.close();
-    }
-    this.audioUnlocked = false;
-    this.onAudioUnlockedChange?.(false);
+    this.log('audio playback cleared');
   }
 
   public disconnectWsOnly(options?: WsCloseOptions) {

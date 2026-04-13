@@ -100,6 +100,11 @@ export const shouldAcceptReconnectSuccess = (
   return true;
 };
 
+export const shouldClearPlaybackOnSocketClose = (
+  autoReconnectEnabled: boolean,
+  manualDisconnect: boolean,
+) => !shouldAbortReconnectFlow(autoReconnectEnabled, manualDisconnect);
+
 export const useVoiceBotService = () => {
   const {
     wsReadyRef,
@@ -443,11 +448,16 @@ export const useVoiceBotService = () => {
       onClose: () => {
         log('ws closed');
         resetWsState();
-        if (!autoReconnectEnabledRef.current || manualDisconnectRef.current) {
+        const shouldReconnect = shouldClearPlaybackOnSocketClose(
+          autoReconnectEnabledRef.current,
+          manualDisconnectRef.current,
+        );
+        if (!shouldReconnect) {
           stopRecovering();
           clearReconnectTimer();
           return;
         }
+        serviceRef.current?.clearPlaybackBuffer();
         if (!recoveringRef.current) {
           reconnectStartAtRef.current = Date.now();
           reconnectAttemptRef.current = 0;

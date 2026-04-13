@@ -1,6 +1,7 @@
 import {
   shouldAbortReconnectFlow,
   shouldAcceptReconnectSuccess,
+  shouldClearPlaybackOnSocketClose,
 } from './useVoiceBotService';
 
 describe('shouldAbortReconnectFlow', () => {
@@ -28,5 +29,19 @@ describe('shouldAcceptReconnectSuccess', () => {
     const onRejected = jest.fn();
     expect(shouldAcceptReconnectSuccess(true, true, onRejected)).toBe(false);
     expect(onRejected).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('shouldClearPlaybackOnSocketClose', () => {
+  it('returns true when reconnect is still allowed', () => {
+    expect(shouldClearPlaybackOnSocketClose(true, false)).toBe(true);
+  });
+
+  it('returns false when reconnect is disabled explicitly', () => {
+    expect(shouldClearPlaybackOnSocketClose(false, false)).toBe(false);
+  });
+
+  it('returns false when manual disconnect is active', () => {
+    expect(shouldClearPlaybackOnSocketClose(true, true)).toBe(false);
   });
 });
