@@ -40,6 +40,7 @@ from admin_store import (
     interview_exists,
     init_interview_scorecard,
     mark_interview_completed,
+    mark_interview_failed,
     mark_interview_disconnected,
     mark_interview_in_progress,
     close_interview_attempt,
@@ -330,6 +331,15 @@ class PersistenceQueue:
 
     async def _process(self, task: PersistenceTask) -> None:
         try:
+            async def _mark_failed_and_return(reason: str) -> None:
+                await asyncio.to_thread(mark_interview_failed, task.token)
+                self.logger.error(
+                    "event=interview_finalize.failed token=%s attempt_id=%s reason=%s action=mark_failed",
+                    task.token,
+                    task.attempt_id,
+                    reason,
+                )
+
             await asyncio.to_thread(
                 save_interview_turn_events,
                 task.token,
@@ -384,20 +394,13 @@ class PersistenceQueue:
                     task.token,
                 )
                 if not bool(finalize_result.get("ok")):
-                    self.logger.error(
-                        "event=interview_finalize.failed token=%s attempt_id=%s error=%s",
-                        task.token,
-                        task.attempt_id,
-                        str(finalize_result.get("error", "")),
+                    await _mark_failed_and_return(
+                        str(finalize_result.get("error", "") or "finalize_not_ok")
                     )
                     return
                 score_inputs = finalize_result.get("score_inputs")
                 if not isinstance(score_inputs, list) or not score_inputs:
-                    self.logger.error(
-                        "event=interview_finalize.failed token=%s attempt_id=%s reason=missing_score_inputs",
-                        task.token,
-                        task.attempt_id,
-                    )
+                    await _mark_failed_and_return("missing_score_inputs")
                     return
                 normalized_score_inputs: List[Dict[str, Any]] = []
                 invalid_score_input_count = 0
@@ -415,11 +418,8 @@ class PersistenceQueue:
                         continue
                     normalized_score_inputs.append(item)
                 if not normalized_score_inputs:
-                    self.logger.error(
-                        "event=interview_finalize.failed token=%s attempt_id=%s reason=invalid_score_inputs invalid_count=%s",
-                        task.token,
-                        task.attempt_id,
-                        invalid_score_input_count,
+                    await _mark_failed_and_return(
+                        f"invalid_score_inputs:{invalid_score_input_count}"
                     )
                     return
                 await asyncio.to_thread(

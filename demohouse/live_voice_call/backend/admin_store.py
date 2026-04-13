@@ -3628,6 +3628,31 @@ def mark_interview_completed(token: str, completed_reason: Optional[str] = None)
     INTERVIEW_EXPIRY_INDEX.remove(token)
 
 
+def mark_interview_failed(token: str) -> None:
+    now = utc_now_iso()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM interviews WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return
+        current_status = str(row["status"] or "")
+        if current_status == INTERVIEW_STATUS_COMPLETED:
+            return
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (INTERVIEW_STATUS_FAILED, None, now, token),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    INTERVIEW_EXPIRY_INDEX.remove(token)
+
+
 def mark_interview_disconnected(token: str, grace_seconds: int = 30) -> bool:
     now = datetime.now(timezone.utc)
     deadline = (now + timedelta(seconds=max(1, grace_seconds))).isoformat()

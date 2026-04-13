@@ -1030,6 +1030,50 @@ def test_mark_interview_completed_persists_completed_reason(monkeypatch, tmp_pat
     assert detail["completed_reason"] == admin_store.INTERVIEW_COMPLETED_REASON_HANGUP
 
 
+def test_mark_interview_failed_sets_terminal_status_without_downgrading_completed(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+
+    assert admin_store.mark_interview_in_progress(token) is True
+    admin_store.mark_interview_failed(token)
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    assert detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
+
+    admin_store.mark_interview_completed(
+        token,
+        completed_reason=admin_store.INTERVIEW_COMPLETED_REASON_NORMAL_END,
+    )
+    detail_after_completed = admin_store.get_interview_detail(token)
+    assert detail_after_completed is not None
+    assert detail_after_completed["status"] == admin_store.INTERVIEW_STATUS_COMPLETED
+
+    admin_store.mark_interview_failed(token)
+    detail_after_failed_retry = admin_store.get_interview_detail(token)
+    assert detail_after_failed_retry is not None
+    assert detail_after_failed_retry["status"] == admin_store.INTERVIEW_STATUS_COMPLETED
+
+
 def test_interview_scorecard_success_is_persisted_and_returned(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")

@@ -397,6 +397,79 @@ def test_persistence_process_enqueues_scoring_after_completion(monkeypatch):
     assert captured["scoring_tasks"][0].token == "INT-PERSIST-SCORING"
 
 
+@pytest.mark.parametrize(
+    "finalize_result",
+    [
+        {"ok": False, "error": "checkpoint_missing"},
+        {"ok": True, "score_inputs": []},
+        {"ok": True, "score_inputs": [{"question_id": "scene-1", "question_index": 0}]},
+    ],
+)
+def test_persistence_process_marks_failed_on_finalize_or_score_input_error(
+    monkeypatch, finalize_result
+):
+    captured = {
+        "mark_failed": [],
+        "mark_completed": [],
+        "init_scorecard": [],
+        "scoring_tasks": [],
+    }
+
+    class _FakeScoringQueue:
+        async def submit(self, task):
+            captured["scoring_tasks"].append(task)
+
+    monkeypatch.setattr(handler, "save_interview_turn_events", lambda *args, **kwargs: None)
+    monkeypatch.setattr(handler, "persist_interview_audio", lambda **kwargs: {})
+    monkeypatch.setattr(handler, "close_interview_attempt", lambda *args, **kwargs: True)
+    monkeypatch.setattr(handler, "finalize_canonical_artifacts", lambda _token: finalize_result)
+    monkeypatch.setattr(
+        handler,
+        "mark_interview_failed",
+        lambda token: captured["mark_failed"].append(token),
+    )
+    monkeypatch.setattr(
+        handler,
+        "mark_interview_completed",
+        lambda token, reason: captured["mark_completed"].append((token, reason)),
+    )
+    monkeypatch.setattr(
+        handler,
+        "init_interview_scorecard",
+        lambda token: captured["init_scorecard"].append(token),
+    )
+    monkeypatch.setattr(
+        handler,
+        "OCCUPANCY",
+        SimpleNamespace(current_owner=lambda _token: "OWNER-PERSIST-FAIL"),
+    )
+    monkeypatch.setattr(handler, "SCORING", _FakeScoringQueue())
+
+    queue = handler.PersistenceQueue(logging.getLogger("test.persistence.finalize_fail"))
+    task = handler.PersistenceTask(
+        token="INT-PERSIST-FINALIZE-FAIL",
+        attempt_id="ATTEMPT-FINALIZE-FAIL",
+        attempt_seq=1,
+        close_source="client_ws",
+        turn_events=[],
+        candidate_pcm_bytes=b"",
+        interviewer_encoded_bytes=b"",
+        should_mark_completed=True,
+        completed_reason="hangup",
+        expected_owner_id="OWNER-PERSIST-FAIL",
+        candidate_frame_prefixed_count=0,
+        candidate_frame_raw_count=0,
+        candidate_audio_dropped_frames=0,
+    )
+
+    asyncio.run(queue._process(task))
+
+    assert captured["mark_failed"] == ["INT-PERSIST-FINALIZE-FAIL"]
+    assert captured["mark_completed"] == []
+    assert captured["init_scorecard"] == []
+    assert captured["scoring_tasks"] == []
+
+
 def test_persistence_process_skips_completion_when_owner_changed(monkeypatch):
     captured_records = []
     captured = {
