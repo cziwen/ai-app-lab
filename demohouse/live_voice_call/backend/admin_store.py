@@ -51,6 +51,11 @@ INTERVIEW_COMPLETED_REASONS = {
     INTERVIEW_COMPLETED_REASON_DISCONNECT,
     INTERVIEW_COMPLETED_REASON_ERROR,
 }
+BEST_EFFORT_COMPLETED_REASONS = {
+    INTERVIEW_COMPLETED_REASON_HANGUP,
+    INTERVIEW_COMPLETED_REASON_DISCONNECT,
+    INTERVIEW_COMPLETED_REASON_ERROR,
+}
 MAX_INTERRUPTION_COUNT = 3
 CHECKIN_ORDER = ("speaker", "mic", "camera", "screen")
 DEFAULT_REQUIRED_CHECKINS = ("speaker", "mic")
@@ -2671,6 +2676,66 @@ def _find_questions_missing_candidate_answer_in_checkpoint(
     return missing
 
 
+def _build_canonical_events_from_turn_events(
+    conn: sqlite3.Connection,
+    token: str,
+    *,
+    selected_questions: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    question_id_set = {
+        str(item.get("question_id", "") or "").strip() for item in selected_questions
+    }
+    index_to_question_id = {
+        int(item.get("sort_order", 0) or 0): str(item.get("question_id", "") or "").strip()
+        for item in selected_questions
+        if int(item.get("sort_order", 0) or 0) > 0
+    }
+    rows = conn.execute(
+        """
+        SELECT role, text, event_ts, question_id, question_index, question_epoch, id
+        FROM interview_turn_events
+        WHERE interview_token = ?
+          AND role IN ('candidate', 'interviewer')
+          AND TRIM(text) != ''
+        ORDER BY event_ts ASC, id ASC
+        """,
+        (token,),
+    ).fetchall()
+    events: List[Dict[str, Any]] = []
+    for row in rows:
+        role = str(row["role"] or "").strip()
+        text = str(row["text"] or "").strip()
+        if role not in {"candidate", "interviewer"} or not text:
+            continue
+        question_id = str(row["question_id"] or "").strip()
+        try:
+            question_index = int(row["question_index"] or 0)
+        except (TypeError, ValueError):
+            question_index = 0
+        if not question_id and question_index > 0:
+            question_id = index_to_question_id.get(question_index, "")
+        if question_id and question_id not in question_id_set:
+            question_id = ""
+            question_index = 0
+        try:
+            question_epoch = int(row["question_epoch"] or 0)
+        except (TypeError, ValueError):
+            question_epoch = 0
+        event_ts = str(row["event_ts"] or "").strip() or utc_now_iso()
+        events.append(
+            {
+                "role": role,
+                "content": text,
+                "created_at": event_ts,
+                "question_id": question_id,
+                "question_index": max(0, question_index),
+                "question_epoch": max(0, question_epoch),
+                "attempt_seq": 0,
+            }
+        )
+    return events
+
+
 def _compute_echo_risk_flags(
     canonical_events: Sequence[Dict[str, Any]],
     *,
@@ -2803,7 +2868,11 @@ def _copy_or_merge_audio_track_rows(
     return str(output_path)
 
 
-def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
+def finalize_canonical_artifacts(
+    token: str,
+    *,
+    completed_reason: Optional[str] = None,
+) -> Dict[str, Any]:
     now_iso = utc_now_iso()
     failed_consistency_flags: List[str] = []
     try:
@@ -2843,6 +2912,9 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
             consistency_flags: List[str] = []
             canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
             canonical_events: List[Dict[str, Any]] = []
+            partial_mode = (
+                str(completed_reason or "").strip() in BEST_EFFORT_COMPLETED_REASONS
+            )
 
             def _fail_with_flag(flag: str) -> None:
                 normalized = str(flag or "").strip()
@@ -2853,38 +2925,59 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 raise RuntimeError(normalized or "finalize_failed")
 
             checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
-            if not checkpoint_meta:
-                _fail_with_flag("checkpoint_missing")
-
-            canonical_source = CANONICAL_SOURCE_CHECKPOINT
-            intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
-            canonical_events = _build_canonical_events_from_checkpoint(
-                payload=checkpoint_meta["payload"],
-                selected_questions=selected_questions,
-                attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
-                checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
-                intro_wrap_events=intro_wrap_events,
-            )
-            if not canonical_events:
-                _fail_with_flag("checkpoint_empty")
-
-            missing_candidate_answer_questions = (
-                _find_questions_missing_candidate_answer_in_checkpoint(
-                    checkpoint_meta["payload"],
-                    selected_questions,
+            if checkpoint_meta:
+                canonical_source = CANONICAL_SOURCE_CHECKPOINT
+                intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
+                canonical_events = _build_canonical_events_from_checkpoint(
+                    payload=checkpoint_meta["payload"],
+                    selected_questions=selected_questions,
+                    attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
+                    checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
+                    intro_wrap_events=intro_wrap_events,
                 )
-            )
-            if missing_candidate_answer_questions:
-                _fail_with_flag("missing_candidate_answer")
+                if not canonical_events:
+                    consistency_flags.append("checkpoint_empty")
+                missing_candidate_answer_questions = (
+                    _find_questions_missing_candidate_answer_in_checkpoint(
+                        checkpoint_meta["payload"],
+                        selected_questions,
+                    )
+                )
+                if missing_candidate_answer_questions:
+                    if partial_mode:
+                        consistency_flags.append("missing_candidate_answer")
+                        consistency_flags.append("unanswered_questions_skipped")
+                    else:
+                        _fail_with_flag("missing_candidate_answer")
+            else:
+                consistency_flags.append("checkpoint_missing")
+                if not partial_mode:
+                    _fail_with_flag("checkpoint_missing")
+
+            if partial_mode and not canonical_events:
+                canonical_events = _build_canonical_events_from_turn_events(
+                    conn,
+                    token,
+                    selected_questions=selected_questions,
+                )
+                if canonical_events:
+                    canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+                    consistency_flags.append("checkpoint_fallback_used")
+
+            if not canonical_events:
+                if partial_mode:
+                    consistency_flags.append("canonical_turns_empty")
+                else:
+                    if checkpoint_meta:
+                        _fail_with_flag("checkpoint_empty")
+                    _fail_with_flag("canonical_turns_empty")
 
             if attempt_count > 1:
                 consistency_flags.append("reconnect_merged")
-            if not canonical_events:
-                _fail_with_flag("canonical_turns_empty")
             candidate_turn_count = sum(
                 1 for event in canonical_events if str(event.get("role", "")) == "candidate"
             )
-            if candidate_turn_count <= 0:
+            if candidate_turn_count <= 0 and not partial_mode:
                 _fail_with_flag("candidate_turns_empty")
             candidate_scorable_turn_count = 0
             for event in canonical_events:
@@ -2962,19 +3055,50 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 conn=conn,
                 canonical_events=canonical_events,
             )
+            filtered_score_inputs: List[Dict[str, Any]] = []
+            for item in score_inputs:
+                if not isinstance(item, dict):
+                    continue
+                candidate_answers = item.get("candidate_answers", [])
+                if isinstance(candidate_answers, list) and any(
+                    str(answer or "").strip() for answer in candidate_answers
+                ):
+                    filtered_score_inputs.append(item)
+                    continue
+                if str(item.get("aggregated_answer", "") or "").strip():
+                    filtered_score_inputs.append(item)
+            score_inputs = filtered_score_inputs
             mapped_candidate_turn_count = sum(
                 len(item.get("candidate_answers", []) or [])
                 for item in score_inputs
                 if isinstance(item, dict)
             )
             if mapped_candidate_turn_count <= 0:
-                _fail_with_flag("mapped_candidate_turns_empty")
-            if candidate_scorable_turn_count > 0 and mapped_candidate_turn_count < candidate_scorable_turn_count:
-                _fail_with_flag("score_turn_mismatch")
+                if partial_mode:
+                    consistency_flags.append("mapped_candidate_turns_empty")
+                    consistency_flags.append("no_valid_answers_for_partial_scoring")
+                else:
+                    _fail_with_flag("mapped_candidate_turns_empty")
+            if (
+                candidate_scorable_turn_count > 0
+                and mapped_candidate_turn_count < candidate_scorable_turn_count
+            ):
+                if partial_mode:
+                    consistency_flags.append("score_turn_mismatch")
+                else:
+                    _fail_with_flag("score_turn_mismatch")
             if not candidate_path or not interviewer_path:
-                _fail_with_flag("canonical_audio_missing")
+                if partial_mode:
+                    consistency_flags.append("canonical_audio_missing")
+                else:
+                    _fail_with_flag("canonical_audio_missing")
             if not score_inputs:
-                _fail_with_flag("score_input_empty")
+                if partial_mode:
+                    consistency_flags.append("score_input_empty")
+                else:
+                    _fail_with_flag("score_input_empty")
+            if partial_mode:
+                consistency_flags.append("partial_scoring")
 
             echo_risk_flags = _compute_echo_risk_flags(canonical_events)
             canonical_version_row = conn.execute(

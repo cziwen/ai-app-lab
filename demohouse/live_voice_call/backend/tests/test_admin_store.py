@@ -1602,6 +1602,157 @@ def test_finalize_canonical_artifacts_fails_when_question_has_no_candidate_answe
     assert "missing_candidate_answer" in detail["consistency_flags"]
 
 
+def test_finalize_canonical_artifacts_uses_turn_events_fallback_for_hangup(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-fallback", owner_id="owner-1") == 1
+
+    admin_store.save_interview_turn_events(
+        token,
+        "attempt-fallback",
+        [
+            {
+                "seq_no": 1,
+                "role": "interviewer",
+                "text": "第一题，请你介绍一个项目",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+            {
+                "seq_no": 2,
+                "role": "candidate",
+                "text": "我负责订单系统重构。",
+                "question_id": "q1",
+                "question_index": 1,
+            },
+        ],
+    )
+
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-fallback",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(
+        token,
+        completed_reason=admin_store.INTERVIEW_COMPLETED_REASON_HANGUP,
+    )
+    assert finalized["ok"] is True
+    assert finalized["canonical_source"] == admin_store.CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+    assert finalized["score_inputs"]
+    assert "checkpoint_missing" in finalized["consistency_flags"]
+    assert "checkpoint_fallback_used" in finalized["consistency_flags"]
+    assert "partial_scoring" in finalized["consistency_flags"]
+
+
+def test_finalize_canonical_artifacts_partial_mode_allows_no_valid_answers(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("介绍一个项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    assert admin_store.mark_interview_in_progress(token) is True
+    assert admin_store.start_interview_attempt(token, "attempt-partial-empty", owner_id="owner-1") == 1
+
+    checkpoint_payload = {
+        "version": 1,
+        "state": "WAIT_ANSWER",
+        "current_question_index": 0,
+        "total_candidate_turns": 0,
+        "latest_follow_up": "",
+        "latest_clarify": "",
+        "questions": [
+            {
+                "question_id": "q1",
+                "status": "in_progress",
+                "question_epoch": 0,
+                "follow_up_count": 0,
+                "clarify_count": 0,
+                "coverage_score": 0.0,
+                "turns": [
+                    {
+                        "role": "interviewer",
+                        "content": "第一题，请你介绍一个项目",
+                        "created_at": admin_store.utc_now_iso(),
+                    }
+                ],
+            }
+        ],
+    }
+    assert (
+        admin_store.save_interview_checkpoint_journal(
+            token,
+            "attempt-partial-empty",
+            1,
+            checkpoint_payload,
+            source="flush",
+        )
+        is True
+    )
+
+    interviewer_mp3_like = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 128
+    pcm = (b"\x01\x00\x02\x00") * 800
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id="attempt-partial-empty",
+        candidate_pcm_bytes=pcm,
+        interviewer_encoded_bytes=interviewer_mp3_like,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(
+        token,
+        completed_reason=admin_store.INTERVIEW_COMPLETED_REASON_HANGUP,
+    )
+    assert finalized["ok"] is True
+    assert finalized["score_inputs"] == []
+    assert "missing_candidate_answer" in finalized["consistency_flags"]
+    assert "unanswered_questions_skipped" in finalized["consistency_flags"]
+    assert "no_valid_answers_for_partial_scoring" in finalized["consistency_flags"]
+    assert "partial_scoring" in finalized["consistency_flags"]
+
+
 def test_finalize_canonical_artifacts_prefers_checkpoint_and_discards_rewound_turns(
     monkeypatch, tmp_path
 ):

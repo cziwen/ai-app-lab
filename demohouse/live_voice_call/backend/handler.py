@@ -27,6 +27,7 @@ import websockets
 from arkitect.utils.event_loop import get_event_loop
 from admin_api import create_admin_app
 from admin_store import (
+    BEST_EFFORT_COMPLETED_REASONS,
     INTERVIEW_COMPLETED_REASON_DISCONNECT,
     INTERVIEW_COMPLETED_REASON_ERROR,
     INTERVIEW_COMPLETED_REASON_HANGUP,
@@ -340,6 +341,11 @@ class PersistenceQueue:
                     reason,
                 )
 
+            is_best_effort_completion = (
+                str(task.completed_reason or "").strip()
+                in BEST_EFFORT_COMPLETED_REASONS
+            )
+
             await asyncio.to_thread(
                 save_interview_turn_events,
                 task.token,
@@ -392,6 +398,7 @@ class PersistenceQueue:
                 finalize_result = await asyncio.to_thread(
                     finalize_canonical_artifacts,
                     task.token,
+                    completed_reason=task.completed_reason,
                 )
                 if not bool(finalize_result.get("ok")):
                     await _mark_failed_and_return(
@@ -400,6 +407,23 @@ class PersistenceQueue:
                     return
                 score_inputs = finalize_result.get("score_inputs")
                 if not isinstance(score_inputs, list) or not score_inputs:
+                    if is_best_effort_completion:
+                        await asyncio.to_thread(
+                            mark_interview_completed,
+                            task.token,
+                            task.completed_reason,
+                        )
+                        await asyncio.to_thread(
+                            save_interview_scorecard_failed,
+                            task.token,
+                            "no_valid_answers_for_partial_scoring",
+                        )
+                        self.logger.info(
+                            "event=interview_finalize.partial_completed token=%s attempt_id=%s reason=no_valid_answers_for_partial_scoring",
+                            task.token,
+                            task.attempt_id,
+                        )
+                        return
                     await _mark_failed_and_return("missing_score_inputs")
                     return
                 normalized_score_inputs: List[Dict[str, Any]] = []
@@ -418,6 +442,23 @@ class PersistenceQueue:
                         continue
                     normalized_score_inputs.append(item)
                 if not normalized_score_inputs:
+                    if is_best_effort_completion:
+                        await asyncio.to_thread(
+                            mark_interview_completed,
+                            task.token,
+                            task.completed_reason,
+                        )
+                        await asyncio.to_thread(
+                            save_interview_scorecard_failed,
+                            task.token,
+                            "no_valid_answers_for_partial_scoring",
+                        )
+                        self.logger.info(
+                            "event=interview_finalize.partial_completed token=%s attempt_id=%s reason=invalid_score_inputs",
+                            task.token,
+                            task.attempt_id,
+                        )
+                        return
                     await _mark_failed_and_return(
                         f"invalid_score_inputs:{invalid_score_input_count}"
                     )
