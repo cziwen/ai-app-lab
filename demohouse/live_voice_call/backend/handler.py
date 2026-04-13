@@ -679,6 +679,7 @@ RUNTIME_CHECKPOINTS = InterviewRuntimeCheckpointStore(
 PERSISTENCE = PersistenceQueue(server_logger)
 SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
+CLIENT_END_ANSWER_EVENT = "ClientEndAnswer"
 CLIENT_HANGUP_CLOSE_CODE = 4000
 CLIENT_HANGUP_CLOSE_REASON = "client_hangup"
 INTERVIEW_COMPLETED_CLOSE_CODE = 4001
@@ -1125,6 +1126,8 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             if input_event.event == CLIENT_HANGUP_EVENT:
                 client_hangup = True
                 interview_log("event=session.client_hangup")
+                # Best-effort flush so the final buffered speech can be finalized.
+                yield WebEvent(event=CLIENT_END_ANSWER_EVENT)
                 continue
             if input_event.event == USER_AUDIO and input_event.data:
                 frame_stats: Dict[str, int] = {}

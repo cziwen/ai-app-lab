@@ -417,6 +417,8 @@ def test_handler_rejects_when_token_already_occupied(monkeypatch):
 
 
 def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypatch):
+    observed_input_events = []
+
     class _OneMessageWebSocket(_FakeWebSocket):
         def __init__(self):
             super().__init__(close_exc_cls=RuntimeError)
@@ -437,7 +439,8 @@ def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypat
             return None
 
         async def handler_loop(self, inputs):
-            async for _ in inputs:
+            async for event in inputs:
+                observed_input_events.append(str(getattr(event, "event", "")))
                 break
             if False:
                 yield WebEvent.from_payload(TTSDonePayload())
@@ -471,6 +474,7 @@ def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypat
 
         assert len(fake_persistence.tasks) == 1
         assert fake_persistence.tasks[0].completed_reason == "hangup"
+        assert observed_input_events == [handler.CLIENT_END_ANSWER_EVENT]
         assert any("event=session.client_hangup" in line for line in interview_logger.lines)
 
     asyncio.run(_run())

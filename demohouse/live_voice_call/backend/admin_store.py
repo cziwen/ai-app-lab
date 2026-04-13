@@ -2628,6 +2628,49 @@ def _build_canonical_events_from_checkpoint(
     return canonical_events
 
 
+def _find_questions_missing_candidate_answer_in_checkpoint(
+    payload: Dict[str, Any],
+    selected_questions: Sequence[Dict[str, Any]],
+) -> List[str]:
+    raw_questions = payload.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    question_by_id: Dict[str, Dict[str, Any]] = {}
+    for item in raw_questions:
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        question_by_id[question_id] = item
+
+    missing: List[str] = []
+    for selected in selected_questions:
+        question_id = str(selected.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        raw_question = question_by_id.get(question_id) or {}
+        raw_turns = raw_question.get("turns")
+        if not isinstance(raw_turns, list):
+            continue
+        interviewer_asked = False
+        candidate_answered = False
+        for turn in raw_turns:
+            if not isinstance(turn, dict):
+                continue
+            role = str(turn.get("role", "") or "").strip()
+            content = str(turn.get("content", "") or "").strip()
+            if role not in {"candidate", "interviewer"} or not content:
+                continue
+            if role == "interviewer":
+                interviewer_asked = True
+            elif role == "candidate":
+                candidate_answered = True
+        if interviewer_asked and not candidate_answered:
+            missing.append(question_id)
+    return missing
+
+
 def _compute_echo_risk_flags(
     canonical_events: Sequence[Dict[str, Any]],
     *,
@@ -2762,6 +2805,7 @@ def _copy_or_merge_audio_track_rows(
 
 def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
     now_iso = utc_now_iso()
+    failed_consistency_flags: List[str] = []
     try:
         with get_conn() as conn:
             _begin_immediate(conn)
@@ -2800,50 +2844,48 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
             canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
             canonical_events: List[Dict[str, Any]] = []
 
-            checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
-            if checkpoint_meta:
-                canonical_source = CANONICAL_SOURCE_CHECKPOINT
-                intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
-                canonical_events = _build_canonical_events_from_checkpoint(
-                    payload=checkpoint_meta["payload"],
-                    selected_questions=selected_questions,
-                    attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
-                    checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
-                    intro_wrap_events=intro_wrap_events,
-                )
-                if not canonical_events:
-                    consistency_flags.append("checkpoint_empty_fallback")
-                    canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
-            else:
-                consistency_flags.append("checkpoint_missing_fallback")
+            def _fail_with_flag(flag: str) -> None:
+                normalized = str(flag or "").strip()
+                if normalized:
+                    consistency_flags.append(normalized)
+                failed_consistency_flags.clear()
+                failed_consistency_flags.extend(sorted(set(consistency_flags)))
+                raise RuntimeError(normalized or "finalize_failed")
 
-            dedupe_dropped = 0
+            checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
+            if not checkpoint_meta:
+                _fail_with_flag("checkpoint_missing")
+
+            canonical_source = CANONICAL_SOURCE_CHECKPOINT
+            intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
+            canonical_events = _build_canonical_events_from_checkpoint(
+                payload=checkpoint_meta["payload"],
+                selected_questions=selected_questions,
+                attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
+                checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
+                intro_wrap_events=intro_wrap_events,
+            )
             if not canonical_events:
-                turn_rows = conn.execute(
-                    """
-                    SELECT e.role, e.text, e.event_ts, e.question_id, e.question_index,
-                           a.attempt_seq
-                    FROM interview_turn_events e
-                    JOIN interview_attempts a ON a.attempt_id = e.attempt_id
-                    WHERE e.interview_token = ?
-                    ORDER BY a.attempt_seq ASC, e.event_ts ASC, e.seq_no ASC, e.id ASC
-                    """,
-                    (token,),
-                ).fetchall()
-                canonical_events, dedupe_dropped = _dedupe_turn_event_rows(turn_rows)
-                if dedupe_dropped > 0:
-                    consistency_flags.append(f"dedupe_drop:{dedupe_dropped}")
+                _fail_with_flag("checkpoint_empty")
+
+            missing_candidate_answer_questions = (
+                _find_questions_missing_candidate_answer_in_checkpoint(
+                    checkpoint_meta["payload"],
+                    selected_questions,
+                )
+            )
+            if missing_candidate_answer_questions:
+                _fail_with_flag("missing_candidate_answer")
+
             if attempt_count > 1:
                 consistency_flags.append("reconnect_merged")
             if not canonical_events:
-                consistency_flags.append("canonical_turns_empty")
-                raise RuntimeError("canonical_turns_empty")
+                _fail_with_flag("canonical_turns_empty")
             candidate_turn_count = sum(
                 1 for event in canonical_events if str(event.get("role", "")) == "candidate"
             )
             if candidate_turn_count <= 0:
-                consistency_flags.append("candidate_turns_empty")
-                raise RuntimeError("candidate_turns_empty")
+                _fail_with_flag("candidate_turns_empty")
             candidate_scorable_turn_count = 0
             for event in canonical_events:
                 if str(event.get("role", "")) != "candidate":
@@ -2926,17 +2968,13 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 if isinstance(item, dict)
             )
             if mapped_candidate_turn_count <= 0:
-                consistency_flags.append("mapped_candidate_turns_empty")
-                raise RuntimeError("mapped_candidate_turns_empty")
+                _fail_with_flag("mapped_candidate_turns_empty")
             if candidate_scorable_turn_count > 0 and mapped_candidate_turn_count < candidate_scorable_turn_count:
-                consistency_flags.append("score_turn_mismatch")
-                raise RuntimeError("score_turn_mismatch")
+                _fail_with_flag("score_turn_mismatch")
             if not candidate_path or not interviewer_path:
-                consistency_flags.append("canonical_audio_missing")
-                raise RuntimeError("canonical_audio_missing")
+                _fail_with_flag("canonical_audio_missing")
             if not score_inputs:
-                consistency_flags.append("score_input_empty")
-                raise RuntimeError("score_input_empty")
+                _fail_with_flag("score_input_empty")
 
             echo_risk_flags = _compute_echo_risk_flags(canonical_events)
             canonical_version_row = conn.execute(
@@ -2983,6 +3021,9 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
             "consistency_flags": sorted(set(consistency_flags)),
         }
     except Exception as finalize_error:
+        merged_failed_flags = sorted(set(failed_consistency_flags))
+        if not merged_failed_flags:
+            merged_failed_flags = [f"finalize_failed:{type(finalize_error).__name__}"]
         with get_conn() as conn:
             conn.execute(
                 """
@@ -2992,7 +3033,7 @@ def finalize_canonical_artifacts(token: str) -> Dict[str, Any]:
                 """,
                 (
                     INTERVIEW_CANONICAL_STATUS_FAILED,
-                    f"finalize_failed:{type(finalize_error).__name__}",
+                    ",".join(merged_failed_flags),
                     utc_now_iso(),
                     token,
                 ),

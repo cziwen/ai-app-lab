@@ -888,6 +888,9 @@ class VoiceBotService(BaseModel):
                 elif input_event.event == CLIENT_END_ANSWER:
                     self.asr_force_finalize_requested = True
                     self._log("ASR_TURN_END_REQUEST source=client_end_answer")
+                elif input_event.event == CLIENT_HANGUP:
+                    self.asr_force_finalize_requested = True
+                    self._log("ASR_TURN_END_REQUEST source=client_hangup")
                 elif input_event.event == USER_AUDIO and input_event.data:
                     yield input_event.data
 
@@ -950,6 +953,13 @@ class VoiceBotService(BaseModel):
                 continue
             except StopAsyncIteration:
                 next_asr_task = None
+                if (
+                    self.asr_buffer
+                    and self.asr_last_growth_mono_ms > 0
+                    and not self.asr_force_finalize_requested
+                ):
+                    self.asr_force_finalize_requested = True
+                    self._log("ASR_TURN_END_REQUEST source=stream_end")
                 last_finalized = await self._finalize_asr_turn_if_silent()
                 if last_finalized is not None:
                     yield last_finalized
@@ -1402,6 +1412,11 @@ class VoiceBotService(BaseModel):
             return
         self._log("[Interview] Starting interview handler loop")
 
+        async def _produce_interviewer_message_and_emit_checkpoint() -> FlowResponse:
+            response = await flow.produce_interviewer_message()
+            self._emit_interview_runtime_checkpoint()
+            return response
+
         resume_mode = str(self.interview_resume_mode or RESUME_MODE_NONE).strip()
         self.interview_resume_mode = RESUME_MODE_NONE
 
@@ -1412,7 +1427,7 @@ class VoiceBotService(BaseModel):
         if resume_mode == RESUME_MODE_WRAP_UP:
             if flow.state != WRAP_UP:
                 flow.state = WRAP_UP
-            wrap_response = await flow.produce_interviewer_message()
+            wrap_response = await _produce_interviewer_message_and_emit_checkpoint()
             self._log(
                 f"[Interview] ResumeWrapUp: {wrap_response.state_before}->"
                 f"{wrap_response.state_after} "
@@ -1427,7 +1442,9 @@ class VoiceBotService(BaseModel):
         if resume_mode == RESUME_MODE_QUESTION_START:
             if flow.state != ASK_QUESTION:
                 flow.state = ASK_QUESTION
-            resumed_question_response = await flow.produce_interviewer_message()
+            resumed_question_response = (
+                await _produce_interviewer_message_and_emit_checkpoint()
+            )
             self._log(
                 f"[Interview] ResumeQuestion: {resumed_question_response.state_before}->"
                 f"{resumed_question_response.state_after} "
@@ -1442,7 +1459,7 @@ class VoiceBotService(BaseModel):
                     yield event
         else:
             # Phase 1: Send intro and first question separately via TTS (no LLM needed)
-            intro_response = await flow.produce_interviewer_message()
+            intro_response = await _produce_interviewer_message_and_emit_checkpoint()
             self._log(
                 f"[Interview] Intro: {intro_response.state_before}->{intro_response.state_after} "
                 f"text='{intro_response.interviewer_text}'"
@@ -1451,7 +1468,9 @@ class VoiceBotService(BaseModel):
                 async for event in self._send_scripted_text(intro_response.interviewer_text):
                     yield event
 
-            first_question_response = await flow.produce_interviewer_message()
+            first_question_response = (
+                await _produce_interviewer_message_and_emit_checkpoint()
+            )
             self._log(
                 f"[Interview] FirstQuestion: {first_question_response.state_before}->"
                 f"{first_question_response.state_after} "
@@ -1573,7 +1592,9 @@ class VoiceBotService(BaseModel):
                     # Check if interview ended (e.g. global turn limit)
                     if flow.is_done:
                         self._log("[Interview] Flow reached DONE after judge, sending wrap-up")
-                        wrap_response = await flow.produce_interviewer_message()
+                        wrap_response = (
+                            await _produce_interviewer_message_and_emit_checkpoint()
+                        )
                         if wrap_response.interviewer_text:
                             self._log(
                                 f"[Interview] Wrap-up text: '{wrap_response.interviewer_text}'"
@@ -1593,7 +1614,9 @@ class VoiceBotService(BaseModel):
                     next_interviewer_text = ""
                     next_response: Optional[FlowResponse] = None
                     if flow.state in (ASK_QUESTION, ASK_FOLLOWUP, ASK_CLARIFY, WRAP_UP):
-                        next_response = await flow.produce_interviewer_message()
+                        next_response = (
+                            await _produce_interviewer_message_and_emit_checkpoint()
+                        )
                         next_interviewer_text = next_response.interviewer_text
                         self._log(
                             f"[Interview] Next action: "

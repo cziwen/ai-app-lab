@@ -1019,6 +1019,7 @@ def test_interview_handler_loop_resume_wrap_up_emits_wrap_text_and_completes(mon
     async def _run():
         completed = []
         sent_texts = []
+        checkpoints = []
 
         class _FakeFlow:
             def __init__(self):
@@ -1034,6 +1035,9 @@ def test_interview_handler_loop_resume_wrap_up_emits_wrap_text_and_completes(mon
                     transition_trace=[],
                 )
 
+            def export_runtime_checkpoint(self):
+                return {"version": 1, "state": DONE}
+
         svc = service.VoiceBotService(
             ark_api_key="ark-key",
             llm1_endpoint_id="ep-judge",
@@ -1044,6 +1048,7 @@ def test_interview_handler_loop_resume_wrap_up_emits_wrap_text_and_completes(mon
             tts_access_key="tts-token",
             interview_mode=True,
             on_interview_completed=lambda: completed.append(True),
+            on_interview_runtime_checkpoint=lambda checkpoint: checkpoints.append(checkpoint),
         )
         svc.interview_flow = _FakeFlow()
         svc.interview_resume_mode = service.RESUME_MODE_WRAP_UP
@@ -1069,6 +1074,7 @@ def test_interview_handler_loop_resume_wrap_up_emits_wrap_text_and_completes(mon
 
         assert sent_texts == ["好的，面试到这里结束。"]
         assert completed == [True]
+        assert checkpoints == [{"version": 1, "state": DONE}]
         assert len(events) == 1
         assert events[0].event == service.TTS_DONE
 

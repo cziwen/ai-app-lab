@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 import service
 from sauc_asr_client import SaucASRAudio, SaucASRFullServerResponse, SaucASRResult
 
@@ -308,6 +310,59 @@ def test_force_finalize_request_dropped_when_no_recognized_text(monkeypatch):
 
         assert svc.asr_force_finalize_requested is False
         assert any("ASR_TURN_END_REQUEST_DROPPED reason=no_recognized_text" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_force_finalize_requested_on_client_hangup_event(monkeypatch):
+    async def _run():
+        class _InputAwareASRClient(_FakeASRClient):
+            def stream_asr(self, audio_iter):
+                async def _stream():
+                    async for _ in audio_iter:
+                        pass
+                    if False:
+                        yield _asr_response("unused")
+
+                return _stream()
+
+        fake = _InputAwareASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(svc, "_ensure_asr_ready", lambda: asyncio.sleep(0, result=True))
+
+        async def _inputs():
+            yield service.WebEvent(event=service.CLIENT_HANGUP)
+
+        stream = await svc.handle_input_event(_inputs())
+        out_iter = stream.__aiter__()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+
+        assert svc.asr_force_finalize_requested is True
+        assert any("ASR_TURN_END_REQUEST source=client_hangup" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_stream_end_force_finalizes_buffer_without_waiting_silence(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("挂断前最后一句", 100)
+            return
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "挂断前最后一句"
+        assert fake.close_calls == 1
+        assert any("ASR_TURN_END_REQUEST source=stream_end" in line for line in logs)
+        assert any("ASR_TURN_END reason=client_end_answer" in line for line in logs)
 
     asyncio.run(_run())
 
