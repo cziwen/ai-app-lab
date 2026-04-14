@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -62,6 +64,7 @@ def _reset_handler_loggers(monkeypatch, tmp_path: Path) -> None:
         logger.handlers.clear()
     handler._INTERVIEW_LOGGER_CACHE.clear()
     handler._INTERVIEW_LOGGER_LAST_USED.clear()
+    handler._INTERVIEW_LOGGER_ACTIVE_OWNERS.clear()
 
 
 def _create_interview_fixture() -> str:
@@ -286,6 +289,112 @@ def test_interview_logger_cache_prunes_overflow(monkeypatch, tmp_path):
     assert len(handler._INTERVIEW_LOGGER_CACHE) == 1
     assert ("INT-NEW", "frontend") in handler._INTERVIEW_LOGGER_CACHE
     assert ("INT-OLD", "frontend") not in handler._INTERVIEW_LOGGER_CACHE
+
+
+def test_interview_logger_owner_release_keeps_logger_for_other_owner(monkeypatch, tmp_path):
+    _reset_handler_loggers(monkeypatch, tmp_path)
+    token = "INT-LOGGER-OWNER-KEEP"
+    cache_key = (token, "backend")
+    owner_old = "owner-old"
+    owner_new = "owner-new"
+
+    logger_old = handler._acquire_interview_logger(token, "backend", owner_id=owner_old)
+    logger_new = handler._acquire_interview_logger(token, "backend", owner_id=owner_new)
+    assert logger_old is logger_new
+    assert cache_key in handler._INTERVIEW_LOGGER_CACHE
+    assert handler._INTERVIEW_LOGGER_ACTIVE_OWNERS[cache_key] == {owner_old, owner_new}
+
+    released_old = handler._release_interview_logger_owner(
+        token,
+        "backend",
+        owner_id=owner_old,
+    )
+
+    assert released_old is True
+    assert handler._INTERVIEW_LOGGER_ACTIVE_OWNERS[cache_key] == {owner_new}
+    assert len(logger_new.handlers) == 1
+
+    logger_new.info("after-old-release")
+    time.sleep(0.2)
+    log_file = tmp_path / "data" / "storage" / "interview_logs" / token / "backend.log"
+    assert "after-old-release" in log_file.read_text(encoding="utf-8")
+
+    released_new = handler._release_interview_logger_owner(
+        token,
+        "backend",
+        owner_id=owner_new,
+    )
+    assert released_new is True
+    assert handler._INTERVIEW_LOGGER_ACTIVE_OWNERS[cache_key] == set()
+    assert len(logger_new.handlers) == 1
+
+    assert handler._release_interview_loggers_for_token(token) == 1
+    assert logger_new.handlers == []
+
+
+def test_interview_logger_prune_skips_active_entry(monkeypatch, tmp_path):
+    _reset_handler_loggers(monkeypatch, tmp_path)
+    monkeypatch.setattr(handler, "INTERVIEW_LOGGER_CACHE_MAX", 1)
+    monkeypatch.setattr(handler, "INTERVIEW_LOGGER_IDLE_SECONDS", 999999)
+    active_key = ("INT-ACTIVE", "frontend")
+    inactive_key = ("INT-INACTIVE", "frontend")
+
+    active_logger = handler._acquire_interview_logger(
+        active_key[0],
+        active_key[1],
+        owner_id="owner-active",
+    )
+    handler._get_interview_logger(inactive_key[0], inactive_key[1])
+
+    assert active_key in handler._INTERVIEW_LOGGER_CACHE
+    assert inactive_key not in handler._INTERVIEW_LOGGER_CACHE
+    assert len(active_logger.handlers) == 1
+
+    handler._release_interview_logger_owner(
+        active_key[0],
+        active_key[1],
+        owner_id="owner-active",
+    )
+    handler._release_interview_loggers_for_token(active_key[0])
+
+
+def test_interview_logger_owner_release_does_not_drop_concurrent_writer(monkeypatch, tmp_path):
+    _reset_handler_loggers(monkeypatch, tmp_path)
+    token = "INT-LOGGER-CONCURRENT"
+    owner_old = "owner-old"
+    owner_new = "owner-new"
+    logger_old = handler._acquire_interview_logger(token, "backend", owner_id=owner_old)
+    logger_new = handler._acquire_interview_logger(token, "backend", owner_id=owner_new)
+    assert logger_old is logger_new
+
+    def _writer() -> None:
+        for i in range(12):
+            logger_new.info("[new-run] i=%s", i)
+            time.sleep(0.03)
+
+    def _releaser() -> None:
+        time.sleep(0.12)
+        handler._release_interview_logger_owner(token, "backend", owner_id=owner_old)
+
+    write_thread = threading.Thread(target=_writer)
+    release_thread = threading.Thread(target=_releaser)
+    write_thread.start()
+    release_thread.start()
+    write_thread.join()
+    release_thread.join()
+    time.sleep(0.6)
+
+    log_file = tmp_path / "data" / "storage" / "interview_logs" / token / "backend.log"
+    content = log_file.read_text(encoding="utf-8")
+    indexes = {
+        int(match)
+        for match in re.findall(r"\[new-run\] i=(\d+)", content)
+    }
+    assert 0 in indexes
+    assert 11 in indexes
+
+    handler._release_interview_logger_owner(token, "backend", owner_id=owner_new)
+    handler._release_interview_loggers_for_token(token)
 
 
 def test_persistence_process_logs_error_on_final_failure(monkeypatch):
@@ -773,7 +882,11 @@ def test_scoring_queue_process_marks_failed_when_scorer_errors(monkeypatch):
 
     monkeypatch.setattr(handler, "InterviewScorer", _BrokenScorer)
     monkeypatch.setattr(handler, "SCORING_DEBUG_LOG_ENABLED", True)
-    monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: _CaptureInterviewLogger())
+    monkeypatch.setattr(
+        handler,
+        "_acquire_interview_logger",
+        lambda *_args, **_kwargs: _CaptureInterviewLogger(),
+    )
     monkeypatch.setattr(
         handler,
         "save_interview_scorecard_failed",
@@ -839,7 +952,11 @@ def test_scoring_queue_process_writes_interview_debug_logs_on_success(monkeypatc
 
     monkeypatch.setattr(handler, "InterviewScorer", _FakeScorer)
     monkeypatch.setattr(handler, "SCORING_DEBUG_LOG_ENABLED", True)
-    monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: _CaptureInterviewLogger())
+    monkeypatch.setattr(
+        handler,
+        "_acquire_interview_logger",
+        lambda *_args, **_kwargs: _CaptureInterviewLogger(),
+    )
     monkeypatch.setattr(
         handler,
         "save_interview_scorecard_success",

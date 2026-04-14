@@ -180,8 +180,8 @@ def test_handler_close_source_client_ws(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -230,8 +230,8 @@ def test_handler_closes_ws_with_completed_code_on_normal_end(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -285,8 +285,8 @@ def test_handler_close_source_asr_upstream(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
         monkeypatch.setattr(handler, "server_logger", SimpleNamespace(info=lambda *a, **k: None, error=lambda *a, **k: None))
 
         await handler.handler(ws, f"/?token={token}")
@@ -346,8 +346,8 @@ def test_handler_skips_completed_when_token_reacquired(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -462,8 +462,8 @@ def test_handler_marks_hangup_reason_when_client_hangup_event_received(monkeypat
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
         monkeypatch.setattr(
             handler,
             "convert_binary_to_web_event_to_binary",
@@ -518,8 +518,8 @@ def test_handler_marks_hangup_reason_from_ws_close_frame_fallback(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -581,8 +581,8 @@ def test_handler_marks_hangup_reason_from_ws_close_frame_when_close_source_is_as
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -616,6 +616,8 @@ def test_handler_does_not_mark_hangup_from_close_reason_only(monkeypatch):
             return None
 
         async def handler_loop(self, _inputs):
+            async for _ in _inputs:
+                break
             if False:
                 yield WebEvent.from_payload(TTSDonePayload())
 
@@ -639,8 +641,8 @@ def test_handler_does_not_mark_hangup_from_close_reason_only(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -688,8 +690,8 @@ def test_handler_marks_error_reason_after_close_source_normalization(monkeypatch
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -746,8 +748,8 @@ def test_handler_releases_when_wait_closed_finishes_first(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 
@@ -792,8 +794,8 @@ def test_handler_waits_for_latest_checkpoint_flush_before_delete(monkeypatch):
         monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
         monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
         monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", runtime_checkpoints)
-        monkeypatch.setattr(handler, "_release_interview_loggers_for_token", lambda _t: 1)
-        monkeypatch.setattr(handler, "_get_interview_logger", lambda *_args: interview_logger)
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
 
         await handler.handler(ws, f"/?token={token}")
 

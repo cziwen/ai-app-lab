@@ -14,11 +14,12 @@ import contextlib
 import json
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import uvicorn
@@ -134,6 +135,8 @@ SCORING_LOG_RAW_PREVIEW_CHARS = max(
 
 _INTERVIEW_LOGGER_CACHE: Dict[Tuple[str, str], logging.Logger] = {}
 _INTERVIEW_LOGGER_LAST_USED: Dict[Tuple[str, str], float] = {}
+_INTERVIEW_LOGGER_ACTIVE_OWNERS: Dict[Tuple[str, str], Set[str]] = {}
+_INTERVIEW_LOGGER_LOCK = threading.RLock()
 
 
 def _build_file_handler(log_path: str, log_format: str):
@@ -172,44 +175,6 @@ def _ensure_server_log_handler() -> None:
 _ensure_server_log_handler()
 
 
-def _get_interview_logger(token: str, stream: str) -> logging.Logger:
-    if stream not in ("backend", "frontend"):
-        raise ValueError(f"unsupported stream: {stream}")
-
-    cache_key = (token, stream)
-    cached = _INTERVIEW_LOGGER_CACHE.get(cache_key)
-    if cached:
-        _INTERVIEW_LOGGER_LAST_USED[cache_key] = monotonic()
-        return cached
-
-    _prune_interview_logger_cache()
-
-    interview_dir = os.path.join(str(INTERVIEW_LOG_DIR), token)
-    os.makedirs(interview_dir, exist_ok=True)
-
-    log_path = os.path.join(interview_dir, f"{stream}.log")
-    logger = logging.getLogger(f"interview.{stream}.{token}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    handler_exists = any(
-        os.path.abspath(getattr(handler, "baseFilename", "")) == os.path.abspath(log_path)
-        for handler in logger.handlers
-    )
-    if not handler_exists:
-        fmt = (
-            "%(asctime)s - %(levelname)s - %(message)s"
-            if stream == "backend"
-            else "%(asctime)s - %(message)s"
-        )
-        logger.addHandler(_build_file_handler(log_path, fmt))
-
-    _INTERVIEW_LOGGER_CACHE[cache_key] = logger
-    _INTERVIEW_LOGGER_LAST_USED[cache_key] = monotonic()
-    _prune_interview_logger_cache()
-    return logger
-
-
 def _close_logger_handlers(logger: logging.Logger) -> None:
     for logger_handler in list(logger.handlers):
         with contextlib.suppress(Exception):
@@ -217,44 +182,218 @@ def _close_logger_handlers(logger: logging.Logger) -> None:
         logger.removeHandler(logger_handler)
 
 
+class InterviewLoggerManager:
+    def __init__(
+        self,
+        *,
+        cache: Dict[Tuple[str, str], logging.Logger],
+        last_used: Dict[Tuple[str, str], float],
+        active_owners: Dict[Tuple[str, str], Set[str]],
+        lock: threading.RLock,
+    ) -> None:
+        self._cache = cache
+        self._last_used = last_used
+        self._active_owners = active_owners
+        self._lock = lock
+
+    def acquire(self, token: str, stream: str, owner_id: Optional[str]) -> logging.Logger:
+        self._validate_stream(stream)
+        normalized_owner = self._normalize_owner(owner_id)
+        cache_key = (token, stream)
+
+        with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached is None:
+                self._prune_idle_and_overflow_locked(now=monotonic())
+                cached = self._build_logger(token, stream)
+                self._cache[cache_key] = cached
+                self._active_owners.setdefault(cache_key, set())
+            owners = self._active_owners.setdefault(cache_key, set())
+            if normalized_owner:
+                owners.add(normalized_owner)
+            self._last_used[cache_key] = monotonic()
+            ref_count = len(owners)
+            self._prune_idle_and_overflow_locked(now=monotonic())
+
+        server_logger.info(
+            "event=interview_logger.acquire token=%s stream=%s owner_id=%s ref_count=%s",
+            token,
+            stream,
+            normalized_owner or "-",
+            ref_count,
+        )
+        return cached
+
+    def release(self, token: str, stream: str, owner_id: Optional[str]) -> bool:
+        self._validate_stream(stream)
+        normalized_owner = self._normalize_owner(owner_id)
+        cache_key = (token, stream)
+
+        with self._lock:
+            logger = self._cache.get(cache_key)
+            if logger is None:
+                return False
+            owners = self._active_owners.setdefault(cache_key, set())
+            removed = normalized_owner in owners if normalized_owner else False
+            if removed:
+                owners.remove(normalized_owner)
+            self._last_used[cache_key] = monotonic()
+            ref_count = len(owners)
+            self._prune_idle_and_overflow_locked(now=monotonic())
+
+        server_logger.info(
+            "event=interview_logger.release token=%s stream=%s owner_id=%s ref_count=%s released=%s",
+            token,
+            stream,
+            normalized_owner or "-",
+            ref_count,
+            removed,
+        )
+        return removed
+
+    def prune_idle_and_overflow(self) -> None:
+        with self._lock:
+            self._prune_idle_and_overflow_locked(now=monotonic())
+
+    def force_release(self, token: str, stream: str) -> bool:
+        self._validate_stream(stream)
+        with self._lock:
+            return self._close_cache_key_locked((token, stream), reason="force_release")
+
+    def force_release_for_token(self, token: str) -> int:
+        released = 0
+        for stream in ("backend", "frontend"):
+            if self.force_release(token, stream):
+                released += 1
+        return released
+
+    @staticmethod
+    def _normalize_owner(owner_id: Optional[str]) -> str:
+        return str(owner_id or "").strip()
+
+    @staticmethod
+    def _validate_stream(stream: str) -> None:
+        if stream not in ("backend", "frontend"):
+            raise ValueError(f"unsupported stream: {stream}")
+
+    def _build_logger(self, token: str, stream: str) -> logging.Logger:
+        interview_dir = os.path.join(str(INTERVIEW_LOG_DIR), token)
+        os.makedirs(interview_dir, exist_ok=True)
+
+        log_path = os.path.join(interview_dir, f"{stream}.log")
+        logger = logging.getLogger(f"interview.{stream}.{token}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+        handler_exists = any(
+            os.path.abspath(getattr(handler, "baseFilename", ""))
+            == os.path.abspath(log_path)
+            for handler in logger.handlers
+        )
+        if not handler_exists:
+            fmt = (
+                "%(asctime)s - %(levelname)s - %(message)s"
+                if stream == "backend"
+                else "%(asctime)s - %(message)s"
+            )
+            logger.addHandler(_build_file_handler(log_path, fmt))
+        return logger
+
+    def _close_cache_key_locked(self, cache_key: Tuple[str, str], *, reason: str) -> bool:
+        logger = self._cache.pop(cache_key, None)
+        self._last_used.pop(cache_key, None)
+        owners = self._active_owners.pop(cache_key, set())
+        if not logger:
+            return False
+        _close_logger_handlers(logger)
+        token, stream = cache_key
+        server_logger.info(
+            "event=interview_logger.close token=%s stream=%s reason=%s ref_count=%s",
+            token,
+            stream,
+            reason,
+            len(owners),
+        )
+        return True
+
+    def _prune_idle_and_overflow_locked(self, *, now: float) -> None:
+        stale_keys = [
+            cache_key
+            for cache_key, last_used in self._last_used.items()
+            if now - last_used >= INTERVIEW_LOGGER_IDLE_SECONDS
+        ]
+        for cache_key in stale_keys:
+            owners = self._active_owners.get(cache_key, set())
+            if owners:
+                token, stream = cache_key
+                server_logger.info(
+                    "event=interview_logger.prune_skip_active token=%s stream=%s reason=idle ref_count=%s",
+                    token,
+                    stream,
+                    len(owners),
+                )
+                continue
+            self._close_cache_key_locked(cache_key, reason="idle")
+
+        if len(self._cache) <= INTERVIEW_LOGGER_CACHE_MAX:
+            return
+
+        ordered = sorted(
+            self._last_used.items(),
+            key=lambda item: item[1],
+        )
+        overflow_count = len(self._cache) - INTERVIEW_LOGGER_CACHE_MAX
+        for cache_key, _ in ordered:
+            if overflow_count <= 0:
+                break
+            owners = self._active_owners.get(cache_key, set())
+            if owners:
+                token, stream = cache_key
+                server_logger.info(
+                    "event=interview_logger.prune_skip_active token=%s stream=%s reason=overflow ref_count=%s",
+                    token,
+                    stream,
+                    len(owners),
+                )
+                continue
+            if self._close_cache_key_locked(cache_key, reason="overflow"):
+                overflow_count -= 1
+
+
+INTERVIEW_LOGGERS = InterviewLoggerManager(
+    cache=_INTERVIEW_LOGGER_CACHE,
+    last_used=_INTERVIEW_LOGGER_LAST_USED,
+    active_owners=_INTERVIEW_LOGGER_ACTIVE_OWNERS,
+    lock=_INTERVIEW_LOGGER_LOCK,
+)
+
+
+def _acquire_interview_logger(
+    token: str, stream: str, *, owner_id: Optional[str]
+) -> logging.Logger:
+    return INTERVIEW_LOGGERS.acquire(token, stream, owner_id)
+
+
+def _release_interview_logger_owner(
+    token: str, stream: str, *, owner_id: Optional[str]
+) -> bool:
+    return INTERVIEW_LOGGERS.release(token, stream, owner_id)
+
+
+def _get_interview_logger(token: str, stream: str) -> logging.Logger:
+    return _acquire_interview_logger(token, stream, owner_id=None)
+
+
 def _release_interview_logger(token: str, stream: str) -> bool:
-    cache_key = (token, stream)
-    logger = _INTERVIEW_LOGGER_CACHE.pop(cache_key, None)
-    _INTERVIEW_LOGGER_LAST_USED.pop(cache_key, None)
-    if not logger:
-        return False
-    _close_logger_handlers(logger)
-    return True
+    return INTERVIEW_LOGGERS.force_release(token, stream)
 
 
 def _release_interview_loggers_for_token(token: str) -> int:
-    released = 0
-    for stream in ("backend", "frontend"):
-        if _release_interview_logger(token, stream):
-            released += 1
-    return released
+    return INTERVIEW_LOGGERS.force_release_for_token(token)
 
 
 def _prune_interview_logger_cache() -> None:
-    now = monotonic()
-    stale_keys = [
-        cache_key
-        for cache_key, last_used in _INTERVIEW_LOGGER_LAST_USED.items()
-        if now - last_used >= INTERVIEW_LOGGER_IDLE_SECONDS
-    ]
-    for cache_key in stale_keys:
-        _release_interview_logger(*cache_key)
-
-    if len(_INTERVIEW_LOGGER_CACHE) <= INTERVIEW_LOGGER_CACHE_MAX:
-        return
-
-    ordered = sorted(
-        _INTERVIEW_LOGGER_LAST_USED.items(),
-        key=lambda item: item[1],
-    )
-    overflow_count = len(_INTERVIEW_LOGGER_CACHE) - INTERVIEW_LOGGER_CACHE_MAX
-    for cache_key, _ in ordered[:overflow_count]:
-        _release_interview_logger(*cache_key)
+    INTERVIEW_LOGGERS.prune_idle_and_overflow()
 
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8888"))
@@ -509,9 +648,14 @@ class ScoringQueue:
     async def _process(self, task: ScoringTask) -> None:
         started = monotonic()
         debug_logger = None
+        debug_owner_id = f"scoring:{task.token}:{uuid.uuid4()}"
         if SCORING_DEBUG_LOG_ENABLED:
             try:
-                debug_logger = _get_interview_logger(task.token, "backend")
+                debug_logger = _acquire_interview_logger(
+                    task.token,
+                    "backend",
+                    owner_id=debug_owner_id,
+                )
             except Exception as logger_err:
                 self.logger.warning(
                     "event=interview_scoring.debug_logger_unavailable token=%s error=%s",
@@ -726,6 +870,13 @@ class ScoringQueue:
                 score_err,
                 exc_info=True,
             )
+        finally:
+            if debug_logger is not None:
+                _release_interview_logger_owner(
+                    task.token,
+                    "backend",
+                    owner_id=debug_owner_id,
+                )
 
 
 OCCUPANCY = InterviewOccupancy(load_occupancy_config(max_active=MAX_ACTIVE_INTERVIEWS))
@@ -925,7 +1076,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     runtime_checkpoint = await asyncio.to_thread(RUNTIME_CHECKPOINTS.load, token)
     latest_runtime_checkpoint: Optional[Dict[str, Any]] = runtime_checkpoint
 
-    interview_logger = _get_interview_logger(token, "backend")
+    interview_logger = _acquire_interview_logger(
+        token,
+        "backend",
+        owner_id=ws_session_id,
+    )
     interview_log: Callable[[str], None] = interview_logger.info
     server_logger.info(
         "event=interview.started token=%s remote=%s",
@@ -1415,7 +1570,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 exc_info=True,
             )
         finally:
-            _release_interview_loggers_for_token(token)
+            _release_interview_logger_owner(
+                token,
+                "backend",
+                owner_id=ws_session_id,
+            )
 
 
 def _http_response(status_line: bytes, body: bytes, *, cors: bool = False) -> bytes:
@@ -1540,9 +1699,21 @@ async def handle_frontend_log_request(
             parsed_entries = json.loads(body)
             log_entries = _normalize_frontend_log_entries(parsed_entries)
 
-            frontend_logger = _get_interview_logger(token, "frontend")
-            for entry in log_entries:
-                frontend_logger.info(entry)
+            frontend_logger_owner_id = f"frontend_http:{uuid.uuid4()}"
+            frontend_logger = _acquire_interview_logger(
+                token,
+                "frontend",
+                owner_id=frontend_logger_owner_id,
+            )
+            try:
+                for entry in log_entries:
+                    frontend_logger.info(entry)
+            finally:
+                _release_interview_logger_owner(
+                    token,
+                    "frontend",
+                    owner_id=frontend_logger_owner_id,
+                )
             server_logger.info(
                 "event=frontend_log.accept token=%s entries=%s body_bytes=%s",
                 token,
