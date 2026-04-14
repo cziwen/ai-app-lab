@@ -505,12 +505,13 @@ else:
 # 示例: 10 场并发面试
 MAX_ACTIVE_INTERVIEWS=10
 LLM_CONCURRENT_REQUESTS=20   # 每场 2 个 LLM 调用
-QUEUE_WAIT_TIMEOUT_SECONDS=1800  # 30 分钟排队超时
+INTERVIEW_OCCUPANCY_TTL_SECONDS=30
+INTERVIEW_OCCUPANCY_HEARTBEAT_SECONDS=10
 ```
 
-### 排队优化
+### 占用模型优化
 
-**问题**: 排队体验差，用户等待时间长
+**问题**: 高并发下容易出现 `INTERVIEW_CAPACITY_FULL` 拒绝
 
 **优化策略**:
 
@@ -529,22 +530,25 @@ def get_dynamic_limit():
         return 3   # 高负载，限制并发
 ```
 
-#### B. 优先级队列
+#### B. 收紧占用 TTL 与续期策略
 ```python
-# 给重要候选人更高优先级
-class PriorityQueueWaiter:
-    priority: int  # 1=高, 2=中, 3=低
-
-# 准入时优先级高的先进
-wait_queue = PriorityQueue()  # 替代 deque
+def recommend_occupancy_window(latency_ms: int) -> tuple[int, int]:
+    # return (ttl_seconds, heartbeat_seconds)
+    if latency_ms < 2000:
+        return (20, 8)
+    if latency_ms < 5000:
+        return (30, 10)
+    return (45, 15)
 ```
 
-#### C. 预估等待时间
+#### C. 针对拒绝流量做削峰
 ```python
-def estimate_wait_time(position: int) -> int:
-    # 根据历史数据计算
-    avg_interview_duration = 600  # 10 分钟
-    return position * avg_interview_duration // MAX_ACTIVE_INTERVIEWS
+def should_temporarily_raise_capacity(
+    capacity_full_rate: float,
+    cpu_usage: float,
+    llm_wait_ms_p95: float,
+) -> bool:
+    return capacity_full_rate > 0.1 and cpu_usage < 70 and llm_wait_ms_p95 < 1200
 ```
 
 ### LLM 限流策略
@@ -586,8 +590,8 @@ while true; do
     echo "Active interviews:"
     grep "interview.started" logs/backend-*.log | tail -5 | wc -l
 
-    echo "Queue depth:"
-    grep "QueueEntered" logs/backend-*.log | tail -1 | grep -oP 'position=\K\d+'
+    echo "Capacity full rejects (recent 5 lines):"
+    grep "event=interview.rejected reason=capacity_full" logs/backend-*.log | tail -5 | wc -l
 
     echo "Recent latencies:"
     grep "TurnTrace" logs/backend-*.log | tail -5 | grep -oP 'rec_to_first_sentence_ms=\K\d+'
@@ -656,11 +660,11 @@ groups:
         annotations:
           summary: "P95 latency exceeds 8s"
 
-      - alert: HighQueueDepth
-        expr: interview_queue_depth > 10
+      - alert: HighCapacityRejectRate
+        expr: rate(interview_capacity_full_total[5m]) > 0.1
         for: 3m
         annotations:
-          summary: "Queue depth > 10"
+          summary: "Capacity full reject rate > 10%"
 
       - alert: LLMSlotStarvation
         expr: llm_slot_wait_time_ms_avg > 2000

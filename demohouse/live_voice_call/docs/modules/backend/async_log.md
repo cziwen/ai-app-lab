@@ -300,7 +300,5 @@ signal.signal(signal.SIGTERM, signal_handler)
 ## 相关测试
 
 ```bash
-pytest backend/tests/test_async_log_queue.py
-pytest backend/tests/test_async_log_rotation.py
-pytest backend/tests/test_async_log_close.py
+pytest backend/tests/test_async_log.py
 ```

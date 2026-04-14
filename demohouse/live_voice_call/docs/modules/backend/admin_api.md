@@ -183,6 +183,6 @@ curl -X POST http://localhost:8890/api/admin/interviews \
 
 ```bash
 pytest backend/tests/test_admin_api_csv.py
-pytest backend/tests/test_admin_api_auth.py
-pytest backend/tests/test_admin_api_interview.py
+pytest backend/tests/test_admin_api_interview_checkins.py
+pytest backend/tests/test_admin_login_guard.py
 ```

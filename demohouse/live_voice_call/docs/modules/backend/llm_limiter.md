@@ -216,6 +216,5 @@ async def judge_slot():
 ## 相关测试
 
 ```bash
-pytest backend/tests/test_llm_limiter_concurrency.py
-pytest backend/tests/test_llm_limiter_stress.py
+pytest backend/tests/test_llm_limiter.py
 ```

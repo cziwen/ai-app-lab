@@ -21,9 +21,10 @@
 
 ### 相关模型
 
-本项目采用双 LLM 架构设计：
+本项目采用双 LLM + 可选评分 LLM（LLM3）架构设计：
 - **Doubao-pro-32k (LLM #1 - Judge)**：评判候选人回答质量，决定是否需要追问
 - **Doubao-pro-32k (LLM #2 - Interviewer)**：生成自然流畅的面试官对话内容
+- **Doubao-pro-32k (LLM #3 - Scoring，可选)**：按“场景连续段”异步评分并写入 scorecard（未配置时会自动跳过）
 - **Doubao-语音合成 (TTS)**：根据用户偏好的音色定制生成拟人化、逼真的角色语音输出
 - **Doubao-流式语音识别 (ASR)**：基于 SAUC 协议的大模型语音识别，实时转写用户语音
 
@@ -48,7 +49,7 @@
 4. **性能监控**
    - **Turn Trace**：详细记录每轮对话的性能指标
    - **关键指标**：judge_ms、llm2_ttft_ms、rec_to_first_sentence_ms
-   - **延迟优化**：ASR 静默检测默认 6 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，建议保持低于上游 8 秒超时）、流式 TTS 合成
+   - **延迟优化**：ASR 静默检测默认 6 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，当前实现最大钳制为 7000ms）、流式 TTS 合成
 
 ### 流程架构
 
@@ -89,6 +90,9 @@
     export LLM1_ENDPOINT_ID={YOUR_ARK_LLM1_ENDPOINT_ID}  # Judge LLM - 评判回答
     export LLM2_ENDPOINT_ID={YOUR_ARK_LLM2_ENDPOINT_ID}  # Interviewer LLM - 生成对话
 
+    # 可选：离线评分模型（LLM3，不影响实时通话主链路）
+    export LLM3_ENDPOINT_ID={YOUR_ARK_LLM3_ENDPOINT_ID}
+
     # ASR 配置（SAUC 协议）
     export ASR_APP_ID={YOUR_ASR_APP_ID}
     export ASR_ACCESS_TOKEN={YOUR_ASR_ACCESS_TOKEN}
@@ -113,6 +117,10 @@
     # 推理努力程度（仅在 THINKING_TYPE=enabled 时生效）
     export LLM1_REASONING_EFFORT=minimal  # minimal|low|medium|high
     export LLM2_REASONING_EFFORT=minimal  # minimal|low|medium|high
+
+    # 可选：LLM3 推理参数
+    export LLM3_THINKING_TYPE=disabled
+    export LLM3_REASONING_EFFORT=minimal
     ```
 
     **高级配置（可选）**：
@@ -152,13 +160,13 @@
     export ASYNC_LOG_CLOSE_TIMEOUT_SECONDS=5    # 关闭超时
 
     # 面试日志缓存
-    export INTERVIEW_LOGGER_CACHE_MAX=100       # 最大缓存数
-    export INTERVIEW_LOGGER_IDLE_SECONDS=1800   # 空闲超时
+    export INTERVIEW_LOGGER_CACHE_MAX=1000      # 最大缓存数
+    export INTERVIEW_LOGGER_IDLE_SECONDS=900    # 空闲超时（秒）
 
     # 前端日志限制
-    export FRONTEND_LOG_MAX_BODY_BYTES=1048576  # 最大请求体
-    export FRONTEND_LOG_MAX_ENTRIES=100         # 最大条目数
-    export FRONTEND_LOG_MAX_ENTRY_CHARS=10000   # 单条最大长度
+    export FRONTEND_LOG_MAX_BODY_BYTES=262144   # 最大请求体（字节）
+    export FRONTEND_LOG_MAX_ENTRIES=200         # 最大条目数
+    export FRONTEND_LOG_MAX_ENTRY_CHARS=2000    # 单条最大长度
     ```
 
 3. 启动服务端
@@ -201,7 +209,7 @@
    docker compose up -d --build backend
    ```
 
-   后端启动前会自动执行一次 `LLM1 + LLM2 + ASR + TTS + Redis` 开机自检。
+   后端启动前会自动执行一次开机自检：`LLM1 + LLM2 + ASR + TTS + Redis`，以及可选 `LLM3`（仅在配置 `LLM3_ENDPOINT_ID` 时检查）。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
    Redis 也是强依赖：`REDIS_URL` 缺失、Redis 未启动、或 Redis 配置不满足（`maxmemory=256MB` 且 `maxmemory-policy=allkeys-lru`）都会启动失败。

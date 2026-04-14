@@ -16,7 +16,7 @@
 - `SentenceRecognized`：停止录音，写入用户句子。
 - `TTSSentenceStart`：流式拼接机器人句子并标记 bot speaking。
 - `TTSDone`：本轮播报结束，触发门控判断与 watchdog（默认 1500ms）。
-- `BotError`/`Queue*`：展示提示并复位状态。
+- `BotError`：展示提示并复位状态（如 `TOKEN_ALREADY_WAITING`、`INTERVIEW_CAPACITY_FULL`、`SERVICE_UNAVAILABLE`）。
 
 ## 录音门控与防死锁
 - 录音启动门控条件：`ttsDoneRef && playbackStoppedRef`。
@@ -50,9 +50,9 @@
 - 检查是否收到 `TTSSentenceStart/TTSDone`。
 - 检查 `BotError` payload 中 code/message。
 
-3. 现象：排队提示一直不结束。
-- 检查后端是否发送 `QueueAdmitted`。
-- 联动排查后端 `AdmissionController` 的 active/queue 状态。
+3. 现象：进入面试前即被拒绝或提示服务繁忙。
+- 检查 `BotError` 的 `code/message`（如 `TOKEN_ALREADY_WAITING`、`INTERVIEW_CAPACITY_FULL`）。
+- 联动排查后端 `InterviewOccupancy` 配置与 Redis 连接状态（`MAX_ACTIVE_INTERVIEWS`、`INTERVIEW_OCCUPANCY_*`）。
 
 ## 手工验证
 - 基础链路：连接 -> 说话 -> 收到识别文本 -> 收到流式 bot 文本 -> 播放结束后恢复下一轮录音。

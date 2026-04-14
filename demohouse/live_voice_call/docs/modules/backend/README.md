@@ -1,7 +1,7 @@
 # Backend 模块文档索引
 
 ## 说明
-- 本目录覆盖 backend 根目录全部 Python 模块，面向排障与维护。
+- 本目录覆盖 backend 的核心运行模块（主链路优先），面向排障与维护。
 
 ## 模块列表
 - [backend/__init__.py](./__init__.md)
