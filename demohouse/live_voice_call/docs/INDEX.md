@@ -18,7 +18,7 @@
 ## 后端模块文档
 
 ### 核心服务
-- [interview_flow.md](modules/backend/interview_flow.md) - 面试流程状态机（8 状态、强制转换、配置）
+- [interview_flow.md](modules/backend/interview_flow.md) - 面试流程状态机（9 状态、强制转换、配置）
 - [service.md](modules/backend/service.md) - VoiceBotService 核心服务（双 LLM 架构、事件循环、回调）
 - [handler.md](modules/backend/handler.md) - WebSocket 处理器（准入控制、持久化队列、日志架构）
 

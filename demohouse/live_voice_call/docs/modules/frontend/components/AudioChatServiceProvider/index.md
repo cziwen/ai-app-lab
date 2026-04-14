@@ -189,7 +189,15 @@ const { wsUrl, setWsUrl } = useWsUrl();
 ```typescript
 import { useVoiceBotService } from '@/components/AudioChatServiceProvider/hooks/useVoiceBotService';
 
-const { handleConnect, disconnectSession, shutdownSession } = useVoiceBotService();
+const {
+  handleConnect,
+  disconnectSession,
+  shutdownSession,
+  notifyClientHangup,
+  notifyClientEndAnswer,
+  isRecovering,
+  reconnectExhausted,
+} = useVoiceBotService();
 ```
 
 ### useAudioRecorder

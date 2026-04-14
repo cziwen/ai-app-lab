@@ -1,59 +1,54 @@
 # frontend/src/components/AudioChatServiceProvider/hooks/useVoiceBotService.ts
 
 ## 模块职责
-- 封装前端与语音机器人服务的会话控制：连接、断开、消息分发、状态同步。
+- 管理实时语音会话生命周期：连接、断开、重连、收发事件、音频门控。
+- 维护“播报完成后再开录音”的门控，避免 TTS 与录音互相抢占。
+- 处理 iOS 回前台音频恢复与 watchdog 降级。
 
-## 入口与调用方
-- 由 `useCallController` 调用。
-- 内部创建并持有 `VoiceBotService` 实例。
+## 对外接口（实际返回）
+- `handleConnect`
+- `disconnectSession`
+- `shutdownSession`
+- `notifyClientHangup`
+- `notifyClientEndAnswer`
+- `isRecovering`
+- `reconnectExhausted`
 
-## 对外接口（导出项）
-- `useVoiceBotService`
-- 返回：`handleConnect`、`disconnectSession`、`shutdownSession`
+## 建连与鉴权参数
+- 使用 `appendTokenToWsUrl(...)` 自动拼接：
+  - `token`
+  - `client_id`（页面级固定 ID，用于后端重连接管）
+- `client_id` 会在整个页面生命周期内复用，不会每次重连生成新值。
+
+## 自动重连（当前实现）
+- 开启条件：非手动断开，且 `autoReconnectEnabled=true`。
+- 重连退避：`RECONNECT_DELAYS_MS = [500, 1000, 2000, 3000]` ms。
+- 总时限：`FRONTEND_RECONNECT_MAX_SECONDS`（默认 `15` 秒，可由 `MODERN_PUBLIC_FRONTEND_RECONNECT_MAX_SECONDS` 或 `FRONTEND_RECONNECT_MAX_SECONDS` 配置）。
+- 超时后：
+  - 停止重连
+  - `reconnectExhausted=true`
+  - 由上层 `useCallController` 触发自动结束流程。
+
+## 关闭事件处理
+- `onClose` 默认会尝试自动重连。
+- 若关闭帧为面试正常结束（`code=4001` 且 reason 为空或 `interview_completed`），则不重连。
+- 手动断开/挂断会显式关闭重连并清理状态。
 
 ## 关键事件处理
-- `BotReady`：标记 WS 可用，初始化 bot 消息。
-- `SentenceRecognized`：停止录音，写入用户句子。
-- `TTSSentenceStart`：流式拼接机器人句子并标记 bot speaking。
-- `TTSDone`：本轮播报结束，触发门控判断与 watchdog（默认 1500ms）。
-- `BotError`：展示提示并复位状态（如 `TOKEN_ALREADY_WAITING`、`INTERVIEW_CAPACITY_FULL`、`SERVICE_UNAVAILABLE`）。
+- `BotReady`：标记 WS ready，初始化 bot 消息占位。
+- `SentencePartialRecognized`：更新候选人实时字幕。
+- `SentenceRecognized`：停止录音，写入候选人文本与消息列表。
+- `TTSSentenceStart`：进入 bot 说话态，拼接 bot 文本。
+- `TTSDone`：标记播报完成，触发录音门控和 playback watchdog。
+- `BotError`：停止重连，提示错误并重置会话状态。
 
-## 录音门控与防死锁
-- 录音启动门控条件：`ttsDoneRef && playbackStoppedRef`。
-- `playbackStoppedRef` 在 `onStopPlayAudio` 置位；若 iOS 焦点切换导致播放停在 pause，可能收不到 ended/error。
-- 当前实现增加三层兜底：
-  1. `visibilitychange/pageshow/focus` 回前台时调用 `service.handleForegroundResume(...)`。
-  2. `TTSDone` 后启动 watchdog；若检测 `media-element` 处于 paused 卡住态，主动二次恢复。
-  3. 二次恢复仍失败时，强制置位 `playbackStoppedRef` 并执行 `maybeStartRecorder()`，避免无限等待。
+## 录音门控与 iOS 恢复
+- 门控条件：`ttsDoneRef && playbackStoppedRef`。
+- `TTSDone` 后会启动 watchdog（默认 1500ms）；若检测到 `media-element` 假播放卡死（`playing=true` 但 `audio.paused=true && !ended`）：
+  - 先尝试 `handleForegroundResume('tts_watchdog')`
+  - 若仍卡住，强制放行下一轮录音（置 `playbackStoppedRef=true`）。
+- 生命周期恢复触发：`visibilitychange`、`pageshow`、`focus`。
 
-导出辅助判定（用于测试）：
-- `isStuckMediaPlayback(snapshot)`
-- `shouldRunPlaybackWatchdog(wsReady, ttsDone, playbackStopped, botTurnStarted)`
-
-## 依赖与配置
-- WS 地址来自 `useWsUrl`，并自动追加 `token` 查询参数。
-- 与录音模块 `useAudioRecorder`、文案状态模块 `useCurrentSentence` 联动。
-
-## 日志与排障
-- 所有关键事件都通过 `useLogContent` 记录：`connect`、`receive`、`bot error`。
-- 若“有连接无回复”，优先检查是否收到 `BotReady` 和 `SentenceRecognized`。
-- iOS 恢复链路重点看：
-  - `gate: playback watchdog fired ...`
-  - `gate: playback watchdog detected stuck media, trying recovery`
-  - `gate: playback watchdog forced playback stopped`
-
-## 常见故障与排查步骤
-1. 现象：连接失败。
-- 检查 WS URL、token 参数、后端 `8888` 端口。
-
-2. 现象：识别后没有机器人回答。
-- 检查是否收到 `TTSSentenceStart/TTSDone`。
-- 检查 `BotError` payload 中 code/message。
-
-3. 现象：进入面试前即被拒绝或提示服务繁忙。
-- 检查 `BotError` 的 `code/message`（如 `TOKEN_ALREADY_WAITING`、`INTERVIEW_CAPACITY_FULL`）。
-- 联动排查后端 `InterviewOccupancy` 配置与 Redis 连接状态（`MAX_ACTIVE_INTERVIEWS`、`INTERVIEW_OCCUPANCY_*`）。
-
-## 手工验证
-- 基础链路：连接 -> 说话 -> 收到识别文本 -> 收到流式 bot 文本 -> 播放结束后恢复下一轮录音。
-- iOS 回归：通话中切到外部音频 App/网页 -> 切回页面 -> 连续 3 轮问答，确认不会卡在 bot 回合末尾。
+## 相关测试
+- `frontend/src/components/AudioChatServiceProvider/hooks/useVoiceBotService.reconnect-guard.test.ts`
+- `frontend/src/components/AudioChatServiceProvider/hooks/useAudioRecorder.test.ts`

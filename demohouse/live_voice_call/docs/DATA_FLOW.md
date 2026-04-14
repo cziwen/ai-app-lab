@@ -49,3 +49,17 @@
 - `PersistenceQueue` 异步写入存储并触发 `ScoringQueue`。
 - persistence 护栏：若写入前 owner 已变化，则记录 `event=interview_persist.complete_skipped reason=token_reacquired`，跳过 `completed` 写入。
 - `ScoringQueue` 调用 LLM3 完成场景段评分。
+
+## 6. 重试与恢复
+- 前端重连：
+  - 退避间隔：`500ms -> 1000ms -> 2000ms -> 3000ms`（封顶 3000ms）。
+  - 总预算：`FRONTEND_RECONNECT_MAX_SECONDS`（默认 15 秒）。
+  - 预算耗尽后置 `reconnectExhausted=true`，上层页面触发自动结束流程。
+- 后端断连宽限：
+  - 网络断开先标记 `disconnected`（宽限 `INTERVIEW_RECONNECT_GRACE_SECONDS`，默认 30 秒），而不是立即 completed。
+  - 同 token + 相同 `client_id` 重连可接管 owner，并继续会话。
+- checkpoint 恢复：
+  - handler 会加载最近 runtime checkpoint 传给 `VoiceBotService`。
+  - service 会根据恢复状态选择 `done / wrap_up / question_start` 恢复模式。
+- 持久化重试：
+  - `PersistenceQueue` 失败时按指数退避重试（默认最多 3 次，基线 0.3 秒）。
