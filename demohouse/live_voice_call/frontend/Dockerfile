@@ -7,6 +7,8 @@ RUN corepack enable
 # Keep frontend build memory bounded on low-memory servers.
 ARG FRONTEND_NODE_OPTIONS="--max-old-space-size=512"
 ENV NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}"
+ARG MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE="false"
+ENV MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE="${MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE}"
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile

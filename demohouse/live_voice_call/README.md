@@ -358,8 +358,8 @@ docker compose down
 - 候选人面试链接基址通过 `INTERVIEW_BASE_DOMAIN` 配置（只填域名，例如 `https://smartinterview.cn`）
 - 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认同源地址）
 - 前端可通过以下开关控制通话体验（默认 `false`）：
-  - `MODERN_PUBLIC_MANUAL_END_ANSWER_ENABLED`：显示“结束本题”按钮（仅录音时显示），用于手动收口
   - `MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE`：显示候选人实时字幕（ASR partial/final）
+  - 若使用 Docker `gateway`，修改以上 `MODERN_PUBLIC_*` 后需重建前端镜像（这些变量在构建期注入）
 
 ## 准入与错误码行为（当前版本）
 

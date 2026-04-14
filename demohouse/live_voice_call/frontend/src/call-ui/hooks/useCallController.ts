@@ -59,13 +59,6 @@ const resolveBooleanEnv = (
   return defaultValue;
 };
 
-export const resolveManualEndAnswerEnabled = () =>
-  resolveBooleanEnv(
-    'MODERN_PUBLIC_MANUAL_END_ANSWER_ENABLED',
-    'MANUAL_END_ANSWER_ENABLED',
-    false,
-  );
-
 export const resolveLiveSubtitleEnabled = () =>
   resolveBooleanEnv(
     'MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE',
@@ -73,7 +66,6 @@ export const resolveLiveSubtitleEnabled = () =>
     false,
   );
 
-const MANUAL_END_ANSWER_ENABLED = resolveManualEndAnswerEnabled();
 const ENABLE_LIVE_SUBTITLE = resolveLiveSubtitleEnabled();
 
 const formatDuration = (seconds: number) => {
@@ -390,11 +382,9 @@ export const useCallController = (): CallController => {
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
   const isInCall = mode === 'mock' ? mockInCall : realInCall;
-  const showEndAnswerButton =
-    mode === 'real' && userSpeaking && MANUAL_END_ANSWER_ENABLED;
+  const showEndAnswerButton = mode === 'real' && userSpeaking;
   const endAnswerEnabled =
-    showEndAnswerButton &&
-    (MANUAL_END_ANSWER_ENABLED || currentUserSentence.trim().length > 0);
+    showEndAnswerButton && currentUserSentence.trim().length > 0;
   const showLiveSubtitle = ENABLE_LIVE_SUBTITLE;
   const interviewerActive = botSpeaking || botAudioPlaying;
   const interviewerSpeaking =
@@ -453,6 +443,10 @@ export const useCallController = (): CallController => {
         return;
       case 'endAnswer':
         if (mode !== 'real' || !showEndAnswerButton) {
+          return;
+        }
+        if (!endAnswerEnabled) {
+          Message.warning('请先说出可识别内容后再结束本题');
           return;
         }
         recStop();

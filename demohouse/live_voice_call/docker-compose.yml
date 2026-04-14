@@ -135,6 +135,8 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE: ${MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE:-false}
     container_name: live-voice-gateway
     depends_on:
       - backend
