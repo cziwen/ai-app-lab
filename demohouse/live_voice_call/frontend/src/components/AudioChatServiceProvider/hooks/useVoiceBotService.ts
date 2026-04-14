@@ -598,6 +598,7 @@ export const useVoiceBotService = () => {
       onClose: event => {
         clearPlaybackWatchdog();
         log(`ws closed code=${event.code} reason=${event.reason || '-'}`);
+        recStop();
         resetWsState();
         if (isInterviewCompletedSocketClose(event)) {
           autoReconnectEnabledRef.current = false;
