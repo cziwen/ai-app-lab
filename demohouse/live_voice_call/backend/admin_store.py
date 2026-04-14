@@ -2736,6 +2736,304 @@ def _build_canonical_events_from_turn_events(
     return events
 
 
+def _turn_question_key(question_id: str, question_index: int) -> str:
+    normalized_question_id = str(question_id or "").strip()
+    if normalized_question_id:
+        return normalized_question_id
+    if question_index > 0:
+        return f"qidx:{question_index}"
+    return "-"
+
+
+def _build_turn_match_key(
+    *,
+    role: str,
+    text: str,
+    question_id: str,
+    question_index: int,
+    question_epoch: int,
+) -> Optional[Tuple[str, str, int, str]]:
+    normalized_role = str(role or "").strip()
+    normalized_text = _normalize_turn_text_for_dedupe(text)
+    if normalized_role not in {"candidate", "interviewer"} or not normalized_text:
+        return None
+    return (
+        normalized_role,
+        _turn_question_key(question_id, max(0, int(question_index or 0))),
+        max(0, int(question_epoch or 0)),
+        normalized_text,
+    )
+
+
+def _canonical_event_match_key(
+    event: Dict[str, Any],
+) -> Optional[Tuple[str, str, int, str]]:
+    if not isinstance(event, dict):
+        return None
+    try:
+        question_index = int(event.get("question_index", 0) or 0)
+    except (TypeError, ValueError):
+        question_index = 0
+    try:
+        question_epoch = int(event.get("question_epoch", 0) or 0)
+    except (TypeError, ValueError):
+        question_epoch = 0
+    return _build_turn_match_key(
+        role=str(event.get("role", "") or "").strip(),
+        text=str(event.get("content", "") or "").strip(),
+        question_id=str(event.get("question_id", "") or "").strip(),
+        question_index=question_index,
+        question_epoch=question_epoch,
+    )
+
+
+def _turn_event_row_match_key(
+    row: sqlite3.Row,
+) -> Optional[Tuple[str, str, int, str]]:
+    try:
+        question_index = int(row["question_index"] or 0)
+    except (TypeError, ValueError):
+        question_index = 0
+    try:
+        question_epoch = int(row["question_epoch"] or 0)
+    except (TypeError, ValueError):
+        question_epoch = 0
+    return _build_turn_match_key(
+        role=str(row["role"] or "").strip(),
+        text=str(row["text"] or "").strip(),
+        question_id=str(row["question_id"] or "").strip(),
+        question_index=question_index,
+        question_epoch=question_epoch,
+    )
+
+
+def _load_turn_event_rows_with_attempt_seq_in_conn(
+    conn: sqlite3.Connection,
+    token: str,
+) -> List[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT e.id, e.seq_no, e.role, e.text, e.event_ts, e.question_id, e.question_index,
+               e.question_epoch, COALESCE(a.attempt_seq, 0) AS attempt_seq
+        FROM interview_turn_events e
+        LEFT JOIN interview_attempts a ON a.attempt_id = e.attempt_id
+        WHERE e.interview_token = ?
+          AND e.role IN ('candidate', 'interviewer')
+          AND TRIM(e.text) != ''
+        ORDER BY e.event_ts ASC, e.id ASC
+        """,
+        (token,),
+    ).fetchall()
+
+
+def _reconcile_checkpoint_tail_turn_events(
+    *,
+    canonical_events: List[Dict[str, Any]],
+    turn_event_rows: Sequence[sqlite3.Row],
+    checkpoint_attempt_seq: int,
+    checkpoint_ts: str,
+) -> Dict[str, int]:
+    if checkpoint_attempt_seq <= 0:
+        return {
+            "canonical_key_count": 0,
+            "attempt_row_count": 0,
+            "last_matched_seq": 0,
+            "tail_row_count": 0,
+            "appended_count": 0,
+        }
+
+    attempt_rows = []
+    for row in turn_event_rows:
+        try:
+            attempt_seq = int(row["attempt_seq"] or 0)
+        except (TypeError, ValueError):
+            attempt_seq = 0
+        if attempt_seq != checkpoint_attempt_seq:
+            continue
+        attempt_rows.append(row)
+    attempt_rows.sort(
+        key=lambda row: (
+            int(row["seq_no"] or 0),
+            int(row["id"] or 0),
+        )
+    )
+    if not attempt_rows:
+        return {
+            "canonical_key_count": 0,
+            "attempt_row_count": 0,
+            "last_matched_seq": 0,
+            "tail_row_count": 0,
+            "appended_count": 0,
+        }
+
+    canonical_keys: List[Tuple[str, str, int, str]] = []
+    for event in canonical_events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_attempt_seq = int(event.get("attempt_seq", 0) or 0)
+        except (TypeError, ValueError):
+            event_attempt_seq = 0
+        if event_attempt_seq != checkpoint_attempt_seq:
+            continue
+        key = _canonical_event_match_key(event)
+        if key is not None:
+            canonical_keys.append(key)
+
+    last_matched_seq = 0
+    if canonical_keys:
+        key_idx = 0
+        for row in attempt_rows:
+            if key_idx >= len(canonical_keys):
+                break
+            row_key = _turn_event_row_match_key(row)
+            if row_key is None:
+                continue
+            if row_key != canonical_keys[key_idx]:
+                continue
+            try:
+                last_matched_seq = max(last_matched_seq, int(row["seq_no"] or 0))
+            except (TypeError, ValueError):
+                pass
+            key_idx += 1
+
+    tail_rows: List[sqlite3.Row] = []
+    if last_matched_seq > 0:
+        for row in attempt_rows:
+            try:
+                seq_no = int(row["seq_no"] or 0)
+            except (TypeError, ValueError):
+                seq_no = 0
+            if seq_no > last_matched_seq:
+                tail_rows.append(row)
+    else:
+        checkpoint_dt = parse_iso_or_none(checkpoint_ts)
+        if checkpoint_dt is not None:
+            for row in attempt_rows:
+                event_dt = parse_iso_or_none(str(row["event_ts"] or ""))
+                if event_dt is None or event_dt < checkpoint_dt:
+                    continue
+                tail_rows.append(row)
+
+    existing_keys = {
+        key for key in (_canonical_event_match_key(event) for event in canonical_events) if key
+    }
+    appended_count = 0
+    for row in tail_rows:
+        key = _turn_event_row_match_key(row)
+        if key is None or key in existing_keys:
+            continue
+        role = str(row["role"] or "").strip()
+        text = str(row["text"] or "").strip()
+        if role not in {"candidate", "interviewer"} or not text:
+            continue
+        try:
+            question_index = int(row["question_index"] or 0)
+        except (TypeError, ValueError):
+            question_index = 0
+        try:
+            question_epoch = int(row["question_epoch"] or 0)
+        except (TypeError, ValueError):
+            question_epoch = 0
+        canonical_events.append(
+            {
+                "role": role,
+                "content": text,
+                "created_at": str(row["event_ts"] or "").strip() or utc_now_iso(),
+                "question_id": str(row["question_id"] or "").strip(),
+                "question_index": max(0, question_index),
+                "question_epoch": max(0, question_epoch),
+                "attempt_seq": checkpoint_attempt_seq,
+            }
+        )
+        existing_keys.add(key)
+        appended_count += 1
+
+    return {
+        "canonical_key_count": len(canonical_keys),
+        "attempt_row_count": len(attempt_rows),
+        "last_matched_seq": last_matched_seq,
+        "tail_row_count": len(tail_rows),
+        "appended_count": appended_count,
+    }
+
+
+def _infer_attempt_seqs_from_canonical_candidate_events(
+    canonical_events: Sequence[Dict[str, Any]],
+    turn_event_rows: Sequence[sqlite3.Row],
+) -> List[int]:
+    candidate_keys: List[Tuple[str, str, int, str]] = []
+    for event in canonical_events:
+        key = _canonical_event_match_key(event)
+        if key is None:
+            continue
+        if key[0] != "candidate":
+            continue
+        candidate_keys.append(key)
+    if not candidate_keys:
+        return []
+
+    attempts: Set[int] = set()
+    key_idx = 0
+    for row in turn_event_rows:
+        if key_idx >= len(candidate_keys):
+            break
+        row_key = _turn_event_row_match_key(row)
+        if row_key is None or row_key[0] != "candidate":
+            continue
+        if row_key != candidate_keys[key_idx]:
+            continue
+        try:
+            attempt_seq = int(row["attempt_seq"] or 0)
+        except (TypeError, ValueError):
+            attempt_seq = 0
+        if attempt_seq > 0:
+            attempts.add(attempt_seq)
+        key_idx += 1
+
+    if attempts:
+        return sorted(attempts)
+
+    for key in candidate_keys:
+        for row in turn_event_rows:
+            row_key = _turn_event_row_match_key(row)
+            if row_key is None or row_key[0] != "candidate":
+                continue
+            if row_key != key:
+                continue
+            try:
+                attempt_seq = int(row["attempt_seq"] or 0)
+            except (TypeError, ValueError):
+                attempt_seq = 0
+            if attempt_seq > 0:
+                attempts.add(attempt_seq)
+                break
+    return sorted(attempts)
+
+
+def _attempt_audio_rows_are_complete(
+    audio_rows: Sequence[sqlite3.Row],
+    attempt_seqs: Sequence[int],
+) -> bool:
+    if not attempt_seqs:
+        return False
+    normalized_attempts = {int(item) for item in attempt_seqs if int(item) > 0}
+    if not normalized_attempts:
+        return False
+    present_tracks: Dict[int, Set[str]] = {seq: set() for seq in normalized_attempts}
+    for row in audio_rows:
+        try:
+            attempt_seq = int(row["attempt_seq"] or 0)
+        except (TypeError, ValueError):
+            attempt_seq = 0
+        if attempt_seq not in normalized_attempts:
+            continue
+        track = str(row["track"] or "").strip()
+        if track in {"candidate", "interviewer"}:
+            present_tracks.setdefault(attempt_seq, set()).add(track)
+    return all({"candidate", "interviewer"}.issubset(present_tracks.get(seq, set())) for seq in normalized_attempts)
+
+
 def _compute_echo_risk_flags(
     canonical_events: Sequence[Dict[str, Any]],
     *,
@@ -2912,6 +3210,13 @@ def finalize_canonical_artifacts(
             consistency_flags: List[str] = []
             canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
             canonical_events: List[Dict[str, Any]] = []
+            checkpoint_tail_reconcile_enabled = _env_flag(
+                "FINALIZE_CHECKPOINT_TAIL_RECONCILE_ENABLED", True
+            )
+            audio_align_by_turn_events_enabled = _env_flag(
+                "FINALIZE_AUDIO_ALIGN_BY_TURN_EVENTS_ENABLED", True
+            )
+            turn_event_rows_with_attempt_seq: Optional[List[sqlite3.Row]] = None
             partial_mode = (
                 str(completed_reason or "").strip() in BEST_EFFORT_COMPLETED_REASONS
             )
@@ -2935,6 +3240,31 @@ def finalize_canonical_artifacts(
                     checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
                     intro_wrap_events=intro_wrap_events,
                 )
+                if checkpoint_tail_reconcile_enabled:
+                    turn_event_rows_with_attempt_seq = _load_turn_event_rows_with_attempt_seq_in_conn(
+                        conn, token
+                    )
+                    reconcile_meta = _reconcile_checkpoint_tail_turn_events(
+                        canonical_events=canonical_events,
+                        turn_event_rows=turn_event_rows_with_attempt_seq,
+                        checkpoint_attempt_seq=int(
+                            checkpoint_meta.get("attempt_seq", 0) or 0
+                        ),
+                        checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or ""),
+                    )
+                    appended_count = int(reconcile_meta.get("appended_count", 0) or 0)
+                    if appended_count > 0:
+                        consistency_flags.append("checkpoint_tail_reconciled")
+                    else:
+                        consistency_flags.append("checkpoint_tail_reconcile_noop")
+                    INFO(
+                        "event=finalize.checkpoint_tail_reconcile "
+                        f"token={token} appended_count={appended_count} "
+                        f"last_matched_seq={int(reconcile_meta.get('last_matched_seq', 0) or 0)} "
+                        f"tail_row_count={int(reconcile_meta.get('tail_row_count', 0) or 0)} "
+                        f"canonical_key_count={int(reconcile_meta.get('canonical_key_count', 0) or 0)} "
+                        f"attempt_row_count={int(reconcile_meta.get('attempt_row_count', 0) or 0)}"
+                    )
                 if not canonical_events:
                     consistency_flags.append("checkpoint_empty")
                 missing_candidate_answer_questions = (
@@ -3048,36 +3378,123 @@ def finalize_canonical_artifacts(
 
             candidate_path: Optional[str] = None
             interviewer_path: Optional[str] = None
-            if preferred_attempt_seq > 0:
-                preferred_audio_rows = [
-                    row
-                    for row in audio_rows
-                    if int(row["attempt_seq"] or 0) == preferred_attempt_seq
-                ]
-                preferred_candidate_rows = [
-                    row for row in preferred_audio_rows if str(row["track"]) == "candidate"
-                ]
-                preferred_interviewer_rows = [
-                    row for row in preferred_audio_rows if str(row["track"]) == "interviewer"
-                ]
-                candidate_path = _copy_or_merge_audio_track_rows(
-                    preferred_candidate_rows,
-                    token=token,
-                    track="candidate",
-                    flags=consistency_flags,
+            if (
+                audio_align_by_turn_events_enabled
+                and canonical_events
+            ):
+                if turn_event_rows_with_attempt_seq is None:
+                    turn_event_rows_with_attempt_seq = _load_turn_event_rows_with_attempt_seq_in_conn(
+                        conn, token
+                    )
+                inferred_attempt_seqs = _infer_attempt_seqs_from_canonical_candidate_events(
+                    canonical_events,
+                    turn_event_rows_with_attempt_seq,
                 )
-                interviewer_path = _copy_or_merge_audio_track_rows(
-                    preferred_interviewer_rows,
-                    token=token,
-                    track="interviewer",
-                    flags=consistency_flags,
+                INFO(
+                    "event=finalize.audio_attempt_infer "
+                    f"token={token} inferred_attempts={','.join(str(seq) for seq in inferred_attempt_seqs) or '-'} "
+                    f"preferred_attempt_seq={preferred_attempt_seq or 0}"
                 )
-                if candidate_path and interviewer_path:
-                    consistency_flags.append("audio_attempt_pinned_to_checkpoint")
-                else:
-                    consistency_flags.append("audio_attempt_fallback_used")
-                    candidate_path = None
-                    interviewer_path = None
+                can_use_inferred_attempts = bool(inferred_attempt_seqs)
+                if (
+                    can_use_inferred_attempts
+                    and canonical_source == CANONICAL_SOURCE_CHECKPOINT
+                    and preferred_attempt_seq > 0
+                    and inferred_attempt_seqs == [preferred_attempt_seq]
+                ):
+                    can_use_inferred_attempts = False
+                    INFO(
+                        "event=finalize.audio_attempt_infer_skipped "
+                        f"token={token} reason=matches_checkpoint_attempt attempt_seq={preferred_attempt_seq}"
+                    )
+
+                if can_use_inferred_attempts:
+                    inferred_attempt_set = set(inferred_attempt_seqs)
+                    inferred_audio_rows = [
+                        row
+                        for row in audio_rows
+                        if int(row["attempt_seq"] or 0) in inferred_attempt_set
+                    ]
+                    if _attempt_audio_rows_are_complete(
+                        inferred_audio_rows,
+                        inferred_attempt_seqs,
+                    ):
+                        inferred_candidate_rows = [
+                            row
+                            for row in inferred_audio_rows
+                            if str(row["track"] or "").strip() == "candidate"
+                        ]
+                        inferred_interviewer_rows = [
+                            row
+                            for row in inferred_audio_rows
+                            if str(row["track"] or "").strip() == "interviewer"
+                        ]
+                        candidate_path = _copy_or_merge_audio_track_rows(
+                            inferred_candidate_rows,
+                            token=token,
+                            track="candidate",
+                            flags=consistency_flags,
+                        )
+                        interviewer_path = _copy_or_merge_audio_track_rows(
+                            inferred_interviewer_rows,
+                            token=token,
+                            track="interviewer",
+                            flags=consistency_flags,
+                        )
+                        if candidate_path and interviewer_path:
+                            consistency_flags.append("audio_attempts_inferred_from_turns")
+                            INFO(
+                                "event=finalize.audio_attempt_infer_applied "
+                                f"token={token} attempt_count={len(inferred_attempt_seqs)}"
+                            )
+                        else:
+                            INFO(
+                                "event=finalize.audio_attempt_infer_fallback "
+                                f"token={token} reason=merge_failed"
+                            )
+                            candidate_path = None
+                            interviewer_path = None
+                    else:
+                        INFO(
+                            "event=finalize.audio_attempt_infer_fallback "
+                            f"token={token} reason=incomplete_tracks"
+                        )
+
+            if not candidate_path or not interviewer_path:
+                if preferred_attempt_seq > 0:
+                    preferred_audio_rows = [
+                        row
+                        for row in audio_rows
+                        if int(row["attempt_seq"] or 0) == preferred_attempt_seq
+                    ]
+                    preferred_candidate_rows = [
+                        row
+                        for row in preferred_audio_rows
+                        if str(row["track"] or "").strip() == "candidate"
+                    ]
+                    preferred_interviewer_rows = [
+                        row
+                        for row in preferred_audio_rows
+                        if str(row["track"] or "").strip() == "interviewer"
+                    ]
+                    candidate_path = _copy_or_merge_audio_track_rows(
+                        preferred_candidate_rows,
+                        token=token,
+                        track="candidate",
+                        flags=consistency_flags,
+                    )
+                    interviewer_path = _copy_or_merge_audio_track_rows(
+                        preferred_interviewer_rows,
+                        token=token,
+                        track="interviewer",
+                        flags=consistency_flags,
+                    )
+                    if candidate_path and interviewer_path:
+                        consistency_flags.append("audio_attempt_pinned_to_checkpoint")
+                    else:
+                        consistency_flags.append("audio_attempt_fallback_used")
+                        candidate_path = None
+                        interviewer_path = None
 
             if not candidate_path or not interviewer_path:
                 candidate_rows = [
