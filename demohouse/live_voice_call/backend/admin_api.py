@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from score_scale import parse_score_scale
 
 from admin_login_guard import AdminLoginGuard, load_admin_login_guard_config
@@ -261,6 +261,7 @@ class CreateInterviewBody(BaseModel):
     question_followups: List[QuestionFollowupBody] = Field(min_items=1)
     notes: Optional[str] = Field(default=None, max_length=1000)
     required_checkins: Optional[List[str]] = Field(default=None)
+    enable_live_subtitle: Optional[StrictBool] = Field(default=False)
 
 
 def create_admin_app(
@@ -485,6 +486,7 @@ def create_admin_app(
                 notes=(body.notes or "").strip() or None,
                 question_followups=[item.model_dump() for item in body.question_followups],
                 required_checkins=body.required_checkins,
+                enable_live_subtitle=bool(body.enable_live_subtitle),
             )
         except ValueError as e:
             if str(e) == "job_not_found":
@@ -547,6 +549,7 @@ def create_admin_app(
                 "job": detail["job"],
                 "selected_questions": detail.get("selected_questions", []),
                 "required_checkins": detail.get("required_checkins", []),
+                "enable_live_subtitle": bool(detail.get("enable_live_subtitle", False)),
                 "interview_link": build_interview_link(detail["token"]),
                 "completed": completed,
                 "scorecard": {

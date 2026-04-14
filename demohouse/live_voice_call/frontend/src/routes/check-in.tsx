@@ -54,6 +54,9 @@ const normalizeRequiredCheckins = (input: unknown): CheckStep[] => {
   return ORDERED_STEPS.filter(step => seen.has(step));
 };
 
+export const normalizeEnableLiveSubtitle = (input: unknown): boolean =>
+  input === true;
+
 const isMobileBrowser = () => {
   if (typeof navigator === 'undefined') {
     return false;
@@ -90,6 +93,7 @@ export const CheckInPage = () => {
   const {
     token,
     setCheckInPassed,
+    setEnableLiveSubtitle,
     setSelectedMicId,
     permissions,
     setPermissions,
@@ -230,11 +234,15 @@ export const CheckInPage = () => {
         const nextRequired = normalizeRequiredCheckins(
           data?.interview?.required_checkins,
         );
+        setEnableLiveSubtitle(
+          normalizeEnableLiveSubtitle(data?.interview?.enable_live_subtitle),
+        );
         setRequiredSteps(nextRequired);
       } catch (_error) {
         if (!active) {
           return;
         }
+        setEnableLiveSubtitle(false);
         setRequiredSteps([...DEFAULT_REQUIRED_STEPS]);
         setErrorMessage('读取面试检查项失败，已按默认检查项（扬声器/麦克风）处理。');
       } finally {
@@ -247,7 +255,7 @@ export const CheckInPage = () => {
     return () => {
       active = false;
     };
-  }, [token]);
+  }, [token, setEnableLiveSubtitle]);
 
   const loadDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {

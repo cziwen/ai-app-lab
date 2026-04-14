@@ -303,6 +303,7 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
         "speaker",
         "screen",
     ]
+    assert detail_response.json()["interview"]["enable_live_subtitle"] is False
     selected_questions = detail_response.json()["interview"]["selected_questions"]
     assert selected_questions
     assert "max_clarifies" in selected_questions[0]
@@ -315,6 +316,63 @@ def test_detail_and_public_access_return_required_checkins(monkeypatch, tmp_path
         "speaker",
         "screen",
     ]
+    assert public_response.json()["interview"]["enable_live_subtitle"] is False
+
+
+def test_create_interview_enable_live_subtitle_propagates(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A")],
+    )
+    create_response = client.post(
+        "/api/admin/interviews",
+        json={
+            "candidate_name": "张三",
+            "job_uid": job["job_uid"],
+            "question_followups": _followups_for_job(job["job_uid"]),
+            "required_checkins": ["speaker", "mic"],
+            "enable_live_subtitle": True,
+        },
+    )
+    assert create_response.status_code == 200
+    token = create_response.json()["interview"]["token"]
+    assert create_response.json()["interview"]["enable_live_subtitle"] is True
+
+    detail_response = client.get(f"/api/admin/interviews/{token}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["interview"]["enable_live_subtitle"] is True
+
+    public_response = client.get(f"/api/public/interviews/{token}/access")
+    assert public_response.status_code == 200
+    assert public_response.json()["interview"]["enable_live_subtitle"] is True
+
+
+def test_create_interview_invalid_enable_live_subtitle_returns_422(monkeypatch, tmp_path):
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A")],
+    )
+    response = client.post(
+        "/api/admin/interviews",
+        json={
+            "candidate_name": "张三",
+            "job_uid": job["job_uid"],
+            "question_followups": _followups_for_job(job["job_uid"]),
+            "required_checkins": ["speaker", "mic"],
+            "enable_live_subtitle": "true",
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_interview_detail_includes_scorecard(monkeypatch, tmp_path):

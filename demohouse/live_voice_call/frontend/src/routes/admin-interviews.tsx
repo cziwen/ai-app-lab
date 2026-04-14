@@ -82,6 +82,7 @@ export const AdminInterviewsPage = () => {
     'speaker',
     'mic',
   ]);
+  const [enableLiveSubtitle, setEnableLiveSubtitle] = useState(false);
   const [creatingInterview, setCreatingInterview] = useState(false);
 
   const loadJobs = async () => {
@@ -269,11 +270,13 @@ export const AdminInterviewsPage = () => {
         question_followups,
         notes: interviewNotes.trim(),
         required_checkins: requiredCheckins,
+        enable_live_subtitle: enableLiveSubtitle,
       });
       setShowCreateInterview(false);
       setCandidateName('');
       setInterviewNotes('');
       setRequiredCheckins(['speaker', 'mic']);
+      setEnableLiveSubtitle(false);
       await loadInterviews('');
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : '创建面试失败');
@@ -470,6 +473,19 @@ export const AdminInterviewsPage = () => {
               默认勾选扬声器和麦克风。未勾选项不会出现在候选人 check-in 流程中。
             </p>
 
+            <label>实时字幕</label>
+            <div className="admin-checkin-grid">
+              <label className="admin-checkin-item">
+                <input
+                  type="checkbox"
+                  checked={enableLiveSubtitle}
+                  onChange={event => setEnableLiveSubtitle(event.target.checked)}
+                />
+                <span>开启实时字幕显示</span>
+              </label>
+            </div>
+            <p className="admin-hint">默认不勾选。开启后候选人通话页显示实时字幕。</p>
+
             <label htmlFor="interview-notes">备注（可选）</label>
             <textarea
               id="interview-notes"
@@ -543,6 +559,11 @@ export const AdminInterviewsPage = () => {
                         .join(' / ')
                     : '无（本场无需设备检查）'}
                 </p>
+              </section>
+
+              <section>
+                <h3 className="admin-detail-title">实时字幕</h3>
+                <p>{interviewDetail.enable_live_subtitle ? '开启' : '关闭'}</p>
               </section>
 
               <section>

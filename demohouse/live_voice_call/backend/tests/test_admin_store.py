@@ -95,15 +95,18 @@ def test_create_job_and_interview(monkeypatch, tmp_path):
     )
     assert interview["question_count"] == 2
     assert interview["required_checkins"] == ["speaker", "mic"]
+    assert interview["enable_live_subtitle"] is False
 
     access = admin_store.get_public_access(interview["token"])
     assert access is not None
     assert access["candidate_name"] == "张三"
     assert access["required_checkins"] == ["speaker", "mic"]
+    assert access["enable_live_subtitle"] is False
 
     interview_detail = admin_store.get_interview_detail(interview["token"])
     assert interview_detail is not None
     assert interview_detail["required_checkins"] == ["speaker", "mic"]
+    assert interview_detail["enable_live_subtitle"] is False
     assert len(interview_detail["selected_questions"]) == interview["question_count"]
     assert all(
         "question" in item and item["question"] for item in interview_detail["selected_questions"]
@@ -576,6 +579,38 @@ def test_required_checkins_custom_and_empty(monkeypatch, tmp_path):
         required_checkins=[],
     )
     assert empty_interview["required_checkins"] == []
+
+
+def test_enable_live_subtitle_persisted_in_detail_and_access(monkeypatch, tmp_path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="职责",
+        requirements="要求",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目", "答案")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="王五",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+        enable_live_subtitle=True,
+    )
+    assert interview["enable_live_subtitle"] is True
+
+    detail = admin_store.get_interview_detail(interview["token"])
+    assert detail is not None
+    assert detail["enable_live_subtitle"] is True
+
+    access = admin_store.get_public_access(interview["token"])
+    assert access is not None
+    assert access["enable_live_subtitle"] is True
 
 
 def test_required_checkins_invalid_value_raises(monkeypatch, tmp_path):

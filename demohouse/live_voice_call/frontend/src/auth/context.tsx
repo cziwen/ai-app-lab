@@ -23,6 +23,8 @@ type SessionAuthContextType = {
   tokenPresent: boolean;
   checkInPassed: boolean;
   setCheckInPassed: Dispatch<SetStateAction<boolean>>;
+  enableLiveSubtitle: boolean;
+  setEnableLiveSubtitle: Dispatch<SetStateAction<boolean>>;
   selectedMicId: string;
   setSelectedMicId: Dispatch<SetStateAction<string>>;
   permissions: PermissionState;
@@ -44,6 +46,7 @@ const SessionAuthContext = createContext<SessionAuthContextType>(
 export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
   const location = useLocation();
   const [checkInPassed, setCheckInPassed] = useState(false);
+  const [enableLiveSubtitle, setEnableLiveSubtitle] = useState(false);
   const [permissions, setPermissions] = useState<PermissionState>({
     ...DEFAULT_PERMISSIONS,
   });
@@ -60,6 +63,7 @@ export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
     const normalizedToken = nextToken?.trim() ? nextToken.trim() : null;
     if (normalizedToken !== token) {
       setCheckInPassed(false);
+      setEnableLiveSubtitle(false);
       setSelectedMicId('');
       setPermissions({ ...DEFAULT_PERMISSIONS });
       mediaStreamsRef.current = {
@@ -76,13 +80,15 @@ export const SessionAuthProvider = ({ children }: PropsWithChildren) => {
       tokenPresent: !!token,
       checkInPassed,
       setCheckInPassed,
+      enableLiveSubtitle,
+      setEnableLiveSubtitle,
       selectedMicId,
       setSelectedMicId,
       permissions,
       setPermissions,
       mediaStreamsRef,
     }),
-    [token, checkInPassed, selectedMicId, permissions],
+    [token, checkInPassed, enableLiveSubtitle, selectedMicId, permissions],
   );
 
   return (

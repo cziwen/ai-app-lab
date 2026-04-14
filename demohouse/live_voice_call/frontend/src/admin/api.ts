@@ -86,6 +86,7 @@ export type InterviewDetail = {
     max_clarifies: number;
   }>;
   required_checkins: CheckInKey[];
+  enable_live_subtitle?: boolean;
   interview_link: string;
   completed: boolean;
   completion_message?: string;
@@ -222,6 +223,7 @@ export const adminApi = {
     }>;
     notes?: string;
     required_checkins?: CheckInKey[];
+    enable_live_subtitle?: boolean;
   }) =>
     request<{ interview: InterviewListItem & { interview_link: string } }>(
       '/api/admin/interviews',

@@ -215,6 +215,7 @@ CREATE TABLE IF NOT EXISTS interviews (
   duration_minutes INTEGER NOT NULL DEFAULT 0,
   question_count INTEGER NOT NULL,
   required_checkins TEXT NOT NULL DEFAULT 'speaker,mic',
+  enable_live_subtitle INTEGER NOT NULL DEFAULT 0,
   selected_question_ids TEXT NOT NULL,
   question_followup_limits TEXT NOT NULL DEFAULT '',
   question_clarify_limits TEXT NOT NULL DEFAULT '',
@@ -446,6 +447,13 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE interviews SET required_checkins = 'speaker,mic' WHERE required_checkins IS NULL"
         )
+    if "enable_live_subtitle" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN enable_live_subtitle INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "UPDATE interviews SET enable_live_subtitle = 0 WHERE enable_live_subtitle IS NULL"
+        )
     if "question_followup_limits" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN question_followup_limits TEXT NOT NULL DEFAULT ''"
@@ -523,6 +531,10 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE interviews SET echo_risk_flags = '' "
         "WHERE echo_risk_flags IS NULL"
+    )
+    conn.execute(
+        "UPDATE interviews SET enable_live_subtitle = 0 "
+        "WHERE enable_live_subtitle IS NULL"
     )
 
     turn_event_columns = {
@@ -1440,6 +1452,7 @@ def create_interview(
     notes: Optional[str],
     question_followups: Optional[Sequence[Dict[str, Any]]],
     required_checkins: Optional[Sequence[str]] = None,
+    enable_live_subtitle: bool = False,
 ) -> Dict[str, object]:
     now = utc_now_iso()
     expires_at = _compute_interview_expires_at(now)
@@ -1476,10 +1489,11 @@ def create_interview(
             """
             INSERT INTO interviews (
                 token, candidate_name, job_uid, question_bank_version, duration_minutes, question_count, required_checkins,
+                enable_live_subtitle,
                 selected_question_ids, question_followup_limits, question_clarify_limits, notes, status, created_at, updated_at,
                 expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -1489,6 +1503,7 @@ def create_interview(
                 0,
                 question_count,
                 serialized_checkins,
+                1 if enable_live_subtitle else 0,
                 ",".join(str(i) for i in selected_ids),
                 serialized_question_followups,
                 serialized_question_clarifies,
@@ -1516,6 +1531,7 @@ def create_interview(
         "question_bank_version": question_bank_version,
         "question_count": question_count,
         "required_checkins": normalized_checkins,
+        "enable_live_subtitle": bool(enable_live_subtitle),
         "question_followups": [
             {
                 "question_id": qid,
@@ -1717,6 +1733,7 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "question_bank_version": int(row["question_bank_version"] or 1),
         "selected_questions": selected_questions,
         "required_checkins": parse_required_checkins(row["required_checkins"]),
+        "enable_live_subtitle": bool(int(row["enable_live_subtitle"] or 0)),
         "scorecard": scorecard,
         "turns": [
             {
@@ -1758,6 +1775,7 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
             SELECT i.token, i.candidate_name, i.status, i.interruption_count,
                    i.expires_at,
                    i.required_checkins,
+                   i.enable_live_subtitle,
                    j.job_uid, j.name AS job_name
             FROM interviews i
             JOIN jobs j ON j.job_uid = i.job_uid
@@ -1780,6 +1798,7 @@ def get_public_access(token: str) -> Optional[Dict[str, object]]:
             "status": row["status"],
             "interruption_count": int(row["interruption_count"] or 0),
             "required_checkins": parse_required_checkins(row["required_checkins"]),
+            "enable_live_subtitle": bool(int(row["enable_live_subtitle"] or 0)),
             "job": {
                 "job_uid": row["job_uid"],
                 "name": row["job_name"],

@@ -32,44 +32,8 @@ const AUTO_REDIRECT_SECONDS = 15;
 const SPEAKING_LEVEL_THRESHOLD = 0.18;
 type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
-const readEnv = (name: string) => {
-  const processEnv =
-    typeof process !== 'undefined' ? process.env : undefined;
-  const globalProcessEnv = (
-    globalThis as { process?: { env?: Record<string, string | undefined> } }
-  ).process?.env;
-  const value = processEnv?.[name] ?? globalProcessEnv?.[name];
-  return typeof value === 'string' && value.trim() ? value : undefined;
-};
-
-const resolveBooleanEnv = (
-  primaryName: string,
-  fallbackName: string | undefined,
-  defaultValue: boolean,
-) => {
-  const raw =
-    readEnv(primaryName) || (fallbackName ? readEnv(fallbackName) : undefined);
-  if (!raw) {
-    return defaultValue;
-  }
-  const normalized = raw.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
-    return true;
-  }
-  if (['0', 'false', 'no', 'off'].includes(normalized)) {
-    return false;
-  }
-  return defaultValue;
-};
-
-export const resolveLiveSubtitleEnabled = () =>
-  resolveBooleanEnv(
-    'MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE',
-    'ENABLE_LIVE_SUBTITLE',
-    false,
-  );
-
-const ENABLE_LIVE_SUBTITLE = resolveLiveSubtitleEnabled();
+export const resolveInterviewLiveSubtitleEnabled = (value: unknown): boolean =>
+  value === true;
 
 const formatDuration = (seconds: number) => {
   const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
@@ -161,7 +125,7 @@ export const useCallController = (): CallController => {
     reconnectExhausted,
   } = useVoiceBotService();
   const { logContent } = useLogContent();
-  const { mediaStreamsRef } = useSessionAuth();
+  const { mediaStreamsRef, enableLiveSubtitle } = useSessionAuth();
   const debugAllowed = useMemo(
     () => isDebugAllowed(location.search),
     [location.search],
@@ -361,10 +325,10 @@ export const useCallController = (): CallController => {
   ]);
   const liveSubtitleText = useMemo(() => {
     if (mode === 'mock') {
-      return mockUserSentence;
+      return mockUserSentence || mockBotSentence;
     }
-    return currentUserSentence;
-  }, [mode, mockUserSentence, currentUserSentence]);
+    return currentUserSentence || currentBotSentence;
+  }, [mode, mockUserSentence, mockBotSentence, currentUserSentence, currentBotSentence]);
 
   const endNotice = useMemo(() => {
     if (mode !== 'real') {
@@ -388,7 +352,7 @@ export const useCallController = (): CallController => {
   const showEndAnswerButton = mode === 'real' && userSpeaking;
   const endAnswerEnabled =
     showEndAnswerButton && currentUserSentence.trim().length > 0;
-  const showLiveSubtitle = ENABLE_LIVE_SUBTITLE;
+  const showLiveSubtitle = resolveInterviewLiveSubtitleEnabled(enableLiveSubtitle);
   const interviewerActive = botSpeaking || botAudioPlaying;
   const interviewerSpeaking =
     mode === 'mock'
