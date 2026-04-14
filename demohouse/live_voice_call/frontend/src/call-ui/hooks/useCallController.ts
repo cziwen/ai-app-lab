@@ -33,9 +33,12 @@ const SPEAKING_LEVEL_THRESHOLD = 0.18;
 type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
 const readEnv = (name: string) => {
-  const value = (
+  const processEnv =
+    typeof process !== 'undefined' ? process.env : undefined;
+  const globalProcessEnv = (
     globalThis as { process?: { env?: Record<string, string | undefined> } }
-  ).process?.env?.[name];
+  ).process?.env;
+  const value = processEnv?.[name] ?? globalProcessEnv?.[name];
   return typeof value === 'string' && value.trim() ? value : undefined;
 };
 
