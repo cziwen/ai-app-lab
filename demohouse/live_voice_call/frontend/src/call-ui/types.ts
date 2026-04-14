@@ -40,6 +40,8 @@ export interface CallUiState {
   shareOn: boolean;
   elapsedSec: number;
   subtitle: string;
+  showLiveSubtitle?: boolean;
+  liveSubtitleText?: string;
   endNotice?: string;
   reconnectNotice?: string;
   interviewerAudioLevel?: number;

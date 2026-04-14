@@ -32,6 +32,50 @@ const AUTO_REDIRECT_SECONDS = 15;
 const SPEAKING_LEVEL_THRESHOLD = 0.18;
 type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
+const readEnv = (name: string) => {
+  const value = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env?.[name];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+};
+
+const resolveBooleanEnv = (
+  primaryName: string,
+  fallbackName: string | undefined,
+  defaultValue: boolean,
+) => {
+  const raw =
+    readEnv(primaryName) || (fallbackName ? readEnv(fallbackName) : undefined);
+  if (!raw) {
+    return defaultValue;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+};
+
+export const resolveManualEndAnswerEnabled = () =>
+  resolveBooleanEnv(
+    'MODERN_PUBLIC_MANUAL_END_ANSWER_ENABLED',
+    'MANUAL_END_ANSWER_ENABLED',
+    false,
+  );
+
+export const resolveLiveSubtitleEnabled = () =>
+  resolveBooleanEnv(
+    'MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE',
+    'ENABLE_LIVE_SUBTITLE',
+    false,
+  );
+
+const MANUAL_END_ANSWER_ENABLED = resolveManualEndAnswerEnabled();
+const ENABLE_LIVE_SUBTITLE = resolveLiveSubtitleEnabled();
+
 const formatDuration = (seconds: number) => {
   const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
   const secs = String(seconds % 60).padStart(2, '0');
@@ -320,6 +364,12 @@ export const useCallController = (): CallController => {
     currentBotSentence,
     currentUserSentence,
   ]);
+  const liveSubtitleText = useMemo(() => {
+    if (mode === 'mock') {
+      return mockUserSentence;
+    }
+    return currentUserSentence;
+  }, [mode, mockUserSentence, currentUserSentence]);
 
   const endNotice = useMemo(() => {
     if (mode !== 'real') {
@@ -340,9 +390,12 @@ export const useCallController = (): CallController => {
   const realInCall = userSpeaking || botSpeaking || botAudioPlaying;
   const isConnected = mode === 'mock' ? mockConnected : wsConnected;
   const isInCall = mode === 'mock' ? mockInCall : realInCall;
-  const showEndAnswerButton = mode === 'real' && userSpeaking;
+  const showEndAnswerButton =
+    mode === 'real' && userSpeaking && MANUAL_END_ANSWER_ENABLED;
   const endAnswerEnabled =
-    showEndAnswerButton && currentUserSentence.trim().length > 0;
+    showEndAnswerButton &&
+    (MANUAL_END_ANSWER_ENABLED || currentUserSentence.trim().length > 0);
+  const showLiveSubtitle = ENABLE_LIVE_SUBTITLE;
   const interviewerActive = botSpeaking || botAudioPlaying;
   const interviewerSpeaking =
     mode === 'mock'
@@ -400,10 +453,6 @@ export const useCallController = (): CallController => {
         return;
       case 'endAnswer':
         if (mode !== 'real' || !showEndAnswerButton) {
-          return;
-        }
-        if (!endAnswerEnabled) {
-          Message.warning('请先说出可识别内容后再结束本题');
           return;
         }
         recStop();
@@ -471,6 +520,8 @@ export const useCallController = (): CallController => {
       shareOn,
       elapsedSec,
       subtitle,
+      showLiveSubtitle,
+      liveSubtitleText,
       endNotice,
       reconnectNotice,
       interviewerAudioLevel: botAudioLevel,

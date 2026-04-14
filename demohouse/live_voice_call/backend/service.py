@@ -60,6 +60,7 @@ DEFAULT_ASR_SILENCE_TIMEOUT_MS = 8000
 MAX_ASR_SILENCE_TIMEOUT_MS = 15000
 DEFAULT_ASR_PRE_FINALIZE_GRACE_MS = 400
 MAX_ASR_PRE_FINALIZE_GRACE_MS = 2000
+DEFAULT_ASR_MANUAL_TURN_END_ENABLED = False
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 RESUME_MODE_NONE = "none"
 RESUME_MODE_QUESTION_START = "question_start"
@@ -125,6 +126,21 @@ def _load_asr_pre_finalize_grace_ms() -> int:
     return parsed
 
 
+def _load_asr_manual_turn_end_enabled() -> bool:
+    raw_value = (os.getenv("ASR_MANUAL_TURN_END_ENABLED") or "").strip().lower()
+    if not raw_value:
+        return DEFAULT_ASR_MANUAL_TURN_END_ENABLED
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    INFO(
+        "ASR_MANUAL_TURN_END_ENABLED invalid, fallback to default "
+        f"value={str(DEFAULT_ASR_MANUAL_TURN_END_ENABLED).lower()}"
+    )
+    return DEFAULT_ASR_MANUAL_TURN_END_ENABLED
+
+
 def _load_interview_global_turn_limit() -> int:
     raw_value = (os.getenv("INTERVIEW_GLOBAL_TURN_LIMIT") or "").strip()
     if not raw_value:
@@ -149,6 +165,7 @@ def _load_interview_global_turn_limit() -> int:
 # asr continuous detection no input duration, configurable via env
 ASRInterval = _load_asr_silence_timeout_ms()
 ASR_PRE_FINALIZE_GRACE_MS = _load_asr_pre_finalize_grace_ms()
+ASR_MANUAL_TURN_END_ENABLED = _load_asr_manual_turn_end_enabled()
 ASR_POLL_INTERVAL_SECONDS = 0.2
 ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
@@ -514,6 +531,8 @@ class VoiceBotService(BaseModel):
         self.asr_no_input_duration = silence_ms
         reason = "client_end_answer" if self.asr_force_finalize_requested else ""
         if not reason:
+            if ASR_MANUAL_TURN_END_ENABLED:
+                return None
             self.asr_silence_tick_count += 1
             if self.asr_silence_tick_count % ASR_SILENCE_LOG_EVERY_TICKS == 0:
                 self._log(

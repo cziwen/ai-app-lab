@@ -127,6 +127,8 @@
     ```shell
     # ASR WebSocket URL（默认使用官方推荐链路）
     export ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+    # 手动收口模式（true 时禁用 silence_timeout 自动收口，需前端点“结束本题”）
+    export ASR_MANUAL_TURN_END_ENABLED=false
 
     # 并发控制
     export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数
@@ -355,6 +357,9 @@ docker compose down
   - `ADMIN_PASSWORD`（默认 `admin123456`）
 - 候选人面试链接基址通过 `INTERVIEW_BASE_DOMAIN` 配置（只填域名，例如 `https://smartinterview.cn`）
 - 前端可通过 `MODERN_PUBLIC_API_URL` 配置后台 API 地址（默认同源地址）
+- 前端可通过以下开关控制通话体验（默认 `false`）：
+  - `MODERN_PUBLIC_MANUAL_END_ANSWER_ENABLED`：显示“结束本题”按钮（仅录音时显示），用于手动收口
+  - `MODERN_PUBLIC_ENABLE_LIVE_SUBTITLE`：显示候选人实时字幕（ASR partial/final）
 
 ## 准入与错误码行为（当前版本）
 

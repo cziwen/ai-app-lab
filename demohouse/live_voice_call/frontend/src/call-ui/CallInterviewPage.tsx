@@ -2,6 +2,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSessionAuth } from '@/auth/context';
 import { CallControlBar } from '@/call-ui/components/CallControlBar';
+import { LiveSubtitleBar } from '@/call-ui/components/LiveSubtitleBar';
 import { CallParticipantCard } from '@/call-ui/components/CallParticipantCard';
 import { DebugDrawer } from '@/call-ui/components/DebugDrawer';
 import {
@@ -312,6 +313,9 @@ export const CallInterviewPage = () => {
         </div>
 
         <div className="overlay-bottom">
+          {uiState.showLiveSubtitle && (
+            <LiveSubtitleBar text={uiState.liveSubtitleText || ''} />
+          )}
           <CallControlBar
             isInCall={uiState.isInCall}
             showEndAnswerButton={uiState.showEndAnswerButton}

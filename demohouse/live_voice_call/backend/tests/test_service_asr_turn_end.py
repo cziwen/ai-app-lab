@@ -63,6 +63,14 @@ def test_load_asr_pre_finalize_grace_ms_clamps_to_safe_max(monkeypatch):
     assert any("clamp to safe max" in line for line in logs)
 
 
+def test_manual_turn_end_enabled_loader(monkeypatch):
+    monkeypatch.setenv("ASR_MANUAL_TURN_END_ENABLED", "true")
+    assert service._load_asr_manual_turn_end_enabled() is True
+
+    monkeypatch.setenv("ASR_MANUAL_TURN_END_ENABLED", "false")
+    assert service._load_asr_manual_turn_end_enabled() is False
+
+
 def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
     async def _run():
         fake = _FakeASRClient()
@@ -78,6 +86,57 @@ def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
         assert finalized.sentence == "边界收尾"
         assert fake.close_calls == 1
         assert any("ASR_TURN_END reason=silence_timeout silence_ms=50" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_manual_turn_end_skips_silence_timeout(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_MANUAL_TURN_END_ENABLED", True)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("你好", 100)
+            for _ in range(12):
+                await asyncio.sleep(0.02)
+                yield _asr_response("你好", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        try:
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.25)
+            assert False, "manual turn-end should not emit silence_timeout recognized"
+        except asyncio.TimeoutError:
+            pass
+
+        assert fake.close_calls == 0
+        assert all("reason=silence_timeout" not in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_manual_turn_end_still_supports_client_end_answer(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_MANUAL_TURN_END_ENABLED", True)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_force_finalize_requested = True
+
+        async def _responses():
+            yield _asr_response("你好", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "你好"
+        assert fake.close_calls == 1
+        assert any("ASR_TURN_END reason=client_end_answer" in line for line in logs)
 
     asyncio.run(_run())
 
