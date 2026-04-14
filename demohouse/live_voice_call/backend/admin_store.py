@@ -37,6 +37,7 @@ INTERVIEW_CANONICAL_STATUS_READY = "ready"
 INTERVIEW_CANONICAL_STATUS_BUILDING = "building"
 INTERVIEW_CANONICAL_STATUS_FAILED = "failed"
 CANONICAL_SOURCE_CHECKPOINT = "checkpoint"
+CANONICAL_SOURCE_TURN_EVENTS = "turn_events"
 CANONICAL_SOURCE_TURN_EVENTS_FALLBACK = "turn_events_fallback"
 SCORECARD_STATUS_PENDING = "pending"
 SCORECARD_STATUS_COMPLETED = "completed"
@@ -71,6 +72,7 @@ INTERVIEW_EXPIRY_SWEEP_SECONDS = max(
 INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE = max(
     1, int(os.getenv("INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE", "200"))
 )
+CANONICAL_EVENTS_ONLY_MIN_CREATED_AT_ENV = "CANONICAL_EVENTS_ONLY_MIN_CREATED_AT"
 
 INTERVIEW_CACHE = InterviewTokenCache()
 
@@ -380,6 +382,28 @@ def parse_iso_or_none(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _normalize_dt_to_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _resolve_canonical_events_only_cutline() -> Tuple[Optional[datetime], str]:
+    raw = (os.getenv(CANONICAL_EVENTS_ONLY_MIN_CREATED_AT_ENV) or "").strip()
+    if not raw:
+        return None, ""
+    parsed = _normalize_dt_to_utc(parse_iso_or_none(raw))
+    if parsed is None:
+        INFO(
+            "event=finalize.events_only_cutline_invalid "
+            f"env={CANONICAL_EVENTS_ONLY_MIN_CREATED_AT_ENV} raw={raw}"
+        )
+        return None, raw
+    return parsed, raw
 
 
 def ensure_storage() -> None:
@@ -3178,7 +3202,7 @@ def finalize_canonical_artifacts(
             _begin_immediate(conn)
             interview_row = conn.execute(
                 """
-                SELECT token, candidate_name
+                SELECT token, candidate_name, created_at
                 FROM interviews
                 WHERE token = ?
                 """,
@@ -3220,6 +3244,22 @@ def finalize_canonical_artifacts(
             partial_mode = (
                 str(completed_reason or "").strip() in BEST_EFFORT_COMPLETED_REASONS
             )
+            interview_created_at_raw = str(interview_row["created_at"] or "").strip()
+            interview_created_at = _normalize_dt_to_utc(
+                parse_iso_or_none(interview_created_at_raw)
+            )
+            events_only_cutline, events_only_cutline_raw = _resolve_canonical_events_only_cutline()
+            events_only_selected = bool(
+                events_only_cutline is not None
+                and interview_created_at is not None
+                and interview_created_at >= events_only_cutline
+            )
+            INFO(
+                "event=finalize.canonical_source_select "
+                f"token={token} mode={'events_only' if events_only_selected else 'legacy'} "
+                f"created_at={interview_created_at.isoformat() if interview_created_at else interview_created_at_raw or '-'} "
+                f"cutline={events_only_cutline.isoformat() if events_only_cutline else events_only_cutline_raw or '-'}"
+            )
 
             def _fail_with_flag(flag: str) -> None:
                 normalized = str(flag or "").strip()
@@ -3229,70 +3269,84 @@ def finalize_canonical_artifacts(
                 failed_consistency_flags.extend(sorted(set(consistency_flags)))
                 raise RuntimeError(normalized or "finalize_failed")
 
-            checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
-            if checkpoint_meta:
-                canonical_source = CANONICAL_SOURCE_CHECKPOINT
-                intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
-                canonical_events = _build_canonical_events_from_checkpoint(
-                    payload=checkpoint_meta["payload"],
-                    selected_questions=selected_questions,
-                    attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
-                    checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
-                    intro_wrap_events=intro_wrap_events,
-                )
-                if checkpoint_tail_reconcile_enabled:
-                    turn_event_rows_with_attempt_seq = _load_turn_event_rows_with_attempt_seq_in_conn(
-                        conn, token
-                    )
-                    reconcile_meta = _reconcile_checkpoint_tail_turn_events(
-                        canonical_events=canonical_events,
-                        turn_event_rows=turn_event_rows_with_attempt_seq,
-                        checkpoint_attempt_seq=int(
-                            checkpoint_meta.get("attempt_seq", 0) or 0
-                        ),
-                        checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or ""),
-                    )
-                    appended_count = int(reconcile_meta.get("appended_count", 0) or 0)
-                    if appended_count > 0:
-                        consistency_flags.append("checkpoint_tail_reconciled")
-                    else:
-                        consistency_flags.append("checkpoint_tail_reconcile_noop")
-                    INFO(
-                        "event=finalize.checkpoint_tail_reconcile "
-                        f"token={token} appended_count={appended_count} "
-                        f"last_matched_seq={int(reconcile_meta.get('last_matched_seq', 0) or 0)} "
-                        f"tail_row_count={int(reconcile_meta.get('tail_row_count', 0) or 0)} "
-                        f"canonical_key_count={int(reconcile_meta.get('canonical_key_count', 0) or 0)} "
-                        f"attempt_row_count={int(reconcile_meta.get('attempt_row_count', 0) or 0)}"
-                    )
-                if not canonical_events:
-                    consistency_flags.append("checkpoint_empty")
-                missing_candidate_answer_questions = (
-                    _find_questions_missing_candidate_answer_in_checkpoint(
-                        checkpoint_meta["payload"],
-                        selected_questions,
-                    )
-                )
-                if missing_candidate_answer_questions:
-                    if partial_mode:
-                        consistency_flags.append("missing_candidate_answer")
-                        consistency_flags.append("unanswered_questions_skipped")
-                    else:
-                        _fail_with_flag("missing_candidate_answer")
-            else:
-                consistency_flags.append("checkpoint_missing")
-                if not partial_mode:
-                    _fail_with_flag("checkpoint_missing")
-
-            if partial_mode and not canonical_events:
+            checkpoint_meta: Optional[Dict[str, Any]] = None
+            if events_only_selected:
+                canonical_source = CANONICAL_SOURCE_TURN_EVENTS
                 canonical_events = _build_canonical_events_from_turn_events(
                     conn,
                     token,
                     selected_questions=selected_questions,
                 )
-                if canonical_events:
-                    canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
-                    consistency_flags.append("checkpoint_fallback_used")
+            else:
+                checkpoint_meta = _load_latest_checkpoint_payload_in_conn(conn, token)
+                if checkpoint_meta:
+                    canonical_source = CANONICAL_SOURCE_CHECKPOINT
+                    intro_wrap_events = _load_latest_attempt_bookend_turns_in_conn(conn, token)
+                    canonical_events = _build_canonical_events_from_checkpoint(
+                        payload=checkpoint_meta["payload"],
+                        selected_questions=selected_questions,
+                        attempt_seq=int(checkpoint_meta.get("attempt_seq", 0) or 0),
+                        checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or now_iso),
+                        intro_wrap_events=intro_wrap_events,
+                    )
+                    if checkpoint_tail_reconcile_enabled:
+                        turn_event_rows_with_attempt_seq = _load_turn_event_rows_with_attempt_seq_in_conn(
+                            conn, token
+                        )
+                        reconcile_meta = _reconcile_checkpoint_tail_turn_events(
+                            canonical_events=canonical_events,
+                            turn_event_rows=turn_event_rows_with_attempt_seq,
+                            checkpoint_attempt_seq=int(
+                                checkpoint_meta.get("attempt_seq", 0) or 0
+                            ),
+                            checkpoint_ts=str(checkpoint_meta.get("checkpoint_ts", "") or ""),
+                        )
+                        appended_count = int(reconcile_meta.get("appended_count", 0) or 0)
+                        if appended_count > 0:
+                            consistency_flags.append("checkpoint_tail_reconciled")
+                        else:
+                            consistency_flags.append("checkpoint_tail_reconcile_noop")
+                        INFO(
+                            "event=finalize.checkpoint_tail_reconcile "
+                            f"token={token} appended_count={appended_count} "
+                            f"last_matched_seq={int(reconcile_meta.get('last_matched_seq', 0) or 0)} "
+                            f"tail_row_count={int(reconcile_meta.get('tail_row_count', 0) or 0)} "
+                            f"canonical_key_count={int(reconcile_meta.get('canonical_key_count', 0) or 0)} "
+                            f"attempt_row_count={int(reconcile_meta.get('attempt_row_count', 0) or 0)}"
+                        )
+                    if not canonical_events:
+                        consistency_flags.append("checkpoint_empty")
+                    missing_candidate_answer_questions = (
+                        _find_questions_missing_candidate_answer_in_checkpoint(
+                            checkpoint_meta["payload"],
+                            selected_questions,
+                        )
+                    )
+                    if missing_candidate_answer_questions:
+                        if partial_mode:
+                            consistency_flags.append("missing_candidate_answer")
+                            consistency_flags.append("unanswered_questions_skipped")
+                        else:
+                            _fail_with_flag("missing_candidate_answer")
+                else:
+                    consistency_flags.append("checkpoint_missing")
+                    if not partial_mode:
+                        _fail_with_flag("checkpoint_missing")
+
+                if partial_mode and not canonical_events:
+                    canonical_events = _build_canonical_events_from_turn_events(
+                        conn,
+                        token,
+                        selected_questions=selected_questions,
+                    )
+                    if canonical_events:
+                        canonical_source = CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+                        consistency_flags.append("checkpoint_fallback_used")
+
+            INFO(
+                "event=finalize.canonical_build "
+                f"token={token} source={canonical_source} count={len(canonical_events)}"
+            )
 
             if not canonical_events:
                 if partial_mode:
