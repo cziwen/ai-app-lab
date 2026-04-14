@@ -43,12 +43,23 @@ def _asr_response(text: str, duration: int = 0, stream_connect_id: str = ""):
 
 def test_load_asr_silence_timeout_ms_clamps_to_safe_max(monkeypatch):
     logs = []
-    monkeypatch.setenv("ASR_SILENCE_TIMEOUT_MS", "9000")
+    monkeypatch.setenv("ASR_SILENCE_TIMEOUT_MS", "20000")
     monkeypatch.setattr(service, "INFO", logs.append)
 
     loaded = service._load_asr_silence_timeout_ms()
 
     assert loaded == service.MAX_ASR_SILENCE_TIMEOUT_MS
+    assert any("clamp to safe max" in line for line in logs)
+
+
+def test_load_asr_pre_finalize_grace_ms_clamps_to_safe_max(monkeypatch):
+    logs = []
+    monkeypatch.setenv("ASR_PRE_FINALIZE_GRACE_MS", "9000")
+    monkeypatch.setattr(service, "INFO", logs.append)
+
+    loaded = service._load_asr_pre_finalize_grace_ms()
+
+    assert loaded == service.MAX_ASR_PRE_FINALIZE_GRACE_MS
     assert any("clamp to safe max" in line for line in logs)
 
 
@@ -129,6 +140,7 @@ def test_turn_end_on_wall_clock_even_when_text_stops_but_packets_continue(monkey
         fake = _FakeASRClient()
         svc, _ = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 60)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
 
         async def _responses():
@@ -152,6 +164,7 @@ def test_finalize_resets_state_and_does_not_emit_duplicate(monkeypatch):
         fake = _FakeASRClient()
         svc, _ = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
 
         async def _responses():
@@ -272,6 +285,7 @@ def test_force_finalize_turn_immediately_after_client_end_request(monkeypatch):
         fake = _FakeASRClient()
         svc, logs = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
         svc.asr_force_finalize_requested = True
 
@@ -349,6 +363,7 @@ def test_stream_end_force_finalizes_buffer_without_waiting_silence(monkeypatch):
         fake = _FakeASRClient()
         svc, logs = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
 
         async def _responses():
@@ -373,6 +388,7 @@ def test_emit_partial_recognition_events_before_final_sentence(monkeypatch):
         svc, _ = _make_service(fake)
         svc.emit_asr_partial_events = True
         monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
 
         async def _responses():
@@ -401,6 +417,7 @@ def test_drop_stale_packets_after_turn_finalize_until_new_connect_id(monkeypatch
         fake = _FakeASRClient()
         svc, logs = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
         svc.asr_force_finalize_requested = True
 
@@ -432,6 +449,7 @@ def test_stale_guard_compatible_when_response_connect_id_missing(monkeypatch):
         fake = _FakeASRClient()
         svc, _ = _make_service(fake)
         monkeypatch.setattr(service, "ASRInterval", 99999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
         monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
         svc.asr_stale_connect_id = "old-conn"
         svc.asr_drop_stale_packets = True
@@ -446,5 +464,84 @@ def test_stale_guard_compatible_when_response_connect_id_missing(monkeypatch):
 
         assert isinstance(recognized, service.SentenceRecognizedPayload)
         assert recognized.sentence == "兼容路径文本"
+
+    asyncio.run(_run())
+
+
+def test_text_rewrite_refreshes_silence_clock_and_logs(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 120)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("为什么重要啊？因为你要看业绩", 100)
+            await asyncio.sleep(0.05)
+            yield _asr_response("为什么重要啊？", 100)
+            await asyncio.sleep(0.09)
+            yield _asr_response("为什么重要啊？", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        pending_next = asyncio.create_task(out_iter.__anext__())
+        await asyncio.sleep(0.15)
+        assert pending_next.done() is False
+
+        recognized = await asyncio.wait_for(pending_next, timeout=0.4)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "为什么重要啊？"
+        assert any("ASR_TEXT_REWRITE" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_silence_timeout_uses_pre_finalize_grace_and_accepts_late_packet(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 50)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 100)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("你好", 100)
+            await asyncio.sleep(0.08)
+            yield _asr_response("你好啊", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        pending_next = asyncio.create_task(out_iter.__anext__())
+        await asyncio.sleep(0.16)
+        assert pending_next.done() is False
+
+        recognized = await asyncio.wait_for(pending_next, timeout=0.6)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "你好啊"
+        assert any("ASR_PRE_FINALIZE_DRAIN_START" in line for line in logs)
+        assert any("ASR_PRE_FINALIZE_DRAIN_ABORTED_BY_LATE_PACKET" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_silence_timeout_grace_expires_without_late_packet(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASRInterval", 40)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 60)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response("你好", 100)
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "你好"
+        assert any("ASR_PRE_FINALIZE_DRAIN_START" in line for line in logs)
+        assert any("ASR_PRE_FINALIZE_DRAIN_TIMEOUT" in line for line in logs)
 
     asyncio.run(_run())
