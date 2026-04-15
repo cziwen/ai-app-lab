@@ -76,6 +76,19 @@ MAX_ASR_STABLE_PREFIX_PACKETS = 5
 DEFAULT_ASR_CLIENT_END_STABILIZE_MS = 300
 MAX_ASR_CLIENT_END_STABILIZE_MS = 800
 DEFAULT_ASR_ENABLE_PREFIX_NO_REWIND = True
+DEFAULT_ASR_ALIGN_TAIL_WINDOW_TOKENS = 80
+MIN_ASR_ALIGN_TAIL_WINDOW_TOKENS = 40
+MAX_ASR_ALIGN_TAIL_WINDOW_TOKENS = 160
+DEFAULT_ASR_ALIGN_HEAD_WINDOW_TOKENS = 160
+MIN_ASR_ALIGN_HEAD_WINDOW_TOKENS = 80
+MAX_ASR_ALIGN_HEAD_WINDOW_TOKENS = 320
+DEFAULT_ASR_ALIGN_MIN_SCORE = 8.0
+MIN_ASR_ALIGN_MIN_SCORE = 0.0
+MAX_ASR_ALIGN_MIN_SCORE = 30.0
+DEFAULT_ASR_ALIGN_MIN_MATCH_RATIO = 0.55
+MIN_ASR_ALIGN_MIN_MATCH_RATIO = 0.3
+MAX_ASR_ALIGN_MIN_MATCH_RATIO = 0.9
+ASR_REWRITE_QUALITY_TOLERANCE = 1.0
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 RESUME_MODE_NONE = "none"
 RESUME_MODE_QUESTION_START = "question_start"
@@ -313,6 +326,114 @@ def _load_asr_enable_prefix_no_rewind() -> bool:
     )
 
 
+def _load_asr_align_tail_window_tokens() -> int:
+    raw_value = (os.getenv("ASR_ALIGN_TAIL_WINDOW_TOKENS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_ALIGN_TAIL_WINDOW_TOKENS invalid, fallback to default "
+            f"value={DEFAULT_ASR_ALIGN_TAIL_WINDOW_TOKENS}"
+        )
+        return DEFAULT_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    if parsed < MIN_ASR_ALIGN_TAIL_WINDOW_TOKENS:
+        INFO(
+            "ASR_ALIGN_TAIL_WINDOW_TOKENS too small, clamp to min "
+            f"value={MIN_ASR_ALIGN_TAIL_WINDOW_TOKENS}"
+        )
+        return MIN_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    if parsed > MAX_ASR_ALIGN_TAIL_WINDOW_TOKENS:
+        INFO(
+            "ASR_ALIGN_TAIL_WINDOW_TOKENS too large, clamp to max "
+            f"value={MAX_ASR_ALIGN_TAIL_WINDOW_TOKENS}"
+        )
+        return MAX_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    return parsed
+
+
+def _load_asr_align_head_window_tokens() -> int:
+    raw_value = (os.getenv("ASR_ALIGN_HEAD_WINDOW_TOKENS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_ALIGN_HEAD_WINDOW_TOKENS invalid, fallback to default "
+            f"value={DEFAULT_ASR_ALIGN_HEAD_WINDOW_TOKENS}"
+        )
+        return DEFAULT_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    if parsed < MIN_ASR_ALIGN_HEAD_WINDOW_TOKENS:
+        INFO(
+            "ASR_ALIGN_HEAD_WINDOW_TOKENS too small, clamp to min "
+            f"value={MIN_ASR_ALIGN_HEAD_WINDOW_TOKENS}"
+        )
+        return MIN_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    if parsed > MAX_ASR_ALIGN_HEAD_WINDOW_TOKENS:
+        INFO(
+            "ASR_ALIGN_HEAD_WINDOW_TOKENS too large, clamp to max "
+            f"value={MAX_ASR_ALIGN_HEAD_WINDOW_TOKENS}"
+        )
+        return MAX_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    return parsed
+
+
+def _load_asr_align_min_score() -> float:
+    raw_value = (os.getenv("ASR_ALIGN_MIN_SCORE") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_ALIGN_MIN_SCORE
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_ALIGN_MIN_SCORE invalid, fallback to default "
+            f"value={DEFAULT_ASR_ALIGN_MIN_SCORE}"
+        )
+        return DEFAULT_ASR_ALIGN_MIN_SCORE
+    if parsed < MIN_ASR_ALIGN_MIN_SCORE:
+        INFO(
+            "ASR_ALIGN_MIN_SCORE too small, clamp to min "
+            f"value={MIN_ASR_ALIGN_MIN_SCORE}"
+        )
+        return MIN_ASR_ALIGN_MIN_SCORE
+    if parsed > MAX_ASR_ALIGN_MIN_SCORE:
+        INFO(
+            "ASR_ALIGN_MIN_SCORE too large, clamp to max "
+            f"value={MAX_ASR_ALIGN_MIN_SCORE}"
+        )
+        return MAX_ASR_ALIGN_MIN_SCORE
+    return parsed
+
+
+def _load_asr_align_min_match_ratio() -> float:
+    raw_value = (os.getenv("ASR_ALIGN_MIN_MATCH_RATIO") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_ALIGN_MIN_MATCH_RATIO
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_ALIGN_MIN_MATCH_RATIO invalid, fallback to default "
+            f"value={DEFAULT_ASR_ALIGN_MIN_MATCH_RATIO}"
+        )
+        return DEFAULT_ASR_ALIGN_MIN_MATCH_RATIO
+    if parsed < MIN_ASR_ALIGN_MIN_MATCH_RATIO:
+        INFO(
+            "ASR_ALIGN_MIN_MATCH_RATIO too small, clamp to min "
+            f"value={MIN_ASR_ALIGN_MIN_MATCH_RATIO}"
+        )
+        return MIN_ASR_ALIGN_MIN_MATCH_RATIO
+    if parsed > MAX_ASR_ALIGN_MIN_MATCH_RATIO:
+        INFO(
+            "ASR_ALIGN_MIN_MATCH_RATIO too large, clamp to max "
+            f"value={MAX_ASR_ALIGN_MIN_MATCH_RATIO}"
+        )
+        return MAX_ASR_ALIGN_MIN_MATCH_RATIO
+    return parsed
+
+
 def _load_interview_global_turn_limit() -> int:
     raw_value = (os.getenv("INTERVIEW_GLOBAL_TURN_LIMIT") or "").strip()
     if not raw_value:
@@ -346,6 +467,10 @@ ASR_USE_UTTERANCES = _load_asr_use_utterances()
 ASR_STABLE_PREFIX_PACKETS = _load_asr_stable_prefix_packets()
 ASR_CLIENT_END_STABILIZE_MS = _load_asr_client_end_stabilize_ms()
 ASR_ENABLE_PREFIX_NO_REWIND = _load_asr_enable_prefix_no_rewind()
+ASR_ALIGN_TAIL_WINDOW_TOKENS = _load_asr_align_tail_window_tokens()
+ASR_ALIGN_HEAD_WINDOW_TOKENS = _load_asr_align_head_window_tokens()
+ASR_ALIGN_MIN_SCORE = _load_asr_align_min_score()
+ASR_ALIGN_MIN_MATCH_RATIO = _load_asr_align_min_match_ratio()
 ASR_POLL_INTERVAL_SECONDS = 0.2
 ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
@@ -446,7 +571,9 @@ class VoiceBotService(BaseModel):
     asr_force_finalize_requested: bool = False
     asr_force_finalize_requested_mono_ms: int = 0
     asr_client_end_best_sentence: str = ""
+    asr_client_end_best_score: float = 0.0
     asr_client_end_best_committed_len: int = 0
+    asr_committed_end_time_ms: int = 0
     asr_last_partial_sentence: str = ""
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
@@ -676,7 +803,9 @@ class VoiceBotService(BaseModel):
         self.asr_force_finalize_requested = False
         self.asr_force_finalize_requested_mono_ms = 0
         self.asr_client_end_best_sentence = ""
+        self.asr_client_end_best_score = 0.0
         self.asr_client_end_best_committed_len = 0
+        self.asr_committed_end_time_ms = 0
         self.asr_last_partial_sentence = ""
 
     def _longest_common_prefix(self, texts: List[str]) -> str:
@@ -709,17 +838,17 @@ class VoiceBotService(BaseModel):
 
     def _merge_snapshot_tail_for_no_rewind(
         self, committed: str, snapshot: str
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, int]:
         """
         Keep committed prefix immutable while trying to preserve appendable tail
         from a rewritten snapshot.
         """
         if not committed:
-            return snapshot, False
+            return snapshot, False, 0
         if not snapshot:
-            return committed, False
+            return committed, False, 0
         if snapshot.startswith(committed):
-            return snapshot, False
+            return snapshot, False, len(committed)
 
         max_anchor = min(len(committed), 24)
         for anchor_len in range(max_anchor, 3, -1):
@@ -729,8 +858,332 @@ class VoiceBotService(BaseModel):
                 continue
             merged = committed + snapshot[pos + anchor_len :]
             if len(merged) >= len(committed):
-                return merged, True
-        return committed, False
+                return merged, True, anchor_len
+        return committed, False, 0
+
+    def _to_int_or_none(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_utterance_char_tokens(
+        self,
+        utterances: Any,
+        fallback_text: str,
+    ) -> List[Dict[str, Any]]:
+        tokens: List[Dict[str, Any]] = []
+        if isinstance(utterances, list):
+            for utterance in utterances:
+                if not isinstance(utterance, dict):
+                    continue
+                definite_raw = utterance.get("definite")
+                if definite_raw is True:
+                    definite: Optional[bool] = True
+                elif definite_raw is False:
+                    definite = False
+                else:
+                    definite = None
+
+                words = utterance.get("words")
+                if isinstance(words, list) and len(words) > 0:
+                    for word in words:
+                        if not isinstance(word, dict):
+                            continue
+                        word_text = str(word.get("text", "") or "")
+                        if not word_text:
+                            continue
+                        start_time = self._to_int_or_none(word.get("start_time"))
+                        end_time = self._to_int_or_none(word.get("end_time"))
+                        for ch in word_text:
+                            tokens.append(
+                                {
+                                    "text": ch,
+                                    "definite": definite,
+                                    "start_time": start_time,
+                                    "end_time": end_time,
+                                }
+                            )
+                    continue
+
+                utter_text = self._extract_utterance_text(utterance)
+                if not utter_text:
+                    continue
+                start_time = self._to_int_or_none(utterance.get("start_time"))
+                end_time = self._to_int_or_none(utterance.get("end_time"))
+                for ch in utter_text:
+                    tokens.append(
+                        {
+                            "text": ch,
+                            "definite": definite,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                        }
+                    )
+
+        if tokens:
+            return tokens
+        return [
+            {"text": ch, "definite": None, "start_time": None, "end_time": None}
+            for ch in (fallback_text or "")
+        ]
+
+    def _tokens_text(self, tokens: List[Dict[str, Any]], start: int = 0) -> str:
+        if start < 0:
+            start = 0
+        return "".join(str(token.get("text", "") or "") for token in tokens[start:])
+
+    def _quality_from_candidate(
+        self,
+        *,
+        score: float,
+        ratio: float,
+        text_len: int,
+        committed_len: int,
+    ) -> float:
+        growth = max(0, text_len - committed_len)
+        return float(score) + (float(ratio) * 5.0) + min(20.0, growth / 10.0)
+
+    def _build_anchor_candidate(
+        self, committed: str, snapshot: str
+    ) -> Optional[Dict[str, Any]]:
+        merged, recovered, anchor_len = self._merge_snapshot_tail_for_no_rewind(
+            committed, snapshot
+        )
+        if not recovered:
+            return None
+        if not merged.startswith(committed):
+            return None
+        ratio = anchor_len / max(1.0, min(float(len(committed)), float(len(snapshot))))
+        score = float(anchor_len * 2)
+        return {
+            "source": "anchor",
+            "text": merged,
+            "score": score,
+            "ratio": ratio,
+            "tail_recovered": True,
+        }
+
+    def _build_time_candidate(
+        self,
+        committed: str,
+        snapshot_tokens: List[Dict[str, Any]],
+        committed_end_time_ms: int,
+    ) -> Optional[Dict[str, Any]]:
+        if committed_end_time_ms <= 0 or not snapshot_tokens:
+            return None
+        best_idx = -1
+        best_penalty = 10**9
+        for idx, token in enumerate(snapshot_tokens):
+            start_time = self._to_int_or_none(token.get("start_time"))
+            if start_time is None:
+                continue
+            penalty = abs(start_time - committed_end_time_ms)
+            if start_time < committed_end_time_ms - 220:
+                penalty += 500
+            if penalty < best_penalty:
+                best_penalty = penalty
+                best_idx = idx
+        if best_idx < 0 or best_idx >= len(snapshot_tokens):
+            return None
+        tail_text = self._tokens_text(snapshot_tokens, start=best_idx)
+        if not tail_text:
+            return None
+        monotonic_hits = 0
+        checked = 0
+        for token in snapshot_tokens[best_idx : best_idx + 12]:
+            start_time = self._to_int_or_none(token.get("start_time"))
+            if start_time is None:
+                continue
+            checked += 1
+            if start_time >= committed_end_time_ms - 120:
+                monotonic_hits += 1
+        score = 6.0 + (monotonic_hits * 0.9)
+        ratio = (monotonic_hits / checked) if checked > 0 else 0.0
+        return {
+            "source": "time",
+            "text": committed + tail_text,
+            "score": float(score),
+            "ratio": float(ratio),
+            "tail_recovered": True,
+        }
+
+    def _build_dp_candidate(
+        self,
+        committed: str,
+        snapshot_tokens: List[Dict[str, Any]],
+        committed_end_time_ms: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not committed or not snapshot_tokens:
+            return None
+        tail_chars = list(committed[-ASR_ALIGN_TAIL_WINDOW_TOKENS:])
+        head_tokens = snapshot_tokens[:ASR_ALIGN_HEAD_WINDOW_TOKENS]
+        head_chars = [str(token.get("text", "") or "") for token in head_tokens]
+        if not tail_chars or not head_chars:
+            return None
+        m = len(tail_chars)
+        n = len(head_chars)
+        scores = [[0.0] * (n + 1) for _ in range(m + 1)]
+        pointers = [[0] * (n + 1) for _ in range(m + 1)]  # 0 stop,1 diag,2 up,3 left
+        best_score = 0.0
+        best_i = 0
+        best_j = 0
+        for i in range(1, m + 1):
+            a = tail_chars[i - 1]
+            for j in range(1, n + 1):
+                token = head_tokens[j - 1]
+                b = head_chars[j - 1]
+                match_score = -1.0
+                if a == b:
+                    match_score = 2.0
+                    if token.get("definite") is True:
+                        match_score += 1.0
+                    start_time = self._to_int_or_none(token.get("start_time"))
+                    if start_time is not None and committed_end_time_ms > 0:
+                        if start_time < committed_end_time_ms - 220:
+                            match_score -= 2.0
+                        else:
+                            match_score += 0.5
+                diag = scores[i - 1][j - 1] + match_score
+                up = scores[i - 1][j] - 1.0
+                left = scores[i][j - 1] - 1.0
+                best_cell = 0.0
+                ptr = 0
+                if diag >= up and diag >= left and diag > 0.0:
+                    best_cell = diag
+                    ptr = 1
+                elif up >= left and up > 0.0:
+                    best_cell = up
+                    ptr = 2
+                elif left > 0.0:
+                    best_cell = left
+                    ptr = 3
+                scores[i][j] = best_cell
+                pointers[i][j] = ptr
+                if best_cell > best_score:
+                    best_score = best_cell
+                    best_i = i
+                    best_j = j
+        if best_score <= 0.0:
+            return None
+        i = best_i
+        j = best_j
+        matched_chars = 0
+        while i > 0 and j > 0 and pointers[i][j] != 0:
+            ptr = pointers[i][j]
+            if ptr == 1:
+                if tail_chars[i - 1] == head_chars[j - 1]:
+                    matched_chars += 1
+                i -= 1
+                j -= 1
+            elif ptr == 2:
+                i -= 1
+            else:
+                j -= 1
+        cut_idx = max(0, best_j)
+        tail_text = self._tokens_text(snapshot_tokens, start=cut_idx)
+        if not tail_text:
+            return None
+        ratio = matched_chars / max(1.0, min(float(m), float(n)))
+        return {
+            "source": "dp",
+            "text": committed + tail_text,
+            "score": float(best_score),
+            "ratio": float(ratio),
+            "tail_recovered": True,
+        }
+
+    def _pick_rewrite_candidate(
+        self,
+        *,
+        committed: str,
+        snapshot_text: str,
+        snapshot_tokens: List[Dict[str, Any]],
+        previous_text: str,
+        committed_end_time_ms: int,
+    ) -> Optional[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        anchor = self._build_anchor_candidate(committed, snapshot_text)
+        if anchor:
+            candidates.append(anchor)
+        time_candidate = self._build_time_candidate(
+            committed, snapshot_tokens, committed_end_time_ms
+        )
+        if time_candidate:
+            candidates.append(time_candidate)
+        dp_candidate = self._build_dp_candidate(
+            committed, snapshot_tokens, committed_end_time_ms
+        )
+        if dp_candidate:
+            candidates.append(dp_candidate)
+        if not candidates:
+            return None
+
+        old_quality = self._quality_from_candidate(
+            score=0.0,
+            ratio=1.0 if previous_text.startswith(committed) else 0.0,
+            text_len=len(previous_text),
+            committed_len=len(committed),
+        )
+        accepted: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            text = str(candidate.get("text", "") or "")
+            score = float(candidate.get("score", 0.0))
+            ratio = float(candidate.get("ratio", 0.0))
+            quality = self._quality_from_candidate(
+                score=score,
+                ratio=ratio,
+                text_len=len(text),
+                committed_len=len(committed),
+            )
+            is_accepted = (
+                text.startswith(committed)
+                and len(text) >= len(committed)
+                and score >= ASR_ALIGN_MIN_SCORE
+                and ratio >= ASR_ALIGN_MIN_MATCH_RATIO
+                and quality >= old_quality - ASR_REWRITE_QUALITY_TOLERANCE
+            )
+            self._log(
+                "ASR_REWRITE_CANDIDATE "
+                f"source={candidate.get('source','-')} "
+                f"score={score:.2f} "
+                f"ratio={ratio:.3f} "
+                f"accepted={1 if is_accepted else 0}"
+            )
+            if is_accepted:
+                candidate["quality"] = quality
+                accepted.append(candidate)
+        if not accepted:
+            return None
+        accepted.sort(
+            key=lambda item: (
+                float(item.get("quality", 0.0)),
+                float(item.get("score", 0.0)),
+                float(item.get("ratio", 0.0)),
+                len(str(item.get("text", "") or "")),
+            ),
+            reverse=True,
+        )
+        return accepted[0]
+
+    def _estimate_committed_end_time_ms(
+        self, tokens: List[Dict[str, Any]], committed_len: int
+    ) -> int:
+        if committed_len <= 0 or not tokens:
+            return 0
+        consumed = 0
+        for token in tokens:
+            text = str(token.get("text", "") or "")
+            if not text:
+                continue
+            consumed += len(text)
+            if consumed >= committed_len:
+                end_time = self._to_int_or_none(token.get("end_time"))
+                return end_time or 0
+        last_end = self._to_int_or_none(tokens[-1].get("end_time"))
+        return last_end or 0
 
     def _log_asr_stream_reset(self, reason: str) -> None:
         now_ms = self._mono_ms()
@@ -810,7 +1263,8 @@ class VoiceBotService(BaseModel):
                 self._log(
                     "ASR_CLIENT_END_BEST_APPLIED "
                     f"best_len={len(self.asr_client_end_best_sentence)} "
-                    f"current_len={len(sentence)}"
+                    f"current_len={len(sentence)} "
+                    f"best_score={float(self.asr_client_end_best_score or 0.0):.2f}"
                 )
             sentence = self.asr_client_end_best_sentence
         self._log(
@@ -926,22 +1380,46 @@ class VoiceBotService(BaseModel):
                 result.append((chunk, definite))
         return result
 
-    def _maybe_update_client_end_best_candidate(self, sentence: str) -> None:
+    def _maybe_update_client_end_best_candidate(
+        self,
+        sentence: str,
+        *,
+        align_score: float = 0.0,
+        align_ratio: float = 0.0,
+    ) -> None:
         if not self.asr_force_finalize_requested or not sentence:
             return
         committed_len = len(self.asr_committed_text or "")
+        score = self._quality_from_candidate(
+            score=max(0.0, float(align_score)),
+            ratio=max(
+                float(align_ratio),
+                1.0 if sentence.startswith(self.asr_committed_text or "") else 0.0,
+            ),
+            text_len=len(sentence),
+            committed_len=committed_len,
+        )
         best_sentence = self.asr_client_end_best_sentence or ""
+        best_score = float(self.asr_client_end_best_score or 0.0)
         best_committed_len = self.asr_client_end_best_committed_len
         if not best_sentence:
             self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_score = score
+            self.asr_client_end_best_committed_len = committed_len
+            return
+        if score > best_score:
+            self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_score = score
             self.asr_client_end_best_committed_len = committed_len
             return
         if committed_len > best_committed_len:
             self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_score = score
             self.asr_client_end_best_committed_len = committed_len
             return
         if committed_len == best_committed_len and len(sentence) > len(best_sentence):
             self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_score = score
             self.asr_client_end_best_committed_len = committed_len
 
     def _apply_asr_response_packet(
@@ -977,6 +1455,7 @@ class VoiceBotService(BaseModel):
                 snapshot_text = "".join(text for text, _ in snapshot_segments)
         if not snapshot_segments:
             snapshot_segments = self._snapshot_segments_from_text(snapshot_text)
+        snapshot_tokens = self._extract_utterance_char_tokens(utterances, snapshot_text)
 
         self.asr_snapshot_text = snapshot_text
         effective_snapshot = snapshot_text
@@ -984,29 +1463,32 @@ class VoiceBotService(BaseModel):
         rewrite_blocked = False
         tail_recovered = False
         fallback_wrapped = False
+        chosen_rewrite_source = ""
+        chosen_rewrite_score = 0.0
+        chosen_rewrite_ratio = 0.0
         if (
             ASR_ENABLE_PREFIX_NO_REWIND
             and self.asr_committed_text
             and not effective_snapshot.startswith(self.asr_committed_text)
         ):
             rewrite_blocked = True
-            merged_snapshot, tail_recovered = self._merge_snapshot_tail_for_no_rewind(
-                self.asr_committed_text, effective_snapshot
+            chosen_candidate = self._pick_rewrite_candidate(
+                committed=self.asr_committed_text,
+                snapshot_text=effective_snapshot,
+                snapshot_tokens=snapshot_tokens,
+                previous_text=previous_text,
+                committed_end_time_ms=self.asr_committed_end_time_ms,
             )
-            if tail_recovered:
-                consumed_chars = max(0, len(merged_snapshot) - len(self.asr_committed_text))
-                recovered_tail_segments = self._slice_snapshot_segments(
-                    snapshot_segments,
-                    start=0,
-                    length=consumed_chars,
-                )
-                effective_segments = (
-                    self._snapshot_segments_from_text(self.asr_committed_text)
-                    + recovered_tail_segments
-                )
+            if chosen_candidate is not None:
+                merged_snapshot = str(chosen_candidate.get("text", "") or "")
+                tail_recovered = bool(chosen_candidate.get("tail_recovered", False))
+                chosen_rewrite_source = str(chosen_candidate.get("source", "") or "")
+                chosen_rewrite_score = float(chosen_candidate.get("score", 0.0))
+                chosen_rewrite_ratio = float(chosen_candidate.get("ratio", 0.0))
+                effective_segments = self._snapshot_segments_from_text(merged_snapshot)
             else:
                 fallback_wrapped = True
-                merged_snapshot = self.asr_committed_text + snapshot_text
+                merged_snapshot = self.asr_committed_text + (snapshot_text or "")
                 effective_segments = (
                     self._snapshot_segments_from_text(self.asr_committed_text)
                     + snapshot_segments
@@ -1017,6 +1499,9 @@ class VoiceBotService(BaseModel):
                 f"snapshot_len={len(snapshot_text)} "
                 f"tail_recovered={1 if tail_recovered else 0} "
                 f"fallback_wrapped={1 if fallback_wrapped else 0} "
+                f"source={chosen_rewrite_source or '-'} "
+                f"score={chosen_rewrite_score:.2f} "
+                f"ratio={chosen_rewrite_ratio:.3f} "
                 f"merged_len={len(merged_snapshot)}"
             )
             effective_snapshot = merged_snapshot
@@ -1065,11 +1550,19 @@ class VoiceBotService(BaseModel):
 
         self.asr_committed_text = committed_candidate
         self.asr_draft_text = draft_text
+        self.asr_committed_end_time_ms = self._estimate_committed_end_time_ms(
+            snapshot_tokens,
+            len(committed_candidate),
+        )
 
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
         self.asr_buffer = next_text
-        self._maybe_update_client_end_best_candidate(self.asr_buffer)
+        self._maybe_update_client_end_best_candidate(
+            self.asr_buffer,
+            align_score=chosen_rewrite_score,
+            align_ratio=chosen_rewrite_ratio,
+        )
 
         if text_changed:
             self.asr_last_growth_mono_ms = self._mono_ms()
@@ -1473,12 +1966,24 @@ class VoiceBotService(BaseModel):
                     self.asr_force_finalize_requested = True
                     self.asr_force_finalize_requested_mono_ms = self._mono_ms()
                     self.asr_client_end_best_sentence = self.asr_buffer
+                    self.asr_client_end_best_score = self._quality_from_candidate(
+                        score=0.0,
+                        ratio=1.0 if self.asr_buffer.startswith(self.asr_committed_text) else 0.0,
+                        text_len=len(self.asr_buffer),
+                        committed_len=len(self.asr_committed_text),
+                    )
                     self.asr_client_end_best_committed_len = len(self.asr_committed_text)
                     self._log("ASR_TURN_END_REQUEST source=client_end_answer")
                 elif input_event.event == CLIENT_HANGUP:
                     self.asr_force_finalize_requested = True
                     self.asr_force_finalize_requested_mono_ms = self._mono_ms()
                     self.asr_client_end_best_sentence = self.asr_buffer
+                    self.asr_client_end_best_score = self._quality_from_candidate(
+                        score=0.0,
+                        ratio=1.0 if self.asr_buffer.startswith(self.asr_committed_text) else 0.0,
+                        text_len=len(self.asr_buffer),
+                        committed_len=len(self.asr_committed_text),
+                    )
                     self.asr_client_end_best_committed_len = len(self.asr_committed_text)
                     self._log("ASR_TURN_END_REQUEST source=client_hangup")
                 elif input_event.event == USER_AUDIO and input_event.data:

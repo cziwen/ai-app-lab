@@ -152,6 +152,56 @@ def test_load_asr_enable_prefix_no_rewind_loader(monkeypatch):
     assert service._load_asr_enable_prefix_no_rewind() is False
 
 
+def test_load_asr_align_tail_window_tokens_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_ALIGN_TAIL_WINDOW_TOKENS", "1")
+    assert (
+        service._load_asr_align_tail_window_tokens()
+        == service.MIN_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    )
+
+    monkeypatch.setenv("ASR_ALIGN_TAIL_WINDOW_TOKENS", "999")
+    assert (
+        service._load_asr_align_tail_window_tokens()
+        == service.MAX_ASR_ALIGN_TAIL_WINDOW_TOKENS
+    )
+
+
+def test_load_asr_align_head_window_tokens_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_ALIGN_HEAD_WINDOW_TOKENS", "1")
+    assert (
+        service._load_asr_align_head_window_tokens()
+        == service.MIN_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    )
+
+    monkeypatch.setenv("ASR_ALIGN_HEAD_WINDOW_TOKENS", "999")
+    assert (
+        service._load_asr_align_head_window_tokens()
+        == service.MAX_ASR_ALIGN_HEAD_WINDOW_TOKENS
+    )
+
+
+def test_load_asr_align_min_score_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_ALIGN_MIN_SCORE", "-1")
+    assert service._load_asr_align_min_score() == service.MIN_ASR_ALIGN_MIN_SCORE
+
+    monkeypatch.setenv("ASR_ALIGN_MIN_SCORE", "999")
+    assert service._load_asr_align_min_score() == service.MAX_ASR_ALIGN_MIN_SCORE
+
+
+def test_load_asr_align_min_match_ratio_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_ALIGN_MIN_MATCH_RATIO", "0.1")
+    assert (
+        service._load_asr_align_min_match_ratio()
+        == service.MIN_ASR_ALIGN_MIN_MATCH_RATIO
+    )
+
+    monkeypatch.setenv("ASR_ALIGN_MIN_MATCH_RATIO", "0.99")
+    assert (
+        service._load_asr_align_min_match_ratio()
+        == service.MAX_ASR_ALIGN_MIN_MATCH_RATIO
+    )
+
+
 def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
     async def _run():
         fake = _FakeASRClient()
@@ -827,7 +877,7 @@ def test_prefix_rewrite_recovers_tail_when_overlap_exists(monkeypatch):
         assert recognized.sentence.startswith(base)
         assert recognized.sentence.endswith("特别开心，后续常联系")
         assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
-        assert any("tail_recovered=1" in line for line in logs)
+        assert any("source=dp" in line or "source=anchor" in line for line in logs)
         assert any("fallback_wrapped=0" in line for line in logs)
 
     asyncio.run(_run())
@@ -864,8 +914,57 @@ def test_prefix_rewrite_fallback_wraps_indefinite_tail(monkeypatch):
         assert isinstance(recognized, service.SentenceRecognizedPayload)
         assert recognized.sentence == f"{prefix}（{rewritten}）"
         assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
-        assert any("tail_recovered=0" in line for line in logs)
+        assert any("accepted=0" in line for line in logs)
         assert any("fallback_wrapped=1" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_prefix_rewrite_uses_time_candidate_with_words(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_STABLE_PREFIX_PACKETS", 2)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASR_ALIGN_MIN_SCORE", 0.0)
+        monkeypatch.setattr(service, "ASR_ALIGN_MIN_MATCH_RATIO", 0.0)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+        svc.asr_committed_end_time_ms = 1100
+
+        rewritten = "新的句子继续讲下去"
+
+        async def _responses():
+            prefix = "原前缀"
+            yield _asr_response(prefix, 100, utterances=[{"text": prefix, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(prefix, 120, utterances=[{"text": prefix, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(
+                rewritten,
+                130,
+                utterances=[
+                    {
+                        "text": rewritten,
+                        "definite": False,
+                        "words": [
+                            {"text": "新的", "start_time": 1200, "end_time": 1300},
+                            {"text": "句子", "start_time": 1300, "end_time": 1400},
+                            {"text": "继续", "start_time": 1400, "end_time": 1500},
+                            {"text": "讲下去", "start_time": 1500, "end_time": 1600},
+                        ],
+                    }
+                ],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert "新的句子继续讲下去" in recognized.sentence
+        assert any("ASR_REWRITE_CANDIDATE source=time" in line for line in logs)
 
     asyncio.run(_run())
 
@@ -968,6 +1067,7 @@ def test_client_end_answer_prefers_best_candidate_over_last_snapshot(monkeypatch
             svc.asr_force_finalize_requested = True
             svc.asr_force_finalize_requested_mono_ms = base_ms + 20
             svc.asr_client_end_best_sentence = svc.asr_buffer
+            svc.asr_client_end_best_score = 0.0
             svc.asr_client_end_best_committed_len = len(svc.asr_committed_text)
             now_ms["value"] = base_ms + 80
             yield _asr_response(
