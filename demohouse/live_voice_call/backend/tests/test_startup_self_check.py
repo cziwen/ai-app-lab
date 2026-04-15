@@ -242,7 +242,7 @@ def test_check_stt_requires_complete_config():
     asyncio.run(_run())
 
 
-def test_check_stt_probe_success(monkeypatch):
+def test_check_stt_does_not_probe_on_startup():
     async def _run():
         config = _with_config(
             _make_config(),
@@ -253,17 +253,8 @@ def test_check_stt_probe_success(monkeypatch):
             stt_audio_signing_secret="secret",
             stt_self_check_audio_url="https://example.com/sample.wav",
         )
-
-        class _FakeResult:
-            text = "你好"
-
-        monkeypatch.setattr(
-            ssc.AucSTTClient,
-            "transcribe_audio_url",
-            lambda self, **kwargs: _FakeResult(),
-        )
         result = await ssc.check_stt(config)
         assert result.ok is True
-        assert result.detail == "STT ok"
+        assert result.detail == "STT config ok (startup probe disabled)"
 
     asyncio.run(_run())

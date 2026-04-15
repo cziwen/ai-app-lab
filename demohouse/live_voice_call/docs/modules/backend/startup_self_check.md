@@ -17,8 +17,8 @@
   - `STT_RESOURCE_ID`
   - `STT_AUDIO_PUBLIC_BASE_URL`
   - `STT_AUDIO_SIGNING_SECRET`
-- `STT_SELF_CHECK_AUDIO_URL` 未配置：仅做配置完整性校验（不发起远程探测）。
-- `STT_SELF_CHECK_AUDIO_URL` 已配置：执行 submit/query 探测一次可用性。
+- 启动自检阶段仅做配置完整性校验（不发起 submit/query 远程探测）。
+- 手动探测请使用：`python backend/check_stt_probe.py`（支持 `--url/--format`）。
 
 ## 对外接口
 - `load_runtime_config()`：加载环境变量到 `RuntimeConfig`

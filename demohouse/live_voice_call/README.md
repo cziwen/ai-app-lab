@@ -152,7 +152,7 @@
     export STT_TASK_TIMEOUT_MS=90000
     export STT_POLL_INTERVAL_MS=1000
     export STT_AUDIO_URL_TTL_SECONDS=600
-    # 可选：启动自检时 STT 探测音频
+    # 可选：手动 STT 探测脚本使用的音频 URL（启动自检不会主动探测）
     export STT_SELF_CHECK_AUDIO_URL={YOUR_PUBLIC_WAV_OR_MP3_URL}
 
     # 并发控制
@@ -240,6 +240,7 @@
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
    STT 为可选能力：未配置 STT 时自检会显示 `STT skipped (not configured)`；若只配置了部分 STT 字段，则会按配置错误失败。
+   启动自检对 STT 仅做配置校验，不会在启动阶段发起 submit/query 远程探测；可使用 `python backend/check_stt_probe.py` 手动探测。
    Redis 也是强依赖：`REDIS_URL` 缺失、Redis 未启动、或 Redis 配置不满足（`maxmemory=256MB` 且 `maxmemory-policy=allkeys-lru`）都会启动失败。
    若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：

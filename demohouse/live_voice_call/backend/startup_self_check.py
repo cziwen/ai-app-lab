@@ -3,7 +3,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from auc_stt_client import AucSTTClient
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
 from arkitect.core.component.tts.constants import EventSessionFinished
 
@@ -358,17 +357,6 @@ async def check_redis(config: RuntimeConfig) -> CheckResult:
             pass
 
 
-def _infer_audio_format_from_url(url: str) -> str:
-    normalized = str(url or "").strip().lower()
-    if normalized.endswith(".wav"):
-        return "wav"
-    if normalized.endswith(".mp3"):
-        return "mp3"
-    if normalized.endswith(".ogg"):
-        return "ogg"
-    return "raw"
-
-
 async def check_stt(config: RuntimeConfig) -> CheckResult:
     provided_fields = [
         config.stt_app_id,
@@ -403,41 +391,7 @@ async def check_stt(config: RuntimeConfig) -> CheckResult:
             error=f"missing {','.join(missing)}",
         )
 
-    probe_url = str(config.stt_self_check_audio_url or "").strip()
-    if not probe_url:
-        return CheckResult(ok=True, detail="STT config ok (probe skipped)")
-
-    try:
-        task_timeout_ms = int(str(config.stt_task_timeout_ms or "90000"))
-    except ValueError:
-        task_timeout_ms = 90000
-    try:
-        poll_interval_ms = int(str(config.stt_poll_interval_ms or "1000"))
-    except ValueError:
-        poll_interval_ms = 1000
-
-    client = AucSTTClient(
-        app_id=str(config.stt_app_id or ""),
-        access_token=str(config.stt_access_token or ""),
-        resource_id=str(config.stt_resource_id or ""),
-        submit_url=str(config.stt_submit_url or ""),
-        query_url=str(config.stt_query_url or ""),
-        task_timeout_ms=max(5000, task_timeout_ms),
-        poll_interval_ms=max(200, poll_interval_ms),
-    )
-    try:
-        result = await asyncio.to_thread(
-            client.transcribe_audio_url,
-            audio_url=probe_url,
-            audio_format=_infer_audio_format_from_url(probe_url),
-            show_utterances=True,
-        )
-    except Exception as e:
-        return CheckResult(ok=False, detail="STT failed", error=str(e))
-
-    if str(result.text or "").strip():
-        return CheckResult(ok=True, detail="STT ok")
-    return CheckResult(ok=False, detail="STT failed", error="STT probe empty result")
+    return CheckResult(ok=True, detail="STT config ok (startup probe disabled)")
 
 
 async def run_startup_self_check(
