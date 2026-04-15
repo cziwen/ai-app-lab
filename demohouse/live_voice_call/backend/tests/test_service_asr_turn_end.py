@@ -116,6 +116,42 @@ def test_load_asr_use_utterances_loader(monkeypatch):
     assert service._load_asr_use_utterances() is False
 
 
+def test_load_asr_stable_prefix_packets_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_STABLE_PREFIX_PACKETS", "1")
+    assert (
+        service._load_asr_stable_prefix_packets()
+        == service.MIN_ASR_STABLE_PREFIX_PACKETS
+    )
+
+    monkeypatch.setenv("ASR_STABLE_PREFIX_PACKETS", "99")
+    assert (
+        service._load_asr_stable_prefix_packets()
+        == service.MAX_ASR_STABLE_PREFIX_PACKETS
+    )
+
+
+def test_load_asr_client_end_stabilize_ms_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_CLIENT_END_STABILIZE_MS", "-1")
+    assert (
+        service._load_asr_client_end_stabilize_ms()
+        == service.DEFAULT_ASR_CLIENT_END_STABILIZE_MS
+    )
+
+    monkeypatch.setenv("ASR_CLIENT_END_STABILIZE_MS", "9999")
+    assert (
+        service._load_asr_client_end_stabilize_ms()
+        == service.MAX_ASR_CLIENT_END_STABILIZE_MS
+    )
+
+
+def test_load_asr_enable_prefix_no_rewind_loader(monkeypatch):
+    monkeypatch.setenv("ASR_ENABLE_PREFIX_NO_REWIND", "true")
+    assert service._load_asr_enable_prefix_no_rewind() is True
+
+    monkeypatch.setenv("ASR_ENABLE_PREFIX_NO_REWIND", "false")
+    assert service._load_asr_enable_prefix_no_rewind() is False
+
+
 def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
     async def _run():
         fake = _FakeASRClient()
@@ -708,5 +744,127 @@ def test_utterances_disabled_falls_back_to_result_text(monkeypatch):
 
         assert isinstance(recognized, service.SentenceRecognizedPayload)
         assert recognized.sentence == "回退文本"
+
+    asyncio.run(_run())
+
+
+def test_prefix_rewrite_keeps_committed_prefix_and_logs_blocked(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_STABLE_PREFIX_PACKETS", 2)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            prefix = "头一个月我会先沉下心观察学习，"
+            whole = (
+                "头一个月我会先沉下心观察学习，把团队现有的成熟打法摸透。"
+                "第二个月我会尝试在小范围测试。"
+            )
+            yield _asr_response(
+                whole,
+                100,
+                utterances=[{"text": whole, "definite": False}],
+            )
+            await asyncio.sleep(0.01)
+            yield _asr_response(
+                whole,
+                120,
+                utterances=[{"text": whole, "definite": False}],
+            )
+            await asyncio.sleep(0.01)
+            rewritten = "把团队现有的成熟打法摸透。第二个月我会尝试在小范围测试。"
+            yield _asr_response(
+                rewritten,
+                140,
+                utterances=[{"text": rewritten, "definite": False}],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence.startswith(prefix)
+        assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_definite_prefix_commits_and_tail_can_rewrite(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_STABLE_PREFIX_PACKETS", 3)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response(
+                "把团队现有的成熟打法摸透。第二个月我会尝试在小范围测试用。请教",
+                100,
+                utterances=[
+                    {"text": "把团队现有的成熟打法摸透。", "definite": True},
+                    {"text": "第二个月我会尝试在小范围测试用。请教", "definite": False},
+                ],
+            )
+            await asyncio.sleep(0.01)
+            yield _asr_response(
+                "把团队现有的成熟打法摸透。第二个月我会尝试在小范围测试，用请教的方式沟通",
+                120,
+                utterances=[
+                    {"text": "把团队现有的成熟打法摸透。", "definite": True},
+                    {"text": "第二个月我会尝试在小范围测试，用请教的方式沟通", "definite": False},
+                ],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "把团队现有的成熟打法摸透。第二个月我会尝试在小范围测试，用请教的方式沟通"
+
+    asyncio.run(_run())
+
+
+def test_client_end_answer_uses_stabilize_window(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASR_CLIENT_END_STABILIZE_MS", 200)
+        monkeypatch.setattr(service, "ASRInterval", 9999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        base_ms = 1_000_000
+        now_ms = {"value": base_ms}
+        monkeypatch.setattr(svc, "_mono_ms", lambda: now_ms["value"])
+
+        async def _responses():
+            now_ms["value"] = base_ms
+            yield _asr_response("第一版", 100, utterances=[{"text": "第一版", "definite": False}])
+            await asyncio.sleep(0.02)
+            svc.asr_force_finalize_requested = True
+            svc.asr_force_finalize_requested_mono_ms = base_ms + 20
+            now_ms["value"] = base_ms + 25
+            await asyncio.sleep(0.02)
+            now_ms["value"] = base_ms + 120
+            yield _asr_response("第一版更新", 120, utterances=[{"text": "第一版更新", "definite": False}])
+            await asyncio.sleep(0.02)
+            now_ms["value"] = base_ms + 260
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.6)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "第一版更新"
 
     asyncio.run(_run())

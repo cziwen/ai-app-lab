@@ -70,6 +70,12 @@ DEFAULT_ASR_END_WINDOW_SIZE_MS = 800
 MIN_ASR_END_WINDOW_SIZE_MS = 300
 MAX_ASR_END_WINDOW_SIZE_MS = 5000
 DEFAULT_ASR_USE_UTTERANCES = True
+DEFAULT_ASR_STABLE_PREFIX_PACKETS = 3
+MIN_ASR_STABLE_PREFIX_PACKETS = 2
+MAX_ASR_STABLE_PREFIX_PACKETS = 5
+DEFAULT_ASR_CLIENT_END_STABILIZE_MS = 300
+MAX_ASR_CLIENT_END_STABILIZE_MS = 800
+DEFAULT_ASR_ENABLE_PREFIX_NO_REWIND = True
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 RESUME_MODE_NONE = "none"
 RESUME_MODE_QUESTION_START = "question_start"
@@ -245,6 +251,68 @@ def _load_asr_use_utterances() -> bool:
     )
 
 
+def _load_asr_stable_prefix_packets() -> int:
+    raw_value = (os.getenv("ASR_STABLE_PREFIX_PACKETS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_STABLE_PREFIX_PACKETS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_STABLE_PREFIX_PACKETS invalid, fallback to default "
+            f"value={DEFAULT_ASR_STABLE_PREFIX_PACKETS}"
+        )
+        return DEFAULT_ASR_STABLE_PREFIX_PACKETS
+    if parsed < MIN_ASR_STABLE_PREFIX_PACKETS:
+        INFO(
+            "ASR_STABLE_PREFIX_PACKETS too small, clamp to min "
+            f"value={MIN_ASR_STABLE_PREFIX_PACKETS}"
+        )
+        return MIN_ASR_STABLE_PREFIX_PACKETS
+    if parsed > MAX_ASR_STABLE_PREFIX_PACKETS:
+        INFO(
+            "ASR_STABLE_PREFIX_PACKETS too large, clamp to max "
+            f"value={MAX_ASR_STABLE_PREFIX_PACKETS}"
+        )
+        return MAX_ASR_STABLE_PREFIX_PACKETS
+    return parsed
+
+
+def _load_asr_client_end_stabilize_ms() -> int:
+    raw_value = (os.getenv("ASR_CLIENT_END_STABILIZE_MS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_CLIENT_END_STABILIZE_MS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_CLIENT_END_STABILIZE_MS invalid, fallback to default "
+            f"value={DEFAULT_ASR_CLIENT_END_STABILIZE_MS}"
+        )
+        return DEFAULT_ASR_CLIENT_END_STABILIZE_MS
+    if parsed < 0:
+        INFO(
+            "ASR_CLIENT_END_STABILIZE_MS must be non-negative, fallback to default "
+            f"value={DEFAULT_ASR_CLIENT_END_STABILIZE_MS}"
+        )
+        return DEFAULT_ASR_CLIENT_END_STABILIZE_MS
+    if parsed > MAX_ASR_CLIENT_END_STABILIZE_MS:
+        INFO(
+            "ASR_CLIENT_END_STABILIZE_MS too large, clamp to max "
+            f"value={MAX_ASR_CLIENT_END_STABILIZE_MS}"
+        )
+        return MAX_ASR_CLIENT_END_STABILIZE_MS
+    return parsed
+
+
+def _load_asr_enable_prefix_no_rewind() -> bool:
+    return _parse_bool_env(
+        os.getenv("ASR_ENABLE_PREFIX_NO_REWIND") or "",
+        DEFAULT_ASR_ENABLE_PREFIX_NO_REWIND,
+        name="ASR_ENABLE_PREFIX_NO_REWIND",
+    )
+
+
 def _load_interview_global_turn_limit() -> int:
     raw_value = (os.getenv("INTERVIEW_GLOBAL_TURN_LIMIT") or "").strip()
     if not raw_value:
@@ -275,6 +343,9 @@ ASR_AIVAD = _load_asr_aivad_enabled()
 ASR_SILENCE_TIME_MS = _load_asr_silence_time_ms()
 ASR_END_WINDOW_SIZE_MS = _load_asr_end_window_size_ms()
 ASR_USE_UTTERANCES = _load_asr_use_utterances()
+ASR_STABLE_PREFIX_PACKETS = _load_asr_stable_prefix_packets()
+ASR_CLIENT_END_STABILIZE_MS = _load_asr_client_end_stabilize_ms()
+ASR_ENABLE_PREFIX_NO_REWIND = _load_asr_enable_prefix_no_rewind()
 ASR_POLL_INTERVAL_SECONDS = 0.2
 ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
@@ -359,6 +430,10 @@ class VoiceBotService(BaseModel):
     active_context_segment: str = ""
 
     asr_buffer: str = ""  # Reservoir asr recognition result
+    asr_snapshot_text: str = ""
+    asr_committed_text: str = ""
+    asr_draft_text: str = ""
+    asr_recent_snapshots: List[str] = []
     asr_no_input_duration: int = 0  # Cumulated no live_voice_call recognition duration
     asr_last_duration: int = 0  # Last asr recognition duration
     asr_last_growth_mono_ms: int = 0  # Last monotonic ts when ASR text changed
@@ -369,6 +444,7 @@ class VoiceBotService(BaseModel):
     asr_init_count: int = 0  # Count actual asr_client.init() calls per service instance
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
     asr_force_finalize_requested: bool = False
+    asr_force_finalize_requested_mono_ms: int = 0
     asr_last_partial_sentence: str = ""
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
@@ -587,12 +663,45 @@ class VoiceBotService(BaseModel):
 
     def _reset_asr_buffer_state(self) -> None:
         self.asr_buffer = ""
+        self.asr_snapshot_text = ""
+        self.asr_committed_text = ""
+        self.asr_draft_text = ""
+        self.asr_recent_snapshots = []
         self.asr_no_input_duration = 0
         self.asr_last_duration = 0
         self.asr_last_growth_mono_ms = 0
         self.asr_silence_tick_count = 0
         self.asr_force_finalize_requested = False
+        self.asr_force_finalize_requested_mono_ms = 0
         self.asr_last_partial_sentence = ""
+
+    def _longest_common_prefix(self, texts: List[str]) -> str:
+        if not texts:
+            return ""
+        prefix = texts[0]
+        for text in texts[1:]:
+            limit = min(len(prefix), len(text))
+            idx = 0
+            while idx < limit and prefix[idx] == text[idx]:
+                idx += 1
+            prefix = prefix[:idx]
+            if not prefix:
+                break
+        return prefix
+
+    def _extract_definite_prefix(self, utterances: Any) -> str:
+        if not isinstance(utterances, list) or not utterances:
+            return ""
+        parts: List[str] = []
+        for utterance in utterances:
+            if not isinstance(utterance, dict):
+                break
+            if utterance.get("definite") is not True:
+                break
+            text = self._extract_utterance_text(utterance)
+            if text:
+                parts.append(text)
+        return "".join(parts)
 
     def _log_asr_stream_reset(self, reason: str) -> None:
         now_ms = self._mono_ms()
@@ -655,6 +764,12 @@ class VoiceBotService(BaseModel):
             if silence_ms < ASRInterval:
                 return None
             reason = "silence_timeout"
+        elif ASR_CLIENT_END_STABILIZE_MS > 0:
+            elapsed_ms = max(
+                0, self._mono_ms() - max(0, self.asr_force_finalize_requested_mono_ms)
+            )
+            if elapsed_ms < ASR_CLIENT_END_STABILIZE_MS:
+                return None
         return reason, silence_ms
 
     async def _finalize_asr_turn(
@@ -708,11 +823,11 @@ class VoiceBotService(BaseModel):
             return "ignored", None
 
         previous_text = self.asr_buffer
-        next_text = response.result.text
-        if next_text is None:
-            next_text = ""
-        if not isinstance(next_text, str):
-            next_text = str(next_text)
+        snapshot_text = response.result.text
+        if snapshot_text is None:
+            snapshot_text = ""
+        if not isinstance(snapshot_text, str):
+            snapshot_text = str(snapshot_text)
 
         utterances = response.result.utterances if response.result else []
         if (
@@ -727,7 +842,63 @@ class VoiceBotService(BaseModel):
             if utterance_texts:
                 # Upstream utterances are typically a full latest snapshot.
                 # Rebuild from current snapshot each packet to avoid repeated prefix accumulation.
-                next_text = "".join(utterance_texts)
+                snapshot_text = "".join(utterance_texts)
+
+        self.asr_snapshot_text = snapshot_text
+        effective_snapshot = snapshot_text
+        if (
+            ASR_ENABLE_PREFIX_NO_REWIND
+            and self.asr_committed_text
+            and not effective_snapshot.startswith(self.asr_committed_text)
+        ):
+            self._log(
+                "ASR_REWRITE_BLOCKED "
+                f"committed_len={len(self.asr_committed_text)} "
+                f"snapshot_len={len(snapshot_text)}"
+            )
+            effective_snapshot = self.asr_committed_text
+
+        self.asr_recent_snapshots.append(effective_snapshot)
+        if len(self.asr_recent_snapshots) > ASR_STABLE_PREFIX_PACKETS:
+            self.asr_recent_snapshots = self.asr_recent_snapshots[-ASR_STABLE_PREFIX_PACKETS :]
+
+        committed_candidate = self.asr_committed_text
+        stable_prefix = self._longest_common_prefix(self.asr_recent_snapshots)
+        if len(stable_prefix) > len(committed_candidate):
+            committed_candidate = stable_prefix
+
+        definite_prefix = self._extract_definite_prefix(utterances)
+        if (
+            definite_prefix
+            and effective_snapshot.startswith(definite_prefix)
+            and len(definite_prefix) > len(committed_candidate)
+        ):
+            committed_candidate = definite_prefix
+
+        if (
+            ASR_ENABLE_PREFIX_NO_REWIND
+            and self.asr_committed_text
+            and len(committed_candidate) < len(self.asr_committed_text)
+        ):
+            committed_candidate = self.asr_committed_text
+
+        if (
+            ASR_ENABLE_PREFIX_NO_REWIND
+            and committed_candidate
+            and not effective_snapshot.startswith(committed_candidate)
+        ):
+            next_text = committed_candidate
+            draft_text = ""
+        else:
+            draft_text = (
+                effective_snapshot[len(committed_candidate) :]
+                if len(effective_snapshot) >= len(committed_candidate)
+                else ""
+            )
+            next_text = committed_candidate + draft_text
+
+        self.asr_committed_text = committed_candidate
+        self.asr_draft_text = draft_text
 
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
@@ -1133,9 +1304,11 @@ class VoiceBotService(BaseModel):
                     self.tts_speaker = input_event.payload.speaker
                 elif input_event.event == CLIENT_END_ANSWER:
                     self.asr_force_finalize_requested = True
+                    self.asr_force_finalize_requested_mono_ms = self._mono_ms()
                     self._log("ASR_TURN_END_REQUEST source=client_end_answer")
                 elif input_event.event == CLIENT_HANGUP:
                     self.asr_force_finalize_requested = True
+                    self.asr_force_finalize_requested_mono_ms = self._mono_ms()
                     self._log("ASR_TURN_END_REQUEST source=client_hangup")
                 elif input_event.event == USER_AUDIO and input_event.data:
                     yield input_event.data
