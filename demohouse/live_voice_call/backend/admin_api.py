@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StrictBool
 from score_scale import parse_score_scale
+from stt_audio_url import verify_audio_access_signature
 
 from admin_login_guard import AdminLoginGuard, load_admin_login_guard_config
 from admin_store import (
@@ -216,6 +217,10 @@ def _resolve_request_id(request: Request) -> str:
 def _hash_username(username: str) -> str:
     normalized = (username or "").strip().lower().encode("utf-8")
     return hashlib.sha256(normalized).hexdigest()[:16]
+
+
+def _get_stt_audio_signing_secret() -> str:
+    return str(os.getenv("STT_AUDIO_SIGNING_SECRET") or "").strip()
 
 
 def _log_login_event(
@@ -641,5 +646,39 @@ def create_admin_app(
         if not detail:
             raise HTTPException(status_code=404, detail="面试链接无效或已失效")
         return {"interview": detail}
+
+    @app.get("/api/public/interviews/{token}/audio/{track}")
+    async def public_interview_audio(
+        token: str,
+        track: str,
+        exp: int = Query(..., description="unix timestamp in seconds"),
+        sig: str = Query(..., min_length=1),
+    ) -> FileResponse:
+        secret = _get_stt_audio_signing_secret()
+        if not secret:
+            raise HTTPException(status_code=503, detail="音频服务暂不可用")
+        try:
+            is_valid = verify_audio_access_signature(
+                token,
+                track,
+                exp,
+                sig,
+                secret=secret,
+            )
+        except ValueError:
+            is_valid = False
+        if not is_valid:
+            raise HTTPException(status_code=403, detail="音频签名无效或已过期")
+        path = get_audio_file_path(token, track)
+        if not path:
+            raise HTTPException(status_code=404, detail="音频不存在")
+        suffix = path.suffix.lower()
+        if suffix == ".wav":
+            media_type = "audio/wav"
+        elif suffix == ".mp3":
+            media_type = "audio/mpeg"
+        else:
+            media_type = "application/octet-stream"
+        return FileResponse(path=path, media_type=media_type, filename=Path(path).name)
 
     return app

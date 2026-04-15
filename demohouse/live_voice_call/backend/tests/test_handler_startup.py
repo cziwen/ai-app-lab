@@ -15,6 +15,7 @@ def _ok_report():
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
             "redis": CheckResult(ok=True, detail="Redis ok"),
+            "stt": CheckResult(ok=True, detail="STT skipped (not configured)"),
         },
         errors={},
     )
@@ -29,6 +30,7 @@ def _fail_report():
             "asr": CheckResult(ok=True, detail="ASR ok"),
             "tts": CheckResult(ok=True, detail="TTS ok"),
             "redis": CheckResult(ok=True, detail="Redis ok"),
+            "stt": CheckResult(ok=True, detail="STT skipped (not configured)"),
         },
         errors={"llm1": "missing key"},
     )

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-同时检测 LLM、ASR、TTS 是否可用。
+同时检测 LLM、ASR、TTS、STT 是否可用。
 
 环境变量（与 handler 启动保持一致）：
   ARK_API_KEY          - 火山方舟 API Key（必填）
@@ -17,6 +17,11 @@
   ASR_WS_URL           - ASR WebSocket 地址（可选，默认 bigmodel_async）
   TTS_APP_ID           - TTS 应用 ID
   TTS_ACCESS_TOKEN     - TTS Access Token
+  STT_APP_ID           - STT 应用 ID（可选，不配置则跳过）
+  STT_ACCESS_TOKEN     - STT Access Token
+  STT_RESOURCE_ID      - STT 资源 ID（例如 volc.seedasr.auc）
+  STT_AUDIO_PUBLIC_BASE_URL - STT 拉取候选人音频的公网基地址
+  STT_AUDIO_SIGNING_SECRET  - STT 公网音频签名密钥
 """
 import asyncio
 import sys
@@ -25,7 +30,7 @@ from startup_self_check import format_self_check_lines, run_startup_self_check
 
 
 async def main():
-    print("检测 LLM / ASR / TTS ...")
+    print("检测 LLM / ASR / TTS / STT ...")
     report = await run_startup_self_check()
     for line in format_self_check_lines(report):
         print(line)

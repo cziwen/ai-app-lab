@@ -103,6 +103,13 @@
     export TTS_ACCESS_TOKEN={YOUR_TTS_ACCESS_TOKEN}
     export TTS_SPEAKER={YOUR_TTS_SPEAKER}  # 音色配置
 
+    # STT 配置（录音文件识别，用于评分前二次转写；可选）
+    export STT_APP_ID={YOUR_STT_APP_ID}
+    export STT_ACCESS_TOKEN={YOUR_STT_ACCESS_TOKEN}
+    export STT_RESOURCE_ID={YOUR_STT_RESOURCE_ID}  # 例如 volc.seedasr.auc
+    export STT_AUDIO_PUBLIC_BASE_URL={YOUR_PUBLIC_API_BASE_URL}  # 例如 https://api.example.com
+    export STT_AUDIO_SIGNING_SECRET={YOUR_STRONG_SECRET}
+
     # Redis（必填，后端启动自检强依赖）
     # 本机直跑后端：
     export REDIS_URL=redis://127.0.0.1:6379/0
@@ -138,6 +145,14 @@
     export ASR_USE_UTTERANCES=true
     # 手动收口模式（true 时禁用 silence_timeout 自动收口，需前端点“结束本题”）
     export ASR_MANUAL_TURN_END_ENABLED=false
+    # STT submit/query 接口（默认已内置，可按需覆盖）
+    export STT_SUBMIT_URL=https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit
+    export STT_QUERY_URL=https://openspeech.bytedance.com/api/v3/auc/bigmodel/query
+    export STT_TASK_TIMEOUT_MS=90000
+    export STT_POLL_INTERVAL_MS=1000
+    export STT_AUDIO_URL_TTL_SECONDS=600
+    # 可选：启动自检时 STT 探测音频
+    export STT_SELF_CHECK_AUDIO_URL={YOUR_PUBLIC_WAV_OR_MP3_URL}
 
     # 并发控制
     export MAX_ACTIVE_INTERVIEWS=5        # 最大同时面试数

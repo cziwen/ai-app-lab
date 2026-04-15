@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import admin_api
 import admin_login_guard
 import admin_store
+import stt_audio_url
 
 
 class _FakeExpiryIndex:
@@ -350,6 +351,50 @@ def test_create_interview_enable_live_subtitle_propagates(monkeypatch, tmp_path)
     public_response = client.get(f"/api/public/interviews/{token}/access")
     assert public_response.status_code == 200
     assert public_response.json()["interview"]["enable_live_subtitle"] is True
+
+
+def test_public_audio_endpoint_requires_valid_signature(monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_AUDIO_SIGNING_SECRET", "test-secret")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="张三",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    admin_store.persist_interview_audio(
+        token,
+        candidate_pcm_bytes=b"\x00\x00" * 320,
+        interviewer_encoded_bytes=b"",
+    )
+    exp = int(time.time()) + 600
+    valid_sig = stt_audio_url.sign_audio_access(
+        token,
+        "candidate",
+        exp,
+        secret="test-secret",
+    )
+
+    ok_rsp = client.get(
+        f"/api/public/interviews/{token}/audio/candidate?exp={exp}&sig={valid_sig}"
+    )
+    assert ok_rsp.status_code == 200
+    assert ok_rsp.headers["content-type"].startswith("audio/")
+
+    bad_rsp = client.get(
+        f"/api/public/interviews/{token}/audio/candidate?exp={exp}&sig=bad"
+    )
+    assert bad_rsp.status_code == 403
 
 
 def test_create_interview_invalid_enable_live_subtitle_returns_422(monkeypatch, tmp_path):

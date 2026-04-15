@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from auc_stt_client import AucSTTClient
 from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
 from arkitect.core.component.tts.constants import EventSessionFinished
 
@@ -35,6 +36,17 @@ class RuntimeConfig:
     tts_access_token: Optional[str]
     tts_speaker: Optional[str]
     redis_url: Optional[str]
+    stt_app_id: Optional[str] = None
+    stt_access_token: Optional[str] = None
+    stt_resource_id: Optional[str] = None
+    stt_submit_url: Optional[str] = None
+    stt_query_url: Optional[str] = None
+    stt_task_timeout_ms: Optional[str] = None
+    stt_poll_interval_ms: Optional[str] = None
+    stt_audio_public_base_url: Optional[str] = None
+    stt_audio_signing_secret: Optional[str] = None
+    stt_audio_url_ttl_seconds: Optional[str] = None
+    stt_self_check_audio_url: Optional[str] = None
 
 
 @dataclass
@@ -79,6 +91,17 @@ def load_runtime_config() -> RuntimeConfig:
         tts_access_token=_env("TTS_ACCESS_TOKEN"),
         tts_speaker=_env("TTS_SPEAKER"),
         redis_url=_env("REDIS_URL"),
+        stt_app_id=_env("STT_APP_ID"),
+        stt_access_token=_env("STT_ACCESS_TOKEN"),
+        stt_resource_id=_env("STT_RESOURCE_ID"),
+        stt_submit_url=_env("STT_SUBMIT_URL"),
+        stt_query_url=_env("STT_QUERY_URL"),
+        stt_task_timeout_ms=_env("STT_TASK_TIMEOUT_MS"),
+        stt_poll_interval_ms=_env("STT_POLL_INTERVAL_MS"),
+        stt_audio_public_base_url=_env("STT_AUDIO_PUBLIC_BASE_URL"),
+        stt_audio_signing_secret=_env("STT_AUDIO_SIGNING_SECRET"),
+        stt_audio_url_ttl_seconds=_env("STT_AUDIO_URL_TTL_SECONDS"),
+        stt_self_check_audio_url=_env("STT_SELF_CHECK_AUDIO_URL"),
     )
 
 
@@ -335,6 +358,88 @@ async def check_redis(config: RuntimeConfig) -> CheckResult:
             pass
 
 
+def _infer_audio_format_from_url(url: str) -> str:
+    normalized = str(url or "").strip().lower()
+    if normalized.endswith(".wav"):
+        return "wav"
+    if normalized.endswith(".mp3"):
+        return "mp3"
+    if normalized.endswith(".ogg"):
+        return "ogg"
+    return "raw"
+
+
+async def check_stt(config: RuntimeConfig) -> CheckResult:
+    provided_fields = [
+        config.stt_app_id,
+        config.stt_access_token,
+        config.stt_resource_id,
+        config.stt_audio_public_base_url,
+        config.stt_audio_signing_secret,
+        config.stt_submit_url,
+        config.stt_query_url,
+        config.stt_task_timeout_ms,
+        config.stt_poll_interval_ms,
+        config.stt_audio_url_ttl_seconds,
+    ]
+    if not any(str(item or "").strip() for item in provided_fields):
+        return CheckResult(ok=True, detail="STT skipped (not configured)")
+
+    missing = []
+    if not config.stt_app_id:
+        missing.append("STT_APP_ID")
+    if not config.stt_access_token:
+        missing.append("STT_ACCESS_TOKEN")
+    if not config.stt_resource_id:
+        missing.append("STT_RESOURCE_ID")
+    if not config.stt_audio_public_base_url:
+        missing.append("STT_AUDIO_PUBLIC_BASE_URL")
+    if not config.stt_audio_signing_secret:
+        missing.append("STT_AUDIO_SIGNING_SECRET")
+    if missing:
+        return CheckResult(
+            ok=False,
+            detail="STT config invalid",
+            error=f"missing {','.join(missing)}",
+        )
+
+    probe_url = str(config.stt_self_check_audio_url or "").strip()
+    if not probe_url:
+        return CheckResult(ok=True, detail="STT config ok (probe skipped)")
+
+    try:
+        task_timeout_ms = int(str(config.stt_task_timeout_ms or "90000"))
+    except ValueError:
+        task_timeout_ms = 90000
+    try:
+        poll_interval_ms = int(str(config.stt_poll_interval_ms or "1000"))
+    except ValueError:
+        poll_interval_ms = 1000
+
+    client = AucSTTClient(
+        app_id=str(config.stt_app_id or ""),
+        access_token=str(config.stt_access_token or ""),
+        resource_id=str(config.stt_resource_id or ""),
+        submit_url=str(config.stt_submit_url or ""),
+        query_url=str(config.stt_query_url or ""),
+        task_timeout_ms=max(5000, task_timeout_ms),
+        poll_interval_ms=max(200, poll_interval_ms),
+    )
+    try:
+        result = await asyncio.to_thread(
+            client.transcribe_audio_url,
+            audio_url=probe_url,
+            audio_format=_infer_audio_format_from_url(probe_url),
+            show_utterances=True,
+        )
+    except Exception as e:
+        return CheckResult(ok=False, detail="STT failed", error=str(e))
+
+    if str(result.text or "").strip():
+        return CheckResult(ok=True, detail="STT ok")
+    return CheckResult(ok=False, detail="STT failed", error="STT probe empty result")
+
+
 async def run_startup_self_check(
     config: Optional[RuntimeConfig] = None,
 ) -> SelfCheckReport:
@@ -347,6 +452,7 @@ async def run_startup_self_check(
     checks["asr"] = await check_asr(runtime)
     checks["tts"] = await check_tts(runtime)
     checks["redis"] = await check_redis(runtime)
+    checks["stt"] = await check_stt(runtime)
 
     errors = {
         name: result.error
@@ -360,7 +466,7 @@ async def run_startup_self_check(
 def format_self_check_lines(report: SelfCheckReport) -> List[str]:
     status = "PASS" if report.ok else "FAIL"
     lines = [f"[StartupSelfCheck] summary status={status}"]
-    for name in ("llm1", "llm2", "llm3", "asr", "tts", "redis"):
+    for name in ("llm1", "llm2", "llm3", "asr", "tts", "redis", "stt"):
         result = report.checks.get(name)
         if not result:
             lines.append(f"[StartupSelfCheck] {name} status=FAIL detail=missing_result")

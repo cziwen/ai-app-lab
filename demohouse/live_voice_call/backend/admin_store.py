@@ -15,9 +15,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from arkitect.telemetry.logger import INFO
+from auc_stt_client import (
+    DEFAULT_STT_QUERY_URL,
+    DEFAULT_STT_SUBMIT_URL,
+    AucSTTClient,
+    AucSTTResult,
+)
 from redis import Redis
 from redis.exceptions import RedisError
 from interview_cache import CACHE_MISS, InterviewTokenCache
+from stt_audio_url import build_signed_audio_url
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -73,6 +80,19 @@ INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE = max(
     1, int(os.getenv("INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE", "200"))
 )
 CANONICAL_EVENTS_ONLY_MIN_CREATED_AT_ENV = "CANONICAL_EVENTS_ONLY_MIN_CREATED_AT"
+STT_APP_ID_ENV = "STT_APP_ID"
+STT_ACCESS_TOKEN_ENV = "STT_ACCESS_TOKEN"
+STT_RESOURCE_ID_ENV = "STT_RESOURCE_ID"
+STT_SUBMIT_URL_ENV = "STT_SUBMIT_URL"
+STT_QUERY_URL_ENV = "STT_QUERY_URL"
+STT_TASK_TIMEOUT_MS_ENV = "STT_TASK_TIMEOUT_MS"
+STT_POLL_INTERVAL_MS_ENV = "STT_POLL_INTERVAL_MS"
+STT_AUDIO_PUBLIC_BASE_URL_ENV = "STT_AUDIO_PUBLIC_BASE_URL"
+STT_AUDIO_SIGNING_SECRET_ENV = "STT_AUDIO_SIGNING_SECRET"
+STT_AUDIO_URL_TTL_SECONDS_ENV = "STT_AUDIO_URL_TTL_SECONDS"
+DEFAULT_STT_TASK_TIMEOUT_MS = 90000
+DEFAULT_STT_POLL_INTERVAL_MS = 1000
+DEFAULT_STT_AUDIO_URL_TTL_SECONDS = 600
 
 INTERVIEW_CACHE = InterviewTokenCache()
 
@@ -3077,6 +3097,175 @@ def _attempt_audio_rows_are_complete(
     return all({"candidate", "interviewer"}.issubset(present_tracks.get(seq, set())) for seq in normalized_attempts)
 
 
+def _load_stt_runtime_config() -> Dict[str, Any]:
+    app_id = str(os.getenv(STT_APP_ID_ENV) or "").strip()
+    access_token = str(os.getenv(STT_ACCESS_TOKEN_ENV) or "").strip()
+    resource_id = str(os.getenv(STT_RESOURCE_ID_ENV) or "").strip()
+    submit_url = str(os.getenv(STT_SUBMIT_URL_ENV) or "").strip() or DEFAULT_STT_SUBMIT_URL
+    query_url = str(os.getenv(STT_QUERY_URL_ENV) or "").strip() or DEFAULT_STT_QUERY_URL
+    audio_public_base_url = str(os.getenv(STT_AUDIO_PUBLIC_BASE_URL_ENV) or "").strip()
+    audio_signing_secret = str(os.getenv(STT_AUDIO_SIGNING_SECRET_ENV) or "").strip()
+    task_timeout_ms = _env_int(
+        STT_TASK_TIMEOUT_MS_ENV,
+        DEFAULT_STT_TASK_TIMEOUT_MS,
+        minimum=5000,
+        maximum=300000,
+    )
+    poll_interval_ms = _env_int(
+        STT_POLL_INTERVAL_MS_ENV,
+        DEFAULT_STT_POLL_INTERVAL_MS,
+        minimum=200,
+        maximum=10000,
+    )
+    audio_url_ttl_seconds = _env_int(
+        STT_AUDIO_URL_TTL_SECONDS_ENV,
+        DEFAULT_STT_AUDIO_URL_TTL_SECONDS,
+        minimum=30,
+        maximum=3600,
+    )
+
+    has_any = any(
+        [
+            app_id,
+            access_token,
+            resource_id,
+            audio_public_base_url,
+            audio_signing_secret,
+            str(os.getenv(STT_SUBMIT_URL_ENV) or "").strip(),
+            str(os.getenv(STT_QUERY_URL_ENV) or "").strip(),
+        ]
+    )
+    missing_fields = [
+        name
+        for name, value in (
+            (STT_APP_ID_ENV, app_id),
+            (STT_ACCESS_TOKEN_ENV, access_token),
+            (STT_RESOURCE_ID_ENV, resource_id),
+            (STT_AUDIO_PUBLIC_BASE_URL_ENV, audio_public_base_url),
+            (STT_AUDIO_SIGNING_SECRET_ENV, audio_signing_secret),
+        )
+        if not value
+    ]
+    return {
+        "enabled": has_any and not missing_fields,
+        "invalid": has_any and bool(missing_fields),
+        "missing_fields": missing_fields,
+        "app_id": app_id,
+        "access_token": access_token,
+        "resource_id": resource_id,
+        "submit_url": submit_url,
+        "query_url": query_url,
+        "audio_public_base_url": audio_public_base_url,
+        "audio_signing_secret": audio_signing_secret,
+        "task_timeout_ms": task_timeout_ms,
+        "poll_interval_ms": poll_interval_ms,
+        "audio_url_ttl_seconds": audio_url_ttl_seconds,
+    }
+
+
+def _build_stt_candidate_audio_url(token: str, stt_config: Dict[str, Any]) -> str:
+    return build_signed_audio_url(
+        base_url=str(stt_config.get("audio_public_base_url", "") or ""),
+        token=token,
+        track="candidate",
+        secret=str(stt_config.get("audio_signing_secret", "") or ""),
+        ttl_seconds=int(
+            stt_config.get("audio_url_ttl_seconds", DEFAULT_STT_AUDIO_URL_TTL_SECONDS)
+            or DEFAULT_STT_AUDIO_URL_TTL_SECONDS
+        ),
+    )
+
+
+def _detect_audio_format_for_stt(path: str) -> str:
+    suffix = Path(str(path or "")).suffix.lower()
+    if suffix == ".wav":
+        return "wav"
+    if suffix == ".mp3":
+        return "mp3"
+    if suffix == ".ogg":
+        return "ogg"
+    return "raw"
+
+
+def _stt_units_from_result(stt_result: AucSTTResult) -> List[str]:
+    units = [str(item or "").strip() for item in (stt_result.utterances or [])]
+    units = [item for item in units if item]
+    if units:
+        return units
+    fallback_text = str(stt_result.text or "").strip()
+    if fallback_text:
+        return [fallback_text]
+    return []
+
+
+def _rewrite_candidate_events_with_stt(
+    canonical_events: List[Dict[str, Any]],
+    *,
+    stt_result: AucSTTResult,
+) -> Dict[str, int]:
+    candidate_indexes = [
+        idx
+        for idx, event in enumerate(canonical_events)
+        if str(event.get("role", "")).strip() == "candidate"
+        and str(event.get("content", "")).strip()
+    ]
+    candidate_count = len(candidate_indexes)
+    if candidate_count <= 0:
+        return {"candidate_count": 0, "replaced_count": 0, "stt_unit_count": 0}
+
+    stt_units = _stt_units_from_result(stt_result)
+    if not stt_units:
+        return {"candidate_count": candidate_count, "replaced_count": 0, "stt_unit_count": 0}
+
+    stt_pos = 0
+    replaced_count = 0
+    stt_unit_count = len(stt_units)
+
+    for offset, event_idx in enumerate(candidate_indexes):
+        if stt_pos >= stt_unit_count:
+            break
+        event = canonical_events[event_idx]
+        source_text = str(event.get("content", "") or "").strip()
+        quota = max(1, len(source_text))
+        remaining_events = candidate_count - offset - 1
+
+        assigned: List[str] = []
+        assigned_len = 0
+        if remaining_events <= 0:
+            assigned = stt_units[stt_pos:]
+            assigned_len = sum(len(item) for item in assigned)
+            stt_pos = stt_unit_count
+        else:
+            while stt_pos < stt_unit_count:
+                units_left_including_current = stt_unit_count - stt_pos
+                if (
+                    assigned
+                    and assigned_len >= quota
+                    and units_left_including_current <= remaining_events
+                ):
+                    break
+                next_unit = stt_units[stt_pos]
+                assigned.append(next_unit)
+                assigned_len += len(next_unit)
+                stt_pos += 1
+                if (
+                    assigned_len >= quota
+                    and (stt_unit_count - stt_pos) >= remaining_events
+                ):
+                    break
+
+        rewritten = "".join(assigned).strip()
+        if rewritten:
+            event["content"] = rewritten
+            replaced_count += 1
+
+    return {
+        "candidate_count": candidate_count,
+        "replaced_count": replaced_count,
+        "stt_unit_count": stt_unit_count,
+    }
+
+
 def _compute_echo_risk_flags(
     canonical_events: Sequence[Dict[str, Any]],
     *,
@@ -3584,6 +3773,81 @@ def finalize_canonical_artifacts(
                     token=token,
                     track="interviewer",
                     flags=consistency_flags,
+                )
+
+            stt_config = _load_stt_runtime_config()
+            if stt_config["invalid"]:
+                consistency_flags.append("stt_failed:config")
+                consistency_flags.append("stt_full_fallback")
+                INFO(
+                    "event=finalize.stt_config_invalid "
+                    f"token={token} missing={','.join(stt_config['missing_fields']) or '-'}"
+                )
+            elif stt_config["enabled"] and candidate_path:
+                try:
+                    stt_audio_url = _build_stt_candidate_audio_url(token, stt_config)
+                    stt_client = AucSTTClient(
+                        app_id=str(stt_config["app_id"]),
+                        access_token=str(stt_config["access_token"]),
+                        resource_id=str(stt_config["resource_id"]),
+                        submit_url=str(stt_config["submit_url"]),
+                        query_url=str(stt_config["query_url"]),
+                        task_timeout_ms=int(stt_config["task_timeout_ms"]),
+                        poll_interval_ms=int(stt_config["poll_interval_ms"]),
+                    )
+                    stt_result = stt_client.transcribe_audio_url(
+                        audio_url=stt_audio_url,
+                        audio_format=_detect_audio_format_for_stt(candidate_path),
+                        show_utterances=True,
+                    )
+                    rewrite_meta = _rewrite_candidate_events_with_stt(
+                        canonical_events,
+                        stt_result=stt_result,
+                    )
+                    candidate_count = int(rewrite_meta.get("candidate_count", 0) or 0)
+                    replaced_count = int(rewrite_meta.get("replaced_count", 0) or 0)
+                    if candidate_count <= 0 or replaced_count <= 0:
+                        consistency_flags.append("stt_full_fallback")
+                    elif replaced_count < candidate_count:
+                        consistency_flags.append("stt_applied")
+                        consistency_flags.append("stt_partial_fallback")
+                    else:
+                        consistency_flags.append("stt_applied")
+                    INFO(
+                        "event=finalize.stt_rewrite "
+                        f"token={token} candidate_count={candidate_count} "
+                        f"replaced_count={replaced_count} "
+                        f"stt_unit_count={int(rewrite_meta.get('stt_unit_count', 0) or 0)} "
+                        f"text_len={len(stt_result.text or '')}"
+                    )
+                except Exception as stt_err:
+                    consistency_flags.append(f"stt_failed:{type(stt_err).__name__}")
+                    consistency_flags.append("stt_full_fallback")
+                    INFO(
+                        "event=finalize.stt_failed "
+                        f"token={token} error_type={type(stt_err).__name__} error={stt_err}"
+                    )
+
+            # STT may rewrite candidate text; persist canonical turns after rewrite.
+            conn.execute(
+                "DELETE FROM interview_turns WHERE interview_token = ?",
+                (token,),
+            )
+            for idx, event in enumerate(canonical_events):
+                conn.execute(
+                    """
+                    INSERT INTO interview_turns (
+                        interview_token, role, content, created_at, sort_order
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        token,
+                        str(event["role"]),
+                        str(event["content"]),
+                        str(event["created_at"] or now_iso),
+                        idx,
+                    ),
                 )
 
             score_inputs = build_score_inputs_from_canonical_turns(

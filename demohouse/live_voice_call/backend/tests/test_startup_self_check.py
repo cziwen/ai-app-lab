@@ -26,6 +26,12 @@ def _make_config(ark_api_key="k"):
     )
 
 
+def _with_config(base: ssc.RuntimeConfig, **kwargs):
+    payload = dict(base.__dict__)
+    payload.update(kwargs)
+    return ssc.RuntimeConfig(**payload)
+
+
 def test_check_llm1_requires_ark_api_key():
     async def _run():
         config = _make_config(ark_api_key=None)
@@ -205,5 +211,59 @@ def test_check_redis_requires_url():
         result = await ssc.check_redis(config)
         assert result.ok is False
         assert result.error == "missing REDIS_URL"
+
+    asyncio.run(_run())
+
+
+def test_check_stt_skips_when_not_configured():
+    async def _run():
+        result = await ssc.check_stt(_make_config())
+        assert result.ok is True
+        assert "skipped" in result.detail
+
+    asyncio.run(_run())
+
+
+def test_check_stt_requires_complete_config():
+    async def _run():
+        config = _with_config(
+            _make_config(),
+            stt_app_id="stt-app",
+            stt_access_token=None,
+            stt_resource_id="volc.seedasr.auc",
+            stt_audio_public_base_url="https://api.example.com",
+            stt_audio_signing_secret="secret",
+        )
+        result = await ssc.check_stt(config)
+        assert result.ok is False
+        assert result.detail == "STT config invalid"
+        assert "STT_ACCESS_TOKEN" in (result.error or "")
+
+    asyncio.run(_run())
+
+
+def test_check_stt_probe_success(monkeypatch):
+    async def _run():
+        config = _with_config(
+            _make_config(),
+            stt_app_id="stt-app",
+            stt_access_token="stt-token",
+            stt_resource_id="volc.seedasr.auc",
+            stt_audio_public_base_url="https://api.example.com",
+            stt_audio_signing_secret="secret",
+            stt_self_check_audio_url="https://example.com/sample.wav",
+        )
+
+        class _FakeResult:
+            text = "你好"
+
+        monkeypatch.setattr(
+            ssc.AucSTTClient,
+            "transcribe_audio_url",
+            lambda self, **kwargs: _FakeResult(),
+        )
+        result = await ssc.check_stt(config)
+        assert result.ok is True
+        assert result.detail == "STT ok"
 
     asyncio.run(_run())
