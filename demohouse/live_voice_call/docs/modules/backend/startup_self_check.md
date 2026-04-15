@@ -18,7 +18,9 @@
   - `STT_AUDIO_PUBLIC_BASE_URL`
   - `STT_AUDIO_SIGNING_SECRET`
 - 启动自检阶段仅做配置完整性校验（不发起 submit/query 远程探测）。
-- 手动探测请使用：`python backend/check_stt_probe.py`（支持 `--url/--format`）。
+- 手动探测请使用：`python backend/check_stt_probe.py`（支持 `--url/--format/--quiet-query/--dump-json`）。
+- 默认会输出每轮 query 状态码（`code/message/has_result`）；`--quiet-query` 可关闭逐轮日志。
+- `--dump-json <path>` 可将完整 STT 结果（含原始 payload）落盘。
 
 ## 对外接口
 - `load_runtime_config()`：加载环境变量到 `RuntimeConfig`

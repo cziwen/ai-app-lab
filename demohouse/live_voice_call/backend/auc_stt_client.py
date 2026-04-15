@@ -219,9 +219,12 @@ class AucSTTClient:
     @staticmethod
     def _extract_result(*, task_id: str, payload: Dict[str, Any]) -> Optional[AucSTTResult]:
         raw_result = payload.get("result")
-        if not isinstance(raw_result, list) or not raw_result:
+        if isinstance(raw_result, dict):
+            first = raw_result
+        elif isinstance(raw_result, list) and raw_result:
+            first = raw_result[0]
+        else:
             return None
-        first = raw_result[0]
         if not isinstance(first, dict):
             return None
 

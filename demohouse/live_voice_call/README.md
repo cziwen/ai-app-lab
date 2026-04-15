@@ -178,6 +178,18 @@
     export INTERVIEW_BASE_DOMAIN=http://localhost:8080
     ```
 
+    **STT 手动探测示例**：
+    ```shell
+    # 默认打印每轮 query 状态码
+    python backend/check_stt_probe.py --url https://smartinterview.cn/stt_probe.mp3 --format mp3
+
+    # 输出完整结果 JSON 到文件
+    python backend/check_stt_probe.py --url https://smartinterview.cn/stt_probe.mp3 --format mp3 --dump-json /tmp/stt_probe_result.json
+
+    # 仅看最终结果（关闭每轮 query 日志）
+    python backend/check_stt_probe.py --url https://smartinterview.cn/stt_probe.mp3 --format mp3 --quiet-query
+    ```
+
     **日志配置（可选）**：
     ```shell
     # 异步日志队列
@@ -241,6 +253,8 @@
    ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
    STT 为可选能力：未配置 STT 时自检会显示 `STT skipped (not configured)`；若只配置了部分 STT 字段，则会按配置错误失败。
    启动自检对 STT 仅做配置校验，不会在启动阶段发起 submit/query 远程探测；可使用 `python backend/check_stt_probe.py` 手动探测。
+   `check_stt_probe.py` 默认会打印每轮 query 状态码（`code/message/has_result`）；可用 `--quiet-query` 关闭。
+   如需保存完整结果 JSON，可使用 `--dump-json /tmp/stt_probe_result.json`。
    Redis 也是强依赖：`REDIS_URL` 缺失、Redis 未启动、或 Redis 配置不满足（`maxmemory=256MB` 且 `maxmemory-policy=allkeys-lru`）都会启动失败。
    若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：
