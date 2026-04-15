@@ -218,12 +218,23 @@ class AucSTTClient:
 
     @staticmethod
     def _extract_result(*, task_id: str, payload: Dict[str, Any]) -> Optional[AucSTTResult]:
-        raw_result = payload.get("result")
-        if isinstance(raw_result, dict):
-            first = raw_result
-        elif isinstance(raw_result, list) and raw_result:
-            first = raw_result[0]
-        else:
+        def _pick_result_object(container: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(container, dict):
+                return None
+            candidate = container.get("result")
+            if isinstance(candidate, dict):
+                return candidate
+            if isinstance(candidate, list) and candidate and isinstance(candidate[0], dict):
+                return candidate[0]
+            # Some protocols return text/utterances directly without "result".
+            if "text" in container or "utterances" in container:
+                return container
+            return None
+
+        first = _pick_result_object(payload)
+        if first is None:
+            first = _pick_result_object(payload.get("resp"))
+        if first is None:
             return None
         if not isinstance(first, dict):
             return None
