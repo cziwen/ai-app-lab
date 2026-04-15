@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-}"
 if [[ -z "$MODE" ]]; then
-  echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [extra renew args]"
+  echo "Usage: ./deploy/ssl.sh <init|renew|activate|cleanup|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [--cleanup|--no-cleanup] [extra renew args]"
   exit 1
 fi
 shift || true
@@ -19,6 +19,7 @@ SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-2}"
 FRONTEND_NODE_OPTIONS="${FRONTEND_NODE_OPTIONS:---max-old-space-size=512}"
 STOP_NONESSENTIAL_CONTAINERS_DEFAULT="${STOP_NONESSENTIAL_CONTAINERS_DEFAULT:-1}"
 STOP_EXTRA_PROCESSES_DEFAULT="${STOP_EXTRA_PROCESSES_DEFAULT:-0}"
+AUTO_CLEANUP_DEFAULT="${AUTO_CLEANUP_DEFAULT:-1}"
 EXTRA_STOP_PATTERNS="${EXTRA_STOP_PATTERNS:-code-server|vscode-server|AliYunDunMonito|aegis_cli}"
 GRAFANA_WAIT_TIMEOUT_SECONDS="${GRAFANA_WAIT_TIMEOUT_SECONDS:-180}"
 KEEP_SERVICES=(backend gateway certbot grafana prometheus loki promtail node-exporter redis-exporter redis)
@@ -28,6 +29,7 @@ EMAIL_OVERRIDE=""
 EXTRA_ARGS=()
 STOP_NONESSENTIAL_CONTAINERS="$STOP_NONESSENTIAL_CONTAINERS_DEFAULT"
 STOP_EXTRA_PROCESSES="$STOP_EXTRA_PROCESSES_DEFAULT"
+CLEANUP_AFTER_INIT="$AUTO_CLEANUP_DEFAULT"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +55,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-stop-extra-processes)
       STOP_EXTRA_PROCESSES="0"
+      shift
+      ;;
+    --cleanup)
+      CLEANUP_AFTER_INIT="1"
+      shift
+      ;;
+    --no-cleanup)
+      CLEANUP_AFTER_INIT="0"
       shift
       ;;
     *)
@@ -105,6 +115,10 @@ compose() {
   docker compose "$@"
 }
 
+docker_ready() {
+  docker info >/dev/null 2>&1
+}
+
 print_precheck() {
   echo "[ssl] ===== Precheck ====="
   free -h || true
@@ -113,6 +127,22 @@ print_precheck() {
   echo "[ssl] ----- running containers -----"
   docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' || true
   echo "[ssl] ===================="
+}
+
+cleanup_runtime_garbage() {
+  echo "[ssl] Cleaning up Docker build/runtime garbage"
+  if ! docker_ready; then
+    echo "[ssl] Docker daemon unavailable, skip cleanup"
+    return 0
+  fi
+
+  docker image prune -f >/dev/null || true
+  docker builder prune -f --filter 'until=168h' >/dev/null || true
+  docker container prune -f >/dev/null || true
+
+  if [[ -d "$PROJECT_DIR/deploy/acme-webroot" ]]; then
+    find "$PROJECT_DIR/deploy/acme-webroot" -mindepth 1 -type f -mtime +7 -delete 2>/dev/null || true
+  fi
 }
 
 compose_build_serial() {
@@ -351,6 +381,12 @@ run_init() {
 
   activate_latest_cert "$domain"
 
+  if [[ "$CLEANUP_AFTER_INIT" == "1" ]]; then
+    cleanup_runtime_garbage
+  else
+    echo "[ssl] Skip cleanup after init (--no-cleanup)"
+  fi
+
   echo "[ssl] Init completed"
 }
 
@@ -401,9 +437,12 @@ case "$MODE" in
   uninstall-cron)
     uninstall_cron
     ;;
+  cleanup)
+    cleanup_runtime_garbage
+    ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Usage: ./deploy/ssl.sh <init|renew|activate|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [extra renew args]"
+    echo "Usage: ./deploy/ssl.sh <init|renew|activate|cleanup|uninstall-cron> [--domain <domain>] [--email <email>] [--stop-nonessential|--no-stop-nonessential] [--stop-extra-processes|--no-stop-extra-processes] [--cleanup|--no-cleanup] [extra renew args]"
     exit 1
     ;;
 esac

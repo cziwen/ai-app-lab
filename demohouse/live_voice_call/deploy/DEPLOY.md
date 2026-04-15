@@ -54,6 +54,7 @@ cp .env.example .env
 - 优先复用已有 Let’s Encrypt 证书（不存在时才申请）
 - 自动切换活动证书软链 `deploy/letsencrypt/live/__active__`
 - 校验并重载 Nginx
+- `init` 结束后默认自动清理 Docker 构建垃圾（可关闭）
 
 可选参数（环境变量）：
 
@@ -62,11 +63,19 @@ cp .env.example .env
 - `STOP_NONESSENTIAL_CONTAINERS_DEFAULT=1`：`init` 时默认停非本项目容器
 - `STOP_EXTRA_PROCESSES_DEFAULT=0`：是否默认停额外宿主进程（例如 `vscode-server`）
 - `GRAFANA_WAIT_TIMEOUT_SECONDS=180`：等待 Grafana 启动超时时间（秒）
+- `AUTO_CLEANUP_DEFAULT=1`：`init` 后是否默认执行清理
 
 可选参数（命令行）：
 
 - `--no-stop-nonessential`：保留其它容器，不执行自动清场
 - `--stop-extra-processes`：按 `EXTRA_STOP_PATTERNS` 临时停止额外宿主进程
+- `--no-cleanup`：本次 `init` 跳过自动清理
+
+手工清理（只清理 Docker 悬空镜像/旧 build cache/停止容器 + 过期 acme webroot 文件）：
+
+```bash
+./deploy/ssl.sh cleanup
+```
 
 若你刚升级了后端依赖（例如 `volcengine-python-sdk`），必须重建 backend 镜像：
 
