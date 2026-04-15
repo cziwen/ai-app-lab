@@ -255,12 +255,20 @@ class SaucASRClient:
         access_key: str,
         resource_id: str,
         ws_url: str = DEFAULT_ASR_WS_URL,
+        segmentation_mode: str = "semantic",
+        aivad_enabled: bool = True,
+        silence_time_ms: int = 800,
+        end_window_size_ms: int = 800,
         log_fn: Optional[Callable[[str], None]] = None,
     ):
         self.app_key = (app_key or "").strip()
         self.access_key = (access_key or "").strip()
         self.resource_id = (resource_id or "").strip()
         self.ws_url = (ws_url or "").strip() or DEFAULT_ASR_WS_URL
+        self.segmentation_mode = (segmentation_mode or "").strip().lower() or "semantic"
+        self.aivad_enabled = bool(aivad_enabled)
+        self.silence_time_ms = int(silence_time_ms)
+        self.end_window_size_ms = int(end_window_size_ms)
         self.log_fn = log_fn
         self.inited = False
         self.connect_id = ""
@@ -349,6 +357,19 @@ class SaucASRClient:
             await self.init()
         if self._session_started:
             return
+        request_payload: Dict[str, Any] = {
+            "model_name": "bigmodel",
+            "enable_itn": True,
+            "enable_punc": True,
+            "show_utterances": True,
+            "enable_nonstream": False,
+        }
+        if self.segmentation_mode == "silence":
+            request_payload["end_window_size"] = self.end_window_size_ms
+        else:
+            request_payload["AIVAD"] = self.aivad_enabled
+            request_payload["SilenceTime"] = self.silence_time_ms
+
         full_req = SaucProtocolCodec.build_full_client_request(
             {
                 "audio": {
@@ -358,13 +379,7 @@ class SaucASRClient:
                     "bits": 16,
                     "channel": 1,
                 },
-                "request": {
-                    "model_name": "bigmodel",
-                    "enable_itn": True,
-                    "enable_punc": True,
-                    "show_utterances": True,
-                    "enable_nonstream": False,
-                },
+                "request": request_payload,
             }
         )
         await self._ws.send(full_req)

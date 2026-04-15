@@ -33,9 +33,16 @@ def _make_service(fake_asr):
     return svc, logs
 
 
-def _asr_response(text: str, duration: int = 0, stream_connect_id: str = ""):
+def _asr_response(
+    text: str,
+    duration: int = 0,
+    stream_connect_id: str = "",
+    utterances=None,
+):
+    if utterances is None:
+        utterances = []
     return SaucASRFullServerResponse(
-        result=SaucASRResult(text=text, utterances=[]),
+        result=SaucASRResult(text=text, utterances=utterances),
         audio=SaucASRAudio(duration=duration),
         stream_connect_id=stream_connect_id,
     )
@@ -69,6 +76,44 @@ def test_manual_turn_end_enabled_loader(monkeypatch):
 
     monkeypatch.setenv("ASR_MANUAL_TURN_END_ENABLED", "false")
     assert service._load_asr_manual_turn_end_enabled() is False
+
+
+def test_load_asr_segmentation_mode_loader(monkeypatch):
+    monkeypatch.setenv("ASR_SEGMENTATION_MODE", "silence")
+    assert service._load_asr_segmentation_mode() == "silence"
+
+    monkeypatch.setenv("ASR_SEGMENTATION_MODE", "invalid")
+    assert service._load_asr_segmentation_mode() == "semantic"
+
+
+def test_load_asr_silence_time_ms_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_SILENCE_TIME_MS", "100")
+    assert service._load_asr_silence_time_ms() == service.MIN_ASR_SILENCE_TIME_MS
+
+    monkeypatch.setenv("ASR_SILENCE_TIME_MS", "9000")
+    assert service._load_asr_silence_time_ms() == service.MAX_ASR_SILENCE_TIME_MS
+
+
+def test_load_asr_end_window_size_ms_clamps(monkeypatch):
+    monkeypatch.setenv("ASR_END_WINDOW_SIZE_MS", "100")
+    assert (
+        service._load_asr_end_window_size_ms()
+        == service.MIN_ASR_END_WINDOW_SIZE_MS
+    )
+
+    monkeypatch.setenv("ASR_END_WINDOW_SIZE_MS", "9000")
+    assert (
+        service._load_asr_end_window_size_ms()
+        == service.MAX_ASR_END_WINDOW_SIZE_MS
+    )
+
+
+def test_load_asr_use_utterances_loader(monkeypatch):
+    monkeypatch.setenv("ASR_USE_UTTERANCES", "true")
+    assert service._load_asr_use_utterances() is True
+
+    monkeypatch.setenv("ASR_USE_UTTERANCES", "false")
+    assert service._load_asr_use_utterances() is False
 
 
 def test_finalize_turn_when_silence_hits_threshold(monkeypatch):
@@ -602,5 +647,66 @@ def test_silence_timeout_grace_expires_without_late_packet(monkeypatch):
         assert recognized.sentence == "你好"
         assert any("ASR_PRE_FINALIZE_DRAIN_START" in line for line in logs)
         assert any("ASR_PRE_FINALIZE_DRAIN_TIMEOUT" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_utterances_incrementally_append_and_deduplicate(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASRInterval", 40)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response(
+                "我今天想分享",
+                100,
+                utterances=[{"text": "我今天想分享", "start_time": 0, "end_time": 600}],
+            )
+            await asyncio.sleep(0.02)
+            yield _asr_response(
+                "我今天想分享一个项目",
+                200,
+                utterances=[
+                    {"text": "我今天想分享", "start_time": 0, "end_time": 600},
+                    {"text": "一个项目", "start_time": 610, "end_time": 1000},
+                ],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "我今天想分享一个项目"
+
+    asyncio.run(_run())
+
+
+def test_utterances_disabled_falls_back_to_result_text(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", False)
+        monkeypatch.setattr(service, "ASRInterval", 40)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        async def _responses():
+            yield _asr_response(
+                "回退文本",
+                100,
+                utterances=[{"text": "", "start_time": 0, "end_time": 300}],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "回退文本"
 
     asyncio.run(_run())

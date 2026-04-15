@@ -182,6 +182,12 @@ def _decode_audio_payload(frame: bytes) -> bytes:
     return gzip.decompress(compressed) if compressed else b""
 
 
+def _decode_full_request_payload(frame: bytes) -> dict:
+    payload_size = struct.unpack(">I", frame[4:8])[0]
+    compressed = frame[8 : 8 + payload_size]
+    return json.loads(gzip.decompress(compressed).decode("utf-8"))
+
+
 def test_stream_asr_wait_next_packet_timeout_is_graceful_end():
     class _TimeoutWS:
         closed = False
@@ -342,5 +348,74 @@ def test_stream_asr_non_timeout_error_still_raises():
             assert False, "non-timeout server error should raise RuntimeError"
         except RuntimeError as err:
             assert "ASR server error code=45000001" in str(err)
+
+    asyncio.run(_run())
+
+
+def test_ensure_session_started_uses_semantic_segmentation_payload():
+    class _WS:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, data):
+            self.sent.append(data)
+
+    async def _run():
+        ws = _WS()
+        client = SaucASRClient(
+            app_key="app",
+            access_key="token",
+            resource_id="volc.bigasr.sauc.duration",
+            segmentation_mode="semantic",
+            aivad_enabled=True,
+            silence_time_ms=900,
+        )
+        client.inited = True
+        client._ws = ws
+
+        await client._ensure_session_started()
+
+        assert len(ws.sent) == 1
+        payload = _decode_full_request_payload(ws.sent[0])
+        request = payload["request"]
+        assert request.get("AIVAD") is True
+        assert request.get("SilenceTime") == 900
+        assert "end_window_size" not in request
+
+    asyncio.run(_run())
+
+
+def test_ensure_session_started_uses_silence_segmentation_payload():
+    class _WS:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, data):
+            self.sent.append(data)
+
+    async def _run():
+        ws = _WS()
+        client = SaucASRClient(
+            app_key="app",
+            access_key="token",
+            resource_id="volc.bigasr.sauc.duration",
+            segmentation_mode="silence",
+            end_window_size_ms=700,
+        )
+        client.inited = True
+        client._ws = ws
+
+        await client._ensure_session_started()
+
+        assert len(ws.sent) == 1
+        payload = _decode_full_request_payload(ws.sent[0])
+        request = payload["request"]
+        assert request.get("end_window_size") == 700
+        assert "AIVAD" not in request
+        assert "SilenceTime" not in request
 
     asyncio.run(_run())

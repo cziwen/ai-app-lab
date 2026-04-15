@@ -17,7 +17,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
+from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Set, Union
 
 from arkitect.core.component.llm import BaseChatLanguageModel
 from arkitect.core.component.llm.model import ArkMessage
@@ -51,6 +51,7 @@ from scripted_tts_memory_cache import (
     CachedTTSSentence,
     ScriptedTTSMemoryCache,
 )
+from pydantic import Field
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -61,6 +62,15 @@ MAX_ASR_SILENCE_TIMEOUT_MS = 15000
 DEFAULT_ASR_PRE_FINALIZE_GRACE_MS = 400
 MAX_ASR_PRE_FINALIZE_GRACE_MS = 2000
 DEFAULT_ASR_MANUAL_TURN_END_ENABLED = False
+DEFAULT_ASR_SEGMENTATION_MODE = "semantic"
+DEFAULT_ASR_AIVAD = True
+DEFAULT_ASR_SILENCE_TIME_MS = 800
+MIN_ASR_SILENCE_TIME_MS = 500
+MAX_ASR_SILENCE_TIME_MS = 3000
+DEFAULT_ASR_END_WINDOW_SIZE_MS = 800
+MIN_ASR_END_WINDOW_SIZE_MS = 300
+MAX_ASR_END_WINDOW_SIZE_MS = 5000
+DEFAULT_ASR_USE_UTTERANCES = True
 DEFAULT_INTERVIEW_GLOBAL_TURN_LIMIT = 300
 RESUME_MODE_NONE = "none"
 RESUME_MODE_QUESTION_START = "question_start"
@@ -141,6 +151,101 @@ def _load_asr_manual_turn_end_enabled() -> bool:
     return DEFAULT_ASR_MANUAL_TURN_END_ENABLED
 
 
+def _parse_bool_env(raw_value: str, default: bool, *, name: str) -> bool:
+    value = (raw_value or "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    INFO(f"{name} invalid, fallback to default value={str(default).lower()}")
+    return default
+
+
+def _load_asr_segmentation_mode() -> str:
+    raw_value = (os.getenv("ASR_SEGMENTATION_MODE") or "").strip().lower()
+    if not raw_value:
+        return DEFAULT_ASR_SEGMENTATION_MODE
+    if raw_value in {"semantic", "silence"}:
+        return raw_value
+    INFO(
+        "ASR_SEGMENTATION_MODE invalid, fallback to default "
+        f"value={DEFAULT_ASR_SEGMENTATION_MODE}"
+    )
+    return DEFAULT_ASR_SEGMENTATION_MODE
+
+
+def _load_asr_aivad_enabled() -> bool:
+    return _parse_bool_env(
+        os.getenv("ASR_AIVAD") or "",
+        DEFAULT_ASR_AIVAD,
+        name="ASR_AIVAD",
+    )
+
+
+def _load_asr_silence_time_ms() -> int:
+    raw_value = (os.getenv("ASR_SILENCE_TIME_MS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_SILENCE_TIME_MS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_SILENCE_TIME_MS invalid, fallback to default "
+            f"value={DEFAULT_ASR_SILENCE_TIME_MS}"
+        )
+        return DEFAULT_ASR_SILENCE_TIME_MS
+    if parsed < MIN_ASR_SILENCE_TIME_MS:
+        INFO(
+            "ASR_SILENCE_TIME_MS too small, clamp to min "
+            f"value={MIN_ASR_SILENCE_TIME_MS}"
+        )
+        return MIN_ASR_SILENCE_TIME_MS
+    if parsed > MAX_ASR_SILENCE_TIME_MS:
+        INFO(
+            "ASR_SILENCE_TIME_MS too large, clamp to max "
+            f"value={MAX_ASR_SILENCE_TIME_MS}"
+        )
+        return MAX_ASR_SILENCE_TIME_MS
+    return parsed
+
+
+def _load_asr_end_window_size_ms() -> int:
+    raw_value = (os.getenv("ASR_END_WINDOW_SIZE_MS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_END_WINDOW_SIZE_MS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_END_WINDOW_SIZE_MS invalid, fallback to default "
+            f"value={DEFAULT_ASR_END_WINDOW_SIZE_MS}"
+        )
+        return DEFAULT_ASR_END_WINDOW_SIZE_MS
+    if parsed < MIN_ASR_END_WINDOW_SIZE_MS:
+        INFO(
+            "ASR_END_WINDOW_SIZE_MS too small, clamp to min "
+            f"value={MIN_ASR_END_WINDOW_SIZE_MS}"
+        )
+        return MIN_ASR_END_WINDOW_SIZE_MS
+    if parsed > MAX_ASR_END_WINDOW_SIZE_MS:
+        INFO(
+            "ASR_END_WINDOW_SIZE_MS too large, clamp to max "
+            f"value={MAX_ASR_END_WINDOW_SIZE_MS}"
+        )
+        return MAX_ASR_END_WINDOW_SIZE_MS
+    return parsed
+
+
+def _load_asr_use_utterances() -> bool:
+    return _parse_bool_env(
+        os.getenv("ASR_USE_UTTERANCES") or "",
+        DEFAULT_ASR_USE_UTTERANCES,
+        name="ASR_USE_UTTERANCES",
+    )
+
+
 def _load_interview_global_turn_limit() -> int:
     raw_value = (os.getenv("INTERVIEW_GLOBAL_TURN_LIMIT") or "").strip()
     if not raw_value:
@@ -166,6 +271,11 @@ def _load_interview_global_turn_limit() -> int:
 ASRInterval = _load_asr_silence_timeout_ms()
 ASR_PRE_FINALIZE_GRACE_MS = _load_asr_pre_finalize_grace_ms()
 ASR_MANUAL_TURN_END_ENABLED = _load_asr_manual_turn_end_enabled()
+ASR_SEGMENTATION_MODE = _load_asr_segmentation_mode()
+ASR_AIVAD = _load_asr_aivad_enabled()
+ASR_SILENCE_TIME_MS = _load_asr_silence_time_ms()
+ASR_END_WINDOW_SIZE_MS = _load_asr_end_window_size_ms()
+ASR_USE_UTTERANCES = _load_asr_use_utterances()
 ASR_POLL_INTERVAL_SECONDS = 0.2
 ASR_SILENCE_LOG_EVERY_TICKS = 10
 ASR_INIT_TIMEOUT_SECONDS = 12
@@ -264,6 +374,8 @@ class VoiceBotService(BaseModel):
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
     emit_asr_partial_events: bool = False
+    asr_segments: List[str] = Field(default_factory=list)
+    asr_seen_utterance_keys: Set[str] = Field(default_factory=set)
     current_turn_id: Optional[str] = None
     turn_timestamps_ms: Optional[Dict[str, int]] = None
 
@@ -288,6 +400,10 @@ class VoiceBotService(BaseModel):
             access_key=self.asr_access_key,
             resource_id=self.asr_resource_id,
             ws_url=self.asr_ws_url,
+            segmentation_mode=ASR_SEGMENTATION_MODE,
+            aivad_enabled=ASR_AIVAD,
+            silence_time_ms=ASR_SILENCE_TIME_MS,
+            end_window_size_ms=ASR_END_WINDOW_SIZE_MS,
             log_fn=self._log,
         )
         # await self.tts_client.init() # 这里也不需要，因为 lazy init 会按需建立连接。
@@ -474,6 +590,8 @@ class VoiceBotService(BaseModel):
 
     def _reset_asr_buffer_state(self) -> None:
         self.asr_buffer = ""
+        self.asr_segments = []
+        self.asr_seen_utterance_keys = set()
         self.asr_no_input_duration = 0
         self.asr_last_duration = 0
         self.asr_last_growth_mono_ms = 0
@@ -571,6 +689,28 @@ class VoiceBotService(BaseModel):
         reason, silence_ms = pending
         return await self._finalize_asr_turn(reason=reason, silence_ms=silence_ms)
 
+    def _extract_utterance_text(self, utterance: Any) -> str:
+        if isinstance(utterance, dict):
+            text = utterance.get("text", "")
+            if text is None:
+                text = ""
+            if not isinstance(text, str):
+                text = str(text)
+            return text
+        return ""
+
+    def _build_utterance_key(self, utterance: Any, index: int, text: str) -> str:
+        if isinstance(utterance, dict):
+            start_time = utterance.get("start_time")
+            end_time = utterance.get("end_time")
+            if start_time is None:
+                start_time = utterance.get("start")
+            if end_time is None:
+                end_time = utterance.get("end")
+            if start_time is not None or end_time is not None:
+                return f"{start_time}-{end_time}-{text}"
+        return f"idx-{index}-{text}"
+
     def _apply_asr_response_packet(
         self, response: SaucASRFullServerResponse
     ) -> tuple[str, Optional[SentencePartialRecognizedPayload]]:
@@ -590,6 +730,25 @@ class VoiceBotService(BaseModel):
             next_text = ""
         if not isinstance(next_text, str):
             next_text = str(next_text)
+
+        utterances = response.result.utterances if response.result else []
+        if (
+            ASR_USE_UTTERANCES
+            and isinstance(utterances, list)
+            and len(utterances) > 0
+        ):
+            for idx, utterance in enumerate(utterances):
+                utterance_text = self._extract_utterance_text(utterance)
+                key = self._build_utterance_key(utterance, idx, utterance_text)
+                if key in self.asr_seen_utterance_keys:
+                    continue
+                self.asr_seen_utterance_keys.add(key)
+                if utterance_text:
+                    self.asr_segments.append(utterance_text)
+
+            if self.asr_segments:
+                next_text = "".join(self.asr_segments)
+
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
         self.asr_buffer = next_text

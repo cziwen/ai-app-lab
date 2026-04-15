@@ -49,7 +49,7 @@
 4. **性能监控**
    - **Turn Trace**：详细记录每轮对话的性能指标
    - **关键指标**：judge_ms、llm2_ttft_ms、rec_to_first_sentence_ms
-   - **延迟优化**：ASR 静默检测默认 6 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，当前实现最大钳制为 7000ms）、流式 TTS 合成
+   - **延迟优化**：ASR 静默检测默认 8 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，当前实现最大钳制为 15000ms）、流式 TTS 合成
 
 ### 流程架构
 
@@ -127,6 +127,15 @@
     ```shell
     # ASR WebSocket URL（默认使用官方推荐链路）
     export ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+    # ASR 官方断句模式：semantic（AIVAD+SilenceTime）| silence（end_window_size）
+    export ASR_SEGMENTATION_MODE=semantic
+    # 语义断句参数（ASR_SEGMENTATION_MODE=semantic 时生效）
+    export ASR_AIVAD=true
+    export ASR_SILENCE_TIME_MS=800
+    # 静音断句参数（ASR_SEGMENTATION_MODE=silence 时生效）
+    export ASR_END_WINDOW_SIZE_MS=800
+    # 是否优先消费 ASR utterances 分句（关闭时回退到 result.text）
+    export ASR_USE_UTTERANCES=true
     # 手动收口模式（true 时禁用 silence_timeout 自动收口，需前端点“结束本题”）
     export ASR_MANUAL_TURN_END_ENABLED=false
 
