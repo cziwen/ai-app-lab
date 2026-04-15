@@ -1389,38 +1389,15 @@ class VoiceBotService(BaseModel):
     ) -> None:
         if not self.asr_force_finalize_requested or not sentence:
             return
-        committed_len = len(self.asr_committed_text or "")
-        score = self._quality_from_candidate(
-            score=max(0.0, float(align_score)),
-            ratio=max(
-                float(align_ratio),
-                1.0 if sentence.startswith(self.asr_committed_text or "") else 0.0,
-            ),
+        committed_len = len(sentence)
+        self.asr_client_end_best_sentence = sentence
+        self.asr_client_end_best_score = self._quality_from_candidate(
+            score=0.0,
+            ratio=1.0,
             text_len=len(sentence),
             committed_len=committed_len,
         )
-        best_sentence = self.asr_client_end_best_sentence or ""
-        best_score = float(self.asr_client_end_best_score or 0.0)
-        best_committed_len = self.asr_client_end_best_committed_len
-        if not best_sentence:
-            self.asr_client_end_best_sentence = sentence
-            self.asr_client_end_best_score = score
-            self.asr_client_end_best_committed_len = committed_len
-            return
-        if score > best_score:
-            self.asr_client_end_best_sentence = sentence
-            self.asr_client_end_best_score = score
-            self.asr_client_end_best_committed_len = committed_len
-            return
-        if committed_len > best_committed_len:
-            self.asr_client_end_best_sentence = sentence
-            self.asr_client_end_best_score = score
-            self.asr_client_end_best_committed_len = committed_len
-            return
-        if committed_len == best_committed_len and len(sentence) > len(best_sentence):
-            self.asr_client_end_best_sentence = sentence
-            self.asr_client_end_best_score = score
-            self.asr_client_end_best_committed_len = committed_len
+        self.asr_client_end_best_committed_len = committed_len
 
     def _apply_asr_response_packet(
         self, response: SaucASRFullServerResponse
@@ -1443,126 +1420,29 @@ class VoiceBotService(BaseModel):
             snapshot_text = str(snapshot_text)
 
         utterances = response.result.utterances if response.result else []
-        snapshot_segments = self._extract_utterance_segments(utterances)
-        if (
-            ASR_USE_UTTERANCES
-            and isinstance(utterances, list)
-            and len(utterances) > 0
-        ):
-            if snapshot_segments:
-                # Upstream utterances are typically a full latest snapshot.
-                # Rebuild from current snapshot each packet to avoid repeated prefix accumulation.
-                snapshot_text = "".join(text for text, _ in snapshot_segments)
-        if not snapshot_segments:
-            snapshot_segments = self._snapshot_segments_from_text(snapshot_text)
+        if ASR_USE_UTTERANCES and isinstance(utterances, list) and len(utterances) > 0:
+            utterance_texts = [
+                self._extract_utterance_text(utterance) for utterance in utterances
+            ]
+            utterance_texts = [text for text in utterance_texts if text]
+            if utterance_texts:
+                snapshot_text = "".join(utterance_texts)
         snapshot_tokens = self._extract_utterance_char_tokens(utterances, snapshot_text)
 
         self.asr_snapshot_text = snapshot_text
-        effective_snapshot = snapshot_text
-        effective_segments = snapshot_segments
-        rewrite_blocked = False
-        tail_recovered = False
-        fallback_wrapped = False
-        chosen_rewrite_source = ""
-        chosen_rewrite_score = 0.0
-        chosen_rewrite_ratio = 0.0
-        if (
-            ASR_ENABLE_PREFIX_NO_REWIND
-            and self.asr_committed_text
-            and not effective_snapshot.startswith(self.asr_committed_text)
-        ):
-            rewrite_blocked = True
-            chosen_candidate = self._pick_rewrite_candidate(
-                committed=self.asr_committed_text,
-                snapshot_text=effective_snapshot,
-                snapshot_tokens=snapshot_tokens,
-                previous_text=previous_text,
-                committed_end_time_ms=self.asr_committed_end_time_ms,
-            )
-            if chosen_candidate is not None:
-                merged_snapshot = str(chosen_candidate.get("text", "") or "")
-                tail_recovered = bool(chosen_candidate.get("tail_recovered", False))
-                chosen_rewrite_source = str(chosen_candidate.get("source", "") or "")
-                chosen_rewrite_score = float(chosen_candidate.get("score", 0.0))
-                chosen_rewrite_ratio = float(chosen_candidate.get("ratio", 0.0))
-                effective_segments = self._snapshot_segments_from_text(merged_snapshot)
-            else:
-                fallback_wrapped = True
-                merged_snapshot = self.asr_committed_text + (snapshot_text or "")
-                effective_segments = (
-                    self._snapshot_segments_from_text(self.asr_committed_text)
-                    + snapshot_segments
-                )
-            self._log(
-                "ASR_REWRITE_BLOCKED "
-                f"committed_len={len(self.asr_committed_text)} "
-                f"snapshot_len={len(snapshot_text)} "
-                f"tail_recovered={1 if tail_recovered else 0} "
-                f"fallback_wrapped={1 if fallback_wrapped else 0} "
-                f"source={chosen_rewrite_source or '-'} "
-                f"score={chosen_rewrite_score:.2f} "
-                f"ratio={chosen_rewrite_ratio:.3f} "
-                f"merged_len={len(merged_snapshot)}"
-            )
-            effective_snapshot = merged_snapshot
-
-        self.asr_recent_snapshots.append(effective_snapshot)
-        if len(self.asr_recent_snapshots) > ASR_STABLE_PREFIX_PACKETS:
-            self.asr_recent_snapshots = self.asr_recent_snapshots[-ASR_STABLE_PREFIX_PACKETS :]
-
-        committed_candidate = self.asr_committed_text
-        stable_prefix = self._longest_common_prefix(self.asr_recent_snapshots)
-        if len(stable_prefix) > len(committed_candidate):
-            committed_candidate = stable_prefix
-
-        definite_prefix = self._extract_definite_prefix(utterances)
-        if (
-            definite_prefix
-            and effective_snapshot.startswith(definite_prefix)
-            and len(definite_prefix) > len(committed_candidate)
-        ):
-            committed_candidate = definite_prefix
-
-        if (
-            ASR_ENABLE_PREFIX_NO_REWIND
-            and self.asr_committed_text
-            and len(committed_candidate) < len(self.asr_committed_text)
-        ):
-            committed_candidate = self.asr_committed_text
-
-        if (
-            ASR_ENABLE_PREFIX_NO_REWIND
-            and committed_candidate
-            and not effective_snapshot.startswith(committed_candidate)
-        ):
-            next_text = committed_candidate
-            draft_text = ""
-        else:
-            draft_segments = self._slice_snapshot_segments(
-                effective_segments,
-                start=len(committed_candidate),
-            )
-            draft_text = self._render_snapshot_segments(
-                draft_segments,
-                wrap_indefinite=(rewrite_blocked and fallback_wrapped),
-            )
-            next_text = committed_candidate + draft_text
-
-        self.asr_committed_text = committed_candidate
-        self.asr_draft_text = draft_text
+        next_text = snapshot_text
+        self.asr_committed_text = next_text
+        self.asr_draft_text = ""
+        self.asr_recent_snapshots = [next_text] if next_text else []
         self.asr_committed_end_time_ms = self._estimate_committed_end_time_ms(
             snapshot_tokens,
-            len(committed_candidate),
+            len(next_text),
         )
 
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
         self.asr_buffer = next_text
-        self._maybe_update_client_end_best_candidate(
-            self.asr_buffer,
-            align_score=chosen_rewrite_score,
-            align_ratio=chosen_rewrite_ratio,
-        )
+        self._maybe_update_client_end_best_candidate(self.asr_buffer)
 
         if text_changed:
             self.asr_last_growth_mono_ms = self._mono_ms()
