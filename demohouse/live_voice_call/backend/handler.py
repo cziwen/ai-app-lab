@@ -1226,6 +1226,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         nonlocal interview_completed
         interview_completed = True
 
+    def on_client_hangup_requested() -> None:
+        nonlocal client_hangup
+        client_hangup = True
+        interview_log("event=session.client_hangup source=service_no_speech_timeout")
+
     def record_bot_audio(chunk: bytes):
         interviewer_audio_encoded.extend(chunk)
 
@@ -1369,6 +1374,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
         on_bot_sentence=lambda text: record_turn("interviewer", text),
         on_bot_audio_chunk=record_bot_audio,
         on_interview_completed=on_interview_completed,
+        on_client_hangup_requested=on_client_hangup_requested,
         on_interview_runtime_checkpoint=persist_runtime_checkpoint,
         log_fn=interview_log,
         session_id=ws_session_id,
@@ -1486,16 +1492,27 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             {fetch_task, wait_closed_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if fetch_task in done and interview_completed and not websocket.closed:
-            interview_log(
-                "event=session.normal_end_close_request "
-                f"close_code={INTERVIEW_COMPLETED_CLOSE_CODE} "
-                f"close_reason={INTERVIEW_COMPLETED_CLOSE_REASON}"
-            )
-            await websocket.close(
-                code=INTERVIEW_COMPLETED_CLOSE_CODE,
-                reason=INTERVIEW_COMPLETED_CLOSE_REASON,
-            )
+        if fetch_task in done and not websocket.closed:
+            if client_hangup:
+                interview_log(
+                    "event=session.hangup_close_request "
+                    f"close_code={CLIENT_HANGUP_CLOSE_CODE} "
+                    f"close_reason={CLIENT_HANGUP_CLOSE_REASON}"
+                )
+                await websocket.close(
+                    code=CLIENT_HANGUP_CLOSE_CODE,
+                    reason=CLIENT_HANGUP_CLOSE_REASON,
+                )
+            elif interview_completed:
+                interview_log(
+                    "event=session.normal_end_close_request "
+                    f"close_code={INTERVIEW_COMPLETED_CLOSE_CODE} "
+                    f"close_reason={INTERVIEW_COMPLETED_CLOSE_REASON}"
+                )
+                await websocket.close(
+                    code=INTERVIEW_COMPLETED_CLOSE_CODE,
+                    reason=INTERVIEW_COMPLETED_CLOSE_REASON,
+                )
         if wait_closed_task in done:
             # Release occupancy as soon as transport-level close is observed.
             # The handler may still be unwinding service tasks for a short time.

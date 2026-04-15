@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,6 +69,20 @@ def test_load_asr_pre_finalize_grace_ms_clamps_to_safe_max(monkeypatch):
 
     assert loaded == service.MAX_ASR_PRE_FINALIZE_GRACE_MS
     assert any("clamp to safe max" in line for line in logs)
+
+
+def test_load_asr_no_speech_hangup_timeout_ms_clamps(monkeypatch):
+    logs = []
+    monkeypatch.setattr(service, "INFO", logs.append)
+
+    monkeypatch.setenv("ASR_NO_SPEECH_HANGUP_TIMEOUT_MS", "100")
+    loaded_min = service._load_asr_no_speech_hangup_timeout_ms()
+    assert loaded_min == service.MIN_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
+
+    monkeypatch.setenv("ASR_NO_SPEECH_HANGUP_TIMEOUT_MS", "999999")
+    loaded_max = service._load_asr_no_speech_hangup_timeout_ms()
+    assert loaded_max == service.MAX_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
+    assert any("ASR_NO_SPEECH_HANGUP_TIMEOUT_MS" in line for line in logs)
 
 
 def test_manual_turn_end_enabled_loader(monkeypatch):
@@ -546,6 +561,84 @@ def test_force_finalize_requested_on_client_hangup_event(monkeypatch):
         assert any("ASR_TURN_END_REQUEST source=client_hangup" in line for line in logs)
 
     asyncio.run(_run())
+
+
+def test_wait_answer_no_speech_timeout_requests_hangup(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        requested = []
+        monkeypatch.setattr(service, "ASR_NO_SPEECH_HANGUP_TIMEOUT_MS", 30)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        svc.interview_mode = True
+        svc.interview_flow = SimpleNamespace(state=service.WAIT_ANSWER)
+        svc.on_client_hangup_requested = lambda: requested.append("hangup")
+        svc.wait_answer_started_mono_ms = svc._mono_ms() - 50
+
+        async def _responses():
+            await asyncio.sleep(3600)
+            if False:
+                yield _asr_response("unused")
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.2)
+
+        assert svc.server_hangup_requested is True
+        assert requested == ["hangup"]
+        assert any("WAIT_ANSWER_NO_SPEECH_HANGUP" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_wait_answer_no_speech_timeout_skips_after_partial_text(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_NO_SPEECH_HANGUP_TIMEOUT_MS", 30)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        svc.interview_mode = True
+        svc.interview_flow = SimpleNamespace(state=service.WAIT_ANSWER)
+        svc.wait_answer_started_mono_ms = svc._mono_ms() - 100
+        svc.asr_buffer = "嗯"
+
+        async def _responses():
+            await asyncio.sleep(3600)
+            if False:
+                yield _asr_response("unused")
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(out_iter.__anext__(), timeout=0.08)
+
+        assert svc.server_hangup_requested is False
+
+    asyncio.run(_run())
+
+
+def test_wait_answer_no_speech_timer_resets_on_new_round(monkeypatch):
+    fake = _FakeASRClient()
+    svc, _ = _make_service(fake)
+    svc.interview_mode = True
+    flow = SimpleNamespace(state=service.WAIT_ANSWER)
+
+    mono_values = iter([1000, 2000])
+    monkeypatch.setattr(svc, "_mono_ms", lambda: next(mono_values))
+
+    svc._sync_wait_answer_no_speech_timer(flow)
+    first_started = svc.wait_answer_started_mono_ms
+    assert first_started == 1000
+
+    flow.state = service.ASK_QUESTION
+    svc._sync_wait_answer_no_speech_timer(flow)
+    assert svc.wait_answer_started_mono_ms == 0
+
+    flow.state = service.WAIT_ANSWER
+    svc._sync_wait_answer_no_speech_timer(flow)
+    assert svc.wait_answer_started_mono_ms == 2000
+    assert svc.wait_answer_started_mono_ms != first_started
 
 
 def test_stream_end_force_finalizes_buffer_without_waiting_silence(monkeypatch):

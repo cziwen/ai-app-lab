@@ -534,6 +534,54 @@ def test_handler_marks_hangup_reason_from_ws_close_frame_fallback(monkeypatch):
     asyncio.run(_run())
 
 
+def test_handler_closes_ws_with_hangup_code_when_service_requests_hangup(monkeypatch):
+    class _FakeService:
+        def __init__(self, **kwargs):
+            self._hangup_cb = kwargs.get("on_client_hangup_requested")
+
+        async def init(self):
+            return None
+
+        async def handler_loop(self, _inputs):
+            if callable(self._hangup_cb):
+                self._hangup_cb()
+            if False:
+                yield WebEvent.from_payload(TTSDonePayload())
+
+    async def _run():
+        interview_logger = _ListLogger()
+        fake_admission = _FakeAdmission()
+        fake_persistence = _FakePersistence()
+        token = "INT-HANDLER-SERVICE-HANGUP-CLOSE-CODE"
+        ws = _FakeWebSocket(close_exc_cls=RuntimeError)
+
+        monkeypatch.setattr(handler, "VoiceBotService", _FakeService)
+        monkeypatch.setattr(
+            handler,
+            "start_interview_session",
+            lambda incoming_token: _fake_session_data(incoming_token),
+        )
+        monkeypatch.setattr(handler, "mark_interview_in_progress", lambda _token: True)
+        monkeypatch.setattr(
+            handler, "mark_interview_disconnected", lambda *_args, **_kwargs: True
+        )
+        monkeypatch.setattr(handler, "OCCUPANCY", fake_admission)
+        monkeypatch.setattr(handler, "PERSISTENCE", fake_persistence)
+        monkeypatch.setattr(handler, "RUNTIME_CHECKPOINTS", _FakeRuntimeCheckpoints())
+        monkeypatch.setattr(handler, "_release_interview_logger_owner", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(handler, "_acquire_interview_logger", lambda *_args, **_kwargs: interview_logger)
+
+        await handler.handler(ws, f"/?token={token}")
+
+        assert ws.close_code == handler.CLIENT_HANGUP_CLOSE_CODE
+        assert ws.close_reason == handler.CLIENT_HANGUP_CLOSE_REASON
+        assert len(fake_persistence.tasks) == 1
+        assert fake_persistence.tasks[0].completed_reason == "hangup"
+        assert any("event=session.hangup_close_request" in line for line in interview_logger.lines)
+
+    asyncio.run(_run())
+
+
 def test_handler_marks_hangup_reason_from_ws_close_frame_when_close_source_is_asr_upstream(
     monkeypatch,
 ):

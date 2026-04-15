@@ -58,6 +58,9 @@ StateIdle = "Idle"
 # to avoid race conditions that can surface as server-side timeout errors.
 DEFAULT_ASR_SILENCE_TIMEOUT_MS = 8000
 MAX_ASR_SILENCE_TIMEOUT_MS = 15000
+DEFAULT_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS = 30000
+MIN_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS = 5000
+MAX_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS = 120000
 DEFAULT_ASR_PRE_FINALIZE_GRACE_MS = 400
 MAX_ASR_PRE_FINALIZE_GRACE_MS = 2000
 DEFAULT_ASR_MANUAL_TURN_END_ENABLED = False
@@ -151,6 +154,33 @@ def _load_asr_pre_finalize_grace_ms() -> int:
             f"value={MAX_ASR_PRE_FINALIZE_GRACE_MS}"
         )
         return MAX_ASR_PRE_FINALIZE_GRACE_MS
+    return parsed
+
+
+def _load_asr_no_speech_hangup_timeout_ms() -> int:
+    raw_value = (os.getenv("ASR_NO_SPEECH_HANGUP_TIMEOUT_MS") or "").strip()
+    if not raw_value:
+        return DEFAULT_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        INFO(
+            "ASR_NO_SPEECH_HANGUP_TIMEOUT_MS invalid, fallback to default "
+            f"value={DEFAULT_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS}"
+        )
+        return DEFAULT_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
+    if parsed < MIN_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS:
+        INFO(
+            "ASR_NO_SPEECH_HANGUP_TIMEOUT_MS too small, clamp to min "
+            f"value={MIN_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS}"
+        )
+        return MIN_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
+    if parsed > MAX_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS:
+        INFO(
+            "ASR_NO_SPEECH_HANGUP_TIMEOUT_MS too large, clamp to max "
+            f"value={MAX_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS}"
+        )
+        return MAX_ASR_NO_SPEECH_HANGUP_TIMEOUT_MS
     return parsed
 
 
@@ -457,6 +487,7 @@ def _load_interview_global_turn_limit() -> int:
 
 # asr continuous detection no input duration, configurable via env
 ASRInterval = _load_asr_silence_timeout_ms()
+ASR_NO_SPEECH_HANGUP_TIMEOUT_MS = _load_asr_no_speech_hangup_timeout_ms()
 ASR_PRE_FINALIZE_GRACE_MS = _load_asr_pre_finalize_grace_ms()
 ASR_MANUAL_TURN_END_ENABLED = _load_asr_manual_turn_end_enabled()
 ASR_SEGMENTATION_MODE = _load_asr_segmentation_mode()
@@ -539,6 +570,7 @@ class VoiceBotService(BaseModel):
     on_bot_sentence: Optional[Callable[[str], None]] = None
     on_bot_audio_chunk: Optional[Callable[[bytes], None]] = None
     on_interview_completed: Optional[Callable[[], None]] = None
+    on_client_hangup_requested: Optional[Callable[[], None]] = None
     on_interview_runtime_checkpoint: Optional[Callable[[Dict[str, Any]], None]] = None
     log_fn: Optional[Callable[[str], None]] = None
     session_id: str = ""
@@ -577,6 +609,9 @@ class VoiceBotService(BaseModel):
     asr_last_partial_sentence: str = ""
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
+    wait_answer_started_mono_ms: int = 0
+    wait_answer_no_speech_hangup_fired: bool = False
+    server_hangup_requested: bool = False
     emit_asr_partial_events: bool = False
     current_turn_id: Optional[str] = None
     turn_timestamps_ms: Optional[Dict[str, int]] = None
@@ -1224,6 +1259,60 @@ class VoiceBotService(BaseModel):
         self.asr_stale_connect_id = ""
         self.asr_drop_stale_packets = False
         return False
+
+    def _sync_wait_answer_no_speech_timer(self, flow: Optional[InterviewFlow]) -> None:
+        if (
+            not self.interview_mode
+            or flow is None
+            or flow.state != WAIT_ANSWER
+            or self.server_hangup_requested
+        ):
+            self.wait_answer_started_mono_ms = 0
+            self.wait_answer_no_speech_hangup_fired = False
+            return
+        if self.wait_answer_started_mono_ms <= 0:
+            self.wait_answer_started_mono_ms = self._mono_ms()
+            self.wait_answer_no_speech_hangup_fired = False
+            self._log(
+                "WAIT_ANSWER_NO_SPEECH_TIMER_START "
+                f"timeout_ms={ASR_NO_SPEECH_HANGUP_TIMEOUT_MS}"
+            )
+
+    def _request_server_hangup_for_no_speech(
+        self, flow: Optional[InterviewFlow]
+    ) -> bool:
+        if (
+            not self.interview_mode
+            or self.server_hangup_requested
+            or self.state != StateIdle
+            or flow is None
+            or flow.state != WAIT_ANSWER
+            or self.wait_answer_no_speech_hangup_fired
+        ):
+            return False
+        self._sync_wait_answer_no_speech_timer(flow)
+        if self.wait_answer_started_mono_ms <= 0:
+            return False
+        if self.asr_buffer:
+            return False
+        elapsed_ms = max(0, self._mono_ms() - self.wait_answer_started_mono_ms)
+        if elapsed_ms < ASR_NO_SPEECH_HANGUP_TIMEOUT_MS:
+            return False
+        self.wait_answer_no_speech_hangup_fired = True
+        self.server_hangup_requested = True
+        self._log(
+            "WAIT_ANSWER_NO_SPEECH_HANGUP "
+            f"elapsed_ms={elapsed_ms} timeout_ms={ASR_NO_SPEECH_HANGUP_TIMEOUT_MS}"
+        )
+        if self.on_client_hangup_requested:
+            try:
+                self.on_client_hangup_requested()
+            except Exception as callback_error:
+                self._log(
+                    "[InterviewPersist] on_client_hangup_requested callback failed: "
+                    f"{callback_error}"
+                )
+        return True
 
     def _evaluate_pending_asr_turn_end(self) -> Optional[tuple[str, int]]:
         if self.state != StateIdle:
@@ -1912,6 +2001,8 @@ class VoiceBotService(BaseModel):
         asr_iter = asr_responses.__aiter__()
         next_asr_task: Optional[asyncio.Task] = None
         while True:
+            if self._request_server_hangup_for_no_speech(self.interview_flow):
+                break
             pending_turn_end = self._evaluate_pending_asr_turn_end()
             if pending_turn_end is not None:
                 reason, silence_ms = pending_turn_end
@@ -1979,6 +2070,8 @@ class VoiceBotService(BaseModel):
                     timeout=ASR_POLL_INTERVAL_SECONDS,
                 )
             except asyncio.TimeoutError:
+                if self._request_server_hangup_for_no_speech(self.interview_flow):
+                    break
                 continue
             except StopAsyncIteration:
                 next_asr_task = None
@@ -2415,6 +2508,7 @@ class VoiceBotService(BaseModel):
         async def _produce_interviewer_message_and_emit_checkpoint() -> FlowResponse:
             response = await flow.produce_interviewer_message()
             self._emit_interview_runtime_checkpoint()
+            self._sync_wait_answer_no_speech_timer(flow)
             return response
 
         resume_mode = str(self.interview_resume_mode or RESUME_MODE_NONE).strip()
@@ -2493,10 +2587,12 @@ class VoiceBotService(BaseModel):
                 async for event in self._send_scripted_text(first_question_text):
                     yield event
         self._emit_interview_runtime_checkpoint()
+        self._sync_wait_answer_no_speech_timer(flow)
         self._log("[Interview] Greeting sent via TTS, waiting for candidate")
 
         try:
             while True:
+                self._sync_wait_answer_no_speech_timer(flow)
                 self.asr_last_stream_end_reason = ""
                 asr_responses = await self.handle_input_event(inputs)
                 async for asr_payload in self.handle_asr_response(asr_responses):
@@ -2723,6 +2819,9 @@ class VoiceBotService(BaseModel):
                     self._log(
                         f"[Interview] Turn complete, flow state={flow.state}, waiting for next candidate input"
                     )
+                if self.server_hangup_requested:
+                    self._log("[Interview] Server requested hangup due to no-speech timeout")
+                    return
                 self._log_asr_stream_reset(
                     self.asr_last_stream_end_reason or "upstream_closed"
                 )

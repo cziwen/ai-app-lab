@@ -144,7 +144,10 @@
     export ASR_END_WINDOW_SIZE_MS=800
     # 是否优先消费 ASR utterances 分句（关闭时回退到 result.text）
     export ASR_USE_UTTERANCES=true
+    # 回答回合无语音超时自动挂断（毫秒）：进入 WAIT_ANSWER 后若 30s 内 asr_buffer 始终为空，则按 hangup 路径结束面试
+    export ASR_NO_SPEECH_HANGUP_TIMEOUT_MS=30000
     # 手动收口模式（true 时禁用 silence_timeout 自动收口，需前端点“结束本题”）
+    # 注意：该模式仅影响“有识别文本后的收口”；完全无输入超时挂断仍生效
     export ASR_MANUAL_TURN_END_ENABLED=false
     # STT submit/query 接口（默认已内置，可按需覆盖）
     export STT_SUBMIT_URL=https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit
