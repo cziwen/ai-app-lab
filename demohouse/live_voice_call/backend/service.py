@@ -17,7 +17,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Set, Union
+from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Union
 
 from arkitect.core.component.llm import BaseChatLanguageModel
 from arkitect.core.component.llm.model import ArkMessage
@@ -51,7 +51,6 @@ from scripted_tts_memory_cache import (
     CachedTTSSentence,
     ScriptedTTSMemoryCache,
 )
-from pydantic import Field
 
 StateInProgress = "InProgress"
 StateIdle = "Idle"
@@ -374,8 +373,6 @@ class VoiceBotService(BaseModel):
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
     emit_asr_partial_events: bool = False
-    asr_segments: List[str] = Field(default_factory=list)
-    asr_seen_utterance_keys: Set[str] = Field(default_factory=set)
     current_turn_id: Optional[str] = None
     turn_timestamps_ms: Optional[Dict[str, int]] = None
 
@@ -590,8 +587,6 @@ class VoiceBotService(BaseModel):
 
     def _reset_asr_buffer_state(self) -> None:
         self.asr_buffer = ""
-        self.asr_segments = []
-        self.asr_seen_utterance_keys = set()
         self.asr_no_input_duration = 0
         self.asr_last_duration = 0
         self.asr_last_growth_mono_ms = 0
@@ -699,18 +694,6 @@ class VoiceBotService(BaseModel):
             return text
         return ""
 
-    def _build_utterance_key(self, utterance: Any, index: int, text: str) -> str:
-        if isinstance(utterance, dict):
-            start_time = utterance.get("start_time")
-            end_time = utterance.get("end_time")
-            if start_time is None:
-                start_time = utterance.get("start")
-            if end_time is None:
-                end_time = utterance.get("end")
-            if start_time is not None or end_time is not None:
-                return f"{start_time}-{end_time}-{text}"
-        return f"idx-{index}-{text}"
-
     def _apply_asr_response_packet(
         self, response: SaucASRFullServerResponse
     ) -> tuple[str, Optional[SentencePartialRecognizedPayload]]:
@@ -737,17 +720,14 @@ class VoiceBotService(BaseModel):
             and isinstance(utterances, list)
             and len(utterances) > 0
         ):
-            for idx, utterance in enumerate(utterances):
-                utterance_text = self._extract_utterance_text(utterance)
-                key = self._build_utterance_key(utterance, idx, utterance_text)
-                if key in self.asr_seen_utterance_keys:
-                    continue
-                self.asr_seen_utterance_keys.add(key)
-                if utterance_text:
-                    self.asr_segments.append(utterance_text)
-
-            if self.asr_segments:
-                next_text = "".join(self.asr_segments)
+            utterance_texts = [
+                self._extract_utterance_text(utterance) for utterance in utterances
+            ]
+            utterance_texts = [text for text in utterance_texts if text]
+            if utterance_texts:
+                # Upstream utterances are typically a full latest snapshot.
+                # Rebuild from current snapshot each packet to avoid repeated prefix accumulation.
+                next_text = "".join(utterance_texts)
 
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
