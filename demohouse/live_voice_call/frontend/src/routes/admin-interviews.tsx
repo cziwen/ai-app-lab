@@ -536,6 +536,19 @@ export const AdminInterviewsPage = () => {
                       {formatCompletedReason(interviewDetail.completed_reason)}
                     </p>
                   )}
+                {interviewDetail.status === 'completed' && (
+                  <>
+                    <p>部分收口：{interviewDetail.partial ? '是' : '否'}</p>
+                    <p>
+                      部分原因：
+                      {interviewDetail.partial_reason
+                        ? formatCompletedReason(interviewDetail.partial_reason)
+                        : '无'}
+                    </p>
+                    <p>未答题数：{interviewDetail.unanswered_count || 0}</p>
+                    <p>收口来源：{interviewDetail.finalize_source || 'fallback'}</p>
+                  </>
+                )}
               </section>
 
               <section>

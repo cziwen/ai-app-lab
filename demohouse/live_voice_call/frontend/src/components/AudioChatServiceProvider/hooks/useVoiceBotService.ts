@@ -517,7 +517,7 @@ export const useVoiceBotService = () => {
     resetWsState();
   };
 
-  const notifyClientHangup = async () => {
+  const notifyClientHangup = async (options?: { twoPhaseWaitMs?: number }) => {
     manualDisconnectRef.current = true;
     autoReconnectEnabledRef.current = false;
     clearReconnectTimer();
@@ -528,7 +528,13 @@ export const useVoiceBotService = () => {
       (await serviceRef.current?.sendMessageWithDrain(
         {
           event: EventType.ClientHangup,
-          payload: { source: 'ui_hangup' },
+          payload: {
+            source: 'ui_hangup',
+            two_phase_wait_ms: Math.max(
+              0,
+              Number(options?.twoPhaseWaitMs) || 0,
+            ),
+          },
         },
         {
           minHoldMs: CLIENT_HANGUP_DRAIN_HOLD_MS,
@@ -539,7 +545,10 @@ export const useVoiceBotService = () => {
     log(
       'send | event:' +
         EventType.ClientHangup +
-        ` drained=${sent ? '1' : '0'}`,
+        ` drained=${sent ? '1' : '0'} two_phase_wait_ms=${Math.max(
+          0,
+          Number(options?.twoPhaseWaitMs) || 0,
+        )}`,
     );
     return sent;
   };

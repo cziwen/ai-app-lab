@@ -47,6 +47,9 @@ INTERVIEW_CANONICAL_STATUS_FAILED = "failed"
 CANONICAL_SOURCE_CHECKPOINT = "checkpoint"
 CANONICAL_SOURCE_TURN_EVENTS = "turn_events"
 CANONICAL_SOURCE_TURN_EVENTS_FALLBACK = "turn_events_fallback"
+FINALIZE_SOURCE_CHECKPOINT = "checkpoint"
+FINALIZE_SOURCE_TURN_EVENTS = "turn_events"
+FINALIZE_SOURCE_FALLBACK = "fallback"
 SCORECARD_STATUS_PENDING = "pending"
 SCORECARD_STATUS_COMPLETED = "completed"
 SCORECARD_STATUS_FAILED = "failed"
@@ -253,6 +256,8 @@ CREATE TABLE IF NOT EXISTS interviews (
   canonical_status TEXT NOT NULL DEFAULT 'ready',
   canonical_version INTEGER NOT NULL DEFAULT 0,
   canonical_source TEXT NOT NULL DEFAULT 'turn_events_fallback',
+  finalize_source TEXT NOT NULL DEFAULT '',
+  unanswered_count INTEGER NOT NULL DEFAULT 0,
   discarded_turn_count INTEGER NOT NULL DEFAULT 0,
   echo_risk_flags TEXT NOT NULL DEFAULT '',
   consistency_flags TEXT NOT NULL DEFAULT '',
@@ -537,6 +542,14 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN canonical_source TEXT NOT NULL DEFAULT 'turn_events_fallback'"
         )
+    if "finalize_source" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN finalize_source TEXT NOT NULL DEFAULT ''"
+        )
+    if "unanswered_count" not in interview_columns:
+        conn.execute(
+            "ALTER TABLE interviews ADD COLUMN unanswered_count INTEGER NOT NULL DEFAULT 0"
+        )
     if "discarded_turn_count" not in interview_columns:
         conn.execute(
             "ALTER TABLE interviews ADD COLUMN discarded_turn_count INTEGER NOT NULL DEFAULT 0"
@@ -564,6 +577,14 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE interviews SET canonical_source = 'turn_events_fallback' "
         "WHERE canonical_source IS NULL OR TRIM(canonical_source) = ''"
+    )
+    conn.execute(
+        "UPDATE interviews SET finalize_source = '' "
+        "WHERE finalize_source IS NULL"
+    )
+    conn.execute(
+        "UPDATE interviews SET unanswered_count = 0 "
+        "WHERE unanswered_count IS NULL"
     )
     conn.execute(
         "UPDATE interviews SET discarded_turn_count = 0 "
@@ -1380,30 +1401,9 @@ def _resolve_interview_timeout_in_conn(
     if not deadline or now < deadline:
         return row
 
-    current_count = int(row["interruption_count"] or 0)
-    next_count = current_count + 1
-    next_status = (
-        INTERVIEW_STATUS_FAILED if next_count >= max_interruptions else INTERVIEW_STATUS_IN_PROGRESS
-    )
-    conn.execute(
-        """
-        UPDATE interviews
-        SET interruption_count = ?, reconnect_deadline_at = ?, status = ?, updated_at = ?
-        WHERE token = ?
-        """,
-        (next_count, None, next_status, now.isoformat(), token),
-    )
-    _invalidate_interview_cache(token)
-    if next_status == INTERVIEW_STATUS_FAILED:
-        INTERVIEW_EXPIRY_INDEX.remove(token)
-    return conn.execute(
-        """
-        SELECT token, status, interruption_count, reconnect_deadline_at, expires_at
-        FROM interviews
-        WHERE token = ?
-        """,
-        (token,),
-    ).fetchone()
+    # Reconnect timeout is handled by disconnect-compensation sweeper which
+    # force-completes the interview and triggers finalize+scoring.
+    return row
 
 
 def resolve_interview_timeout(
@@ -1437,6 +1437,90 @@ def resolve_all_interview_timeouts(
                 max_interruptions=max_interruptions,
             )
         conn.commit()
+
+
+def list_disconnect_finalize_candidates(
+    limit: int = INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,
+) -> List[str]:
+    now_iso = utc_now_iso()
+    normalized_limit = max(1, int(limit))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT i.token
+            FROM interviews i
+            LEFT JOIN interview_scorecards s ON s.interview_token = i.token
+            WHERE (
+                i.status = ?
+                AND i.reconnect_deadline_at IS NOT NULL
+                AND TRIM(i.reconnect_deadline_at) != ''
+                AND i.reconnect_deadline_at <= ?
+            ) OR (
+                i.status = ?
+                AND i.completed_reason = ?
+                AND s.interview_token IS NULL
+            )
+            ORDER BY COALESCE(i.reconnect_deadline_at, i.completed_at, i.updated_at, i.created_at) ASC
+            LIMIT ?
+            """,
+            (
+                INTERVIEW_STATUS_IN_PROGRESS,
+                now_iso,
+                INTERVIEW_STATUS_COMPLETED,
+                INTERVIEW_COMPLETED_REASON_DISCONNECT,
+                normalized_limit,
+            ),
+        ).fetchall()
+    return [str(row["token"] or "").strip() for row in rows if str(row["token"] or "").strip()]
+
+
+def mark_disconnect_timeout_completed(token: str) -> bool:
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT token, status, reconnect_deadline_at, completed_reason
+            FROM interviews
+            WHERE token = ?
+            """,
+            (token,),
+        ).fetchone()
+        if not row:
+            return False
+        status = str(row["status"] or "").strip()
+        reconnect_deadline = parse_iso_or_none(row["reconnect_deadline_at"])
+        completed_reason = str(row["completed_reason"] or "").strip()
+        if (
+            status == INTERVIEW_STATUS_COMPLETED
+            and completed_reason == INTERVIEW_COMPLETED_REASON_DISCONNECT
+        ):
+            return True
+        if (
+            status != INTERVIEW_STATUS_IN_PROGRESS
+            or reconnect_deadline is None
+            or now < reconnect_deadline
+        ):
+            return False
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, completed_at = ?, completed_reason = ?, reconnect_deadline_at = ?, updated_at = ?
+            WHERE token = ?
+            """,
+            (
+                INTERVIEW_STATUS_COMPLETED,
+                now_iso,
+                INTERVIEW_COMPLETED_REASON_DISCONNECT,
+                None,
+                now_iso,
+                token,
+            ),
+        )
+        conn.commit()
+    _invalidate_interview_cache(token)
+    INTERVIEW_EXPIRY_INDEX.remove(token)
+    return True
 
 
 def ensure_interview_expiry_ready() -> bool:
@@ -1612,6 +1696,7 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             SELECT i.token, i.candidate_name, i.question_count,
                    i.notes, i.status, i.created_at, i.completed_at, i.completed_reason, i.interruption_count,
                    i.expires_at, i.canonical_status, i.canonical_version, i.canonical_source,
+                   i.finalize_source, i.unanswered_count,
                    i.discarded_turn_count, i.echo_risk_flags, i.consistency_flags,
                    (
                      SELECT COUNT(*)
@@ -1648,6 +1733,16 @@ def list_interviews(search: str, page: int, page_size: int) -> Dict[str, object]
             "canonical_source": str(
                 row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
             ),
+            "finalize_source": (
+                str(row["finalize_source"] or "").strip()
+                or _resolve_finalize_source_label(
+                    canonical_source=str(
+                        row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+                    ),
+                    partial_fallback_applied=False,
+                )
+            ),
+            "unanswered_count": int(row["unanswered_count"] or 0),
             "discarded_turn_count": int(row["discarded_turn_count"] or 0),
             "echo_risk_flags": [
                 chunk
@@ -1754,6 +1849,16 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "canonical_source": str(
             row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
         ),
+        "finalize_source": (
+            str(row["finalize_source"] or "").strip()
+            or _resolve_finalize_source_label(
+                canonical_source=str(
+                    row["canonical_source"] or CANONICAL_SOURCE_TURN_EVENTS_FALLBACK
+                ),
+                partial_fallback_applied=False,
+            )
+        ),
+        "unanswered_count": int(row["unanswered_count"] or 0),
         "discarded_turn_count": int(row["discarded_turn_count"] or 0),
         "echo_risk_flags": [
             chunk
@@ -1775,6 +1880,16 @@ def get_interview_detail(token: str) -> Optional[Dict[str, object]]:
         "selected_questions": selected_questions,
         "required_checkins": parse_required_checkins(row["required_checkins"]),
         "enable_live_subtitle": bool(int(row["enable_live_subtitle"] or 0)),
+        "partial": str(row["completed_reason"] or "").strip() in BEST_EFFORT_COMPLETED_REASONS,
+        "partial_reason": (
+            str(row["completed_reason"] or "").strip()
+            if str(row["completed_reason"] or "").strip() in BEST_EFFORT_COMPLETED_REASONS
+            else ""
+        ),
+        "disconnect_completed": (
+            str(row["completed_reason"] or "").strip()
+            == INTERVIEW_COMPLETED_REASON_DISCONNECT
+        ),
         "scorecard": scorecard,
         "turns": [
             {
@@ -2413,6 +2528,7 @@ def build_score_inputs_from_canonical_turns(
                 SELECT role, text, question_id, question_index, event_ts
                 FROM interview_turn_events
                 WHERE interview_token = ?
+                  AND COALESCE(commit_state, '') != 'partial'
                 ORDER BY event_ts ASC, id ASC
                 """,
                 (token,),
@@ -2581,6 +2697,7 @@ def _load_latest_attempt_bookend_turns_in_conn(
         FROM interview_turn_events
         WHERE interview_token = ? AND attempt_id = ?
           AND role = 'interviewer'
+          AND COALESCE(commit_state, '') != 'partial'
           AND COALESCE(question_index, 0) <= 0
         ORDER BY event_ts ASC, id ASC
         """,
@@ -2781,6 +2898,7 @@ def _build_canonical_events_from_turn_events(
         WHERE interview_token = ?
           AND role IN ('candidate', 'interviewer')
           AND TRIM(text) != ''
+          AND COALESCE(commit_state, '') != 'partial'
         ORDER BY event_ts ASC, id ASC
         """,
         (token,),
@@ -2904,6 +3022,7 @@ def _load_turn_event_rows_with_attempt_seq_in_conn(
         WHERE e.interview_token = ?
           AND e.role IN ('candidate', 'interviewer')
           AND TRIM(e.text) != ''
+          AND COALESCE(e.commit_state, '') != 'partial'
         ORDER BY e.event_ts ASC, e.id ASC
         """,
         (token,),
@@ -3624,6 +3743,116 @@ def _build_question_audio_canonical_paths(
     return canonical_paths
 
 
+def _resolve_finalize_source_label(
+    *,
+    canonical_source: str,
+    partial_fallback_applied: bool,
+) -> str:
+    if partial_fallback_applied:
+        return FINALIZE_SOURCE_FALLBACK
+    source = str(canonical_source or "").strip()
+    if source == CANONICAL_SOURCE_CHECKPOINT:
+        return FINALIZE_SOURCE_CHECKPOINT
+    if source == CANONICAL_SOURCE_TURN_EVENTS:
+        return FINALIZE_SOURCE_TURN_EVENTS
+    return FINALIZE_SOURCE_FALLBACK
+
+
+def _apply_partial_tail_fallback_from_turn_events(
+    conn: sqlite3.Connection,
+    *,
+    token: str,
+    canonical_events: List[Dict[str, Any]],
+    selected_questions: Sequence[Dict[str, Any]],
+    consistency_flags: List[str],
+) -> int:
+    question_meta: Dict[str, Dict[str, Any]] = {}
+    for item in selected_questions:
+        question_id = str(item.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        try:
+            sort_order = int(item.get("sort_order", 0) or 0)
+        except (TypeError, ValueError):
+            sort_order = 0
+        question_meta[question_id] = {"sort_order": max(0, sort_order)}
+
+    unanswered_question_ids = set(question_meta.keys())
+    for event in canonical_events:
+        if str(event.get("role", "")).strip() != "candidate":
+            continue
+        text = str(event.get("content", "") or "").strip()
+        if not text:
+            continue
+        question_id = str(event.get("question_id", "") or "").strip()
+        if question_id:
+            unanswered_question_ids.discard(question_id)
+
+    if not unanswered_question_ids:
+        return 0
+
+    rows = conn.execute(
+        """
+        SELECT event_ts, text, question_id, question_index, question_epoch
+        FROM interview_turn_events
+        WHERE interview_token = ?
+          AND role = 'candidate'
+          AND commit_state = 'partial'
+          AND TRIM(text) != ''
+        ORDER BY event_ts DESC, id DESC
+        """,
+        (token,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    min_chars = max(
+        4,
+        int(os.getenv("FINALIZE_PARTIAL_FALLBACK_MIN_CHARS", "8") or 8),
+    )
+    max_chars = max(
+        min_chars,
+        int(os.getenv("FINALIZE_PARTIAL_FALLBACK_MAX_CHARS", "300") or 300),
+    )
+    applied_count = 0
+    for row in rows:
+        question_id = str(row["question_id"] or "").strip()
+        if question_id not in unanswered_question_ids:
+            continue
+        text = str(row["text"] or "").strip()
+        if len(text) < min_chars:
+            continue
+        if len(text) > max_chars:
+            text = text[-max_chars:].strip()
+        question_index = int(question_meta.get(question_id, {}).get("sort_order", 0) or 0)
+        if question_index <= 0:
+            try:
+                question_index = int(row["question_index"] or 0)
+            except (TypeError, ValueError):
+                question_index = 0
+        try:
+            question_epoch = max(0, int(row["question_epoch"] or 0))
+        except (TypeError, ValueError):
+            question_epoch = 0
+        canonical_events.append(
+            {
+                "role": "candidate",
+                "content": text,
+                "created_at": str(row["event_ts"] or utc_now_iso()),
+                "question_id": question_id,
+                "question_index": max(0, question_index),
+                "question_epoch": question_epoch,
+            }
+        )
+        unanswered_question_ids.discard(question_id)
+        applied_count += 1
+        if not unanswered_question_ids:
+            break
+    if applied_count > 0:
+        consistency_flags.append("partial_tail_fallback_applied")
+    return applied_count
+
+
 def finalize_canonical_artifacts(
     token: str,
     *,
@@ -3704,6 +3933,7 @@ def finalize_canonical_artifacts(
                 raise RuntimeError(normalized or "finalize_failed")
 
             checkpoint_meta: Optional[Dict[str, Any]] = None
+            partial_fallback_applied_count = 0
             if events_only_selected:
                 canonical_source = CANONICAL_SOURCE_TURN_EVENTS
                 canonical_events = _build_canonical_events_from_turn_events(
@@ -3782,6 +4012,20 @@ def finalize_canonical_artifacts(
                 f"token={token} source={canonical_source} count={len(canonical_events)}"
             )
 
+            if partial_mode and canonical_events:
+                partial_fallback_applied_count = _apply_partial_tail_fallback_from_turn_events(
+                    conn,
+                    token=token,
+                    canonical_events=canonical_events,
+                    selected_questions=selected_questions,
+                    consistency_flags=consistency_flags,
+                )
+                if partial_fallback_applied_count > 0:
+                    INFO(
+                        "event=partial_fallback_applied_count "
+                        f"token={token} count={partial_fallback_applied_count}"
+                    )
+
             if not canonical_events:
                 if partial_mode:
                     consistency_flags.append("canonical_turns_empty")
@@ -3837,6 +4081,7 @@ def finalize_canonical_artifacts(
                 WHERE interview_token = ?
                   AND role IN ('candidate', 'interviewer')
                   AND TRIM(text) != ''
+                  AND COALESCE(commit_state, '') != 'partial'
                 """,
                 (token,),
             ).fetchone()
@@ -4267,6 +4512,12 @@ def finalize_canonical_artifacts(
             if partial_mode:
                 consistency_flags.append("partial_scoring")
 
+            finalize_source = _resolve_finalize_source_label(
+                canonical_source=canonical_source,
+                partial_fallback_applied=(partial_fallback_applied_count > 0),
+            )
+            unanswered_count = len(unanswered_zero_items)
+
             echo_risk_flags = _compute_echo_risk_flags(canonical_events)
             canonical_version_row = conn.execute(
                 "SELECT COALESCE(canonical_version, 0) + 1 AS next_version FROM interviews WHERE token = ?",
@@ -4281,6 +4532,8 @@ def finalize_canonical_artifacts(
                     canonical_status = ?,
                     canonical_version = ?,
                     canonical_source = ?,
+                    finalize_source = ?,
+                    unanswered_count = ?,
                     discarded_turn_count = ?,
                     echo_risk_flags = ?,
                     consistency_flags = ?,
@@ -4293,6 +4546,8 @@ def finalize_canonical_artifacts(
                     INTERVIEW_CANONICAL_STATUS_READY,
                     next_version,
                     canonical_source,
+                    finalize_source,
+                    unanswered_count,
                     discarded_turn_count,
                     ",".join(sorted(set(echo_risk_flags))),
                     ",".join(sorted(set(consistency_flags))),
@@ -4308,6 +4563,9 @@ def finalize_canonical_artifacts(
             "score_inputs": score_inputs,
             "unanswered_zero_items": unanswered_zero_items,
             "canonical_source": canonical_source,
+            "finalize_source": finalize_source,
+            "unanswered_count": unanswered_count,
+            "partial_fallback_applied_count": partial_fallback_applied_count,
             "discarded_turn_count": discarded_turn_count,
             "echo_risk_flags": echo_risk_flags,
             "consistency_flags": sorted(set(consistency_flags)),

@@ -42,8 +42,10 @@ from admin_store import (
     init_interview_scorecard,
     mark_interview_completed,
     mark_interview_failed,
+    mark_disconnect_timeout_completed,
     mark_interview_disconnected,
     mark_interview_in_progress,
+    list_disconnect_finalize_candidates,
     close_interview_attempt,
     persist_interview_audio,
     persist_interview_question_audio_segments,
@@ -431,6 +433,33 @@ class ScoringTask:
     unanswered_zero_items: List[Dict[str, Any]]
 
 
+def _normalize_finalize_scoring_inputs(
+    finalize_result: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+    raw_score_inputs = finalize_result.get("score_inputs")
+    if not isinstance(raw_score_inputs, list):
+        return [], [], 0
+    unanswered_zero_items = finalize_result.get("unanswered_zero_items")
+    if not isinstance(unanswered_zero_items, list):
+        unanswered_zero_items = []
+    normalized_score_inputs: List[Dict[str, Any]] = []
+    invalid_score_input_count = 0
+    for item in raw_score_inputs:
+        if not isinstance(item, dict):
+            invalid_score_input_count += 1
+            continue
+        question_id = str(item.get("question_id", "") or "").strip()
+        try:
+            question_index = int(item.get("question_index", 0) or 0)
+        except (TypeError, ValueError):
+            question_index = 0
+        if not question_id or question_index <= 0:
+            invalid_score_input_count += 1
+            continue
+        normalized_score_inputs.append(item)
+    return normalized_score_inputs, list(unanswered_zero_items), invalid_score_input_count
+
+
 class PersistenceQueue:
     def __init__(self, logger: logging.Logger):
         self.logger = logger
@@ -551,28 +580,16 @@ class PersistenceQueue:
                         str(finalize_result.get("error", "") or "finalize_not_ok")
                     )
                     return
-                score_inputs = finalize_result.get("score_inputs")
-                if not isinstance(score_inputs, list):
+                normalized_score_inputs, unanswered_zero_items, invalid_score_input_count = (
+                    _normalize_finalize_scoring_inputs(finalize_result)
+                )
+                if (
+                    not normalized_score_inputs
+                    and not unanswered_zero_items
+                    and not isinstance(finalize_result.get("score_inputs"), list)
+                ):
                     await _mark_failed_and_return("missing_score_inputs")
                     return
-                unanswered_zero_items = finalize_result.get("unanswered_zero_items")
-                if not isinstance(unanswered_zero_items, list):
-                    unanswered_zero_items = []
-                normalized_score_inputs: List[Dict[str, Any]] = []
-                invalid_score_input_count = 0
-                for item in score_inputs:
-                    if not isinstance(item, dict):
-                        invalid_score_input_count += 1
-                        continue
-                    question_id = str(item.get("question_id", "") or "").strip()
-                    try:
-                        question_index = int(item.get("question_index", 0) or 0)
-                    except (TypeError, ValueError):
-                        question_index = 0
-                    if not question_id or question_index <= 0:
-                        invalid_score_input_count += 1
-                        continue
-                    normalized_score_inputs.append(item)
                 if not normalized_score_inputs and not unanswered_zero_items:
                     await _mark_failed_and_return(
                         f"invalid_score_inputs:{invalid_score_input_count}"
@@ -898,6 +915,7 @@ PERSISTENCE = PersistenceQueue(server_logger)
 SCORING = ScoringQueue(server_logger)
 CLIENT_HANGUP_EVENT = "ClientHangup"
 CLIENT_END_ANSWER_EVENT = "ClientEndAnswer"
+SENTENCE_PARTIAL_RECOGNIZED_EVENT = "SentencePartialRecognized"
 CLIENT_HANGUP_CLOSE_CODE = 4000
 CLIENT_HANGUP_CLOSE_REASON = "client_hangup"
 INTERVIEW_COMPLETED_CLOSE_CODE = 4001
@@ -1119,6 +1137,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     checkpoint_target_version = 0
     checkpoint_flushed_version = 0
     checkpoint_journal_seq = 0
+    latest_candidate_partial = ""
 
     def _resolve_question_context(role: str) -> Tuple[str, int, int]:
         question_id = ""
@@ -1157,8 +1176,11 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
 
     def record_turn(role: str, text: str):
         nonlocal turn_event_seq
+        nonlocal latest_candidate_partial
         if not text:
             return
+        if role == "candidate":
+            latest_candidate_partial = ""
         question_id, question_index, question_epoch = _resolve_question_context(role)
         turn_event_seq += 1
         turn_events.append(
@@ -1172,6 +1194,31 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 "question_index": question_index,
                 "question_epoch": question_epoch,
                 "commit_state": "live",
+            }
+        )
+
+    def record_candidate_partial(text: str) -> None:
+        nonlocal turn_event_seq
+        nonlocal latest_candidate_partial
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        if normalized == latest_candidate_partial:
+            return
+        latest_candidate_partial = normalized
+        question_id, question_index, question_epoch = _resolve_question_context("candidate")
+        turn_event_seq += 1
+        turn_events.append(
+            {
+                "seq_no": turn_event_seq,
+                "role": "candidate",
+                "text": normalized,
+                "event_ts": datetime.now(timezone.utc).isoformat(),
+                "event_kind": "transcript",
+                "question_id": question_id,
+                "question_index": question_index,
+                "question_epoch": question_epoch,
+                "commit_state": "partial",
             }
         )
 
@@ -1353,6 +1400,22 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             if input_event.event == CLIENT_HANGUP_EVENT:
                 client_hangup = True
                 interview_log("event=session.client_hangup")
+                two_phase_wait_ms = 0
+                payload = getattr(input_event, "payload", None)
+                try:
+                    if isinstance(payload, dict):
+                        two_phase_wait_ms = int(
+                            payload.get("two_phase_wait_ms", 0) or 0
+                        )
+                    else:
+                        two_phase_wait_ms = int(
+                            getattr(payload, "two_phase_wait_ms", 0) or 0
+                        )
+                except (TypeError, ValueError):
+                    two_phase_wait_ms = 0
+                interview_log(
+                    f"event=hangup_two_phase_wait_ms value={max(0, two_phase_wait_ms)}"
+                )
                 # Best-effort flush so the final buffered speech can be finalized.
                 yield WebEvent(event=CLIENT_END_ANSWER_EVENT)
                 continue
@@ -1390,6 +1453,13 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
             output_events (AsyncIterable[WebEvent]): An asynchronous generator of output events.
         """
         async for output_event in output_events:
+            if output_event.event == SENTENCE_PARTIAL_RECOGNIZED_EVENT:
+                partial_sentence = ""
+                payload = getattr(output_event, "payload", None)
+                if payload is not None:
+                    partial_sentence = str(getattr(payload, "sentence", "") or "")
+                if partial_sentence:
+                    record_candidate_partial(partial_sentence)
             interview_log(
                 f"Sending output event= {output_event.event}, \
                 data len:{len(output_event.data) if output_event.data else 0} , payload: {output_event.payload}"
@@ -1853,6 +1923,86 @@ async def main():
         while True:
             try:
                 await asyncio.to_thread(resolve_all_interview_timeouts)
+                disconnect_candidates = await asyncio.to_thread(
+                    list_disconnect_finalize_candidates,
+                    INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,
+                )
+                for token in disconnect_candidates:
+                    if not token:
+                        continue
+                    try:
+                        should_finalize = await asyncio.to_thread(
+                            mark_disconnect_timeout_completed,
+                            token,
+                        )
+                        if not should_finalize:
+                            continue
+                        server_logger.info(
+                            "event=disconnect_timeout_finalize_started token=%s",
+                            token,
+                        )
+                        finalize_result = await asyncio.to_thread(
+                            finalize_canonical_artifacts,
+                            token,
+                            completed_reason=INTERVIEW_COMPLETED_REASON_DISCONNECT,
+                        )
+                        if not bool(finalize_result.get("ok")):
+                            error_message = str(
+                                finalize_result.get("error", "") or "finalize_not_ok"
+                            )
+                            await asyncio.to_thread(
+                                save_interview_scorecard_failed,
+                                token,
+                                f"disconnect_finalize_failed:{error_message}",
+                            )
+                            server_logger.error(
+                                "event=disconnect_timeout_finalize_failed token=%s reason=%s",
+                                token,
+                                error_message,
+                            )
+                            continue
+                        normalized_score_inputs, unanswered_zero_items, invalid_count = (
+                            _normalize_finalize_scoring_inputs(finalize_result)
+                        )
+                        if not normalized_score_inputs and not unanswered_zero_items:
+                            await asyncio.to_thread(
+                                save_interview_scorecard_failed,
+                                token,
+                                f"disconnect_finalize_invalid_score_inputs:{invalid_count}",
+                            )
+                            server_logger.error(
+                                "event=disconnect_timeout_finalize_failed token=%s reason=invalid_score_inputs invalid_count=%s",
+                                token,
+                                invalid_count,
+                            )
+                            continue
+                        await asyncio.to_thread(init_interview_scorecard, token)
+                        await SCORING.submit(
+                            ScoringTask(
+                                token=token,
+                                score_inputs=normalized_score_inputs,
+                                unanswered_zero_items=unanswered_zero_items,
+                            )
+                        )
+                        server_logger.info(
+                            "event=disconnect_timeout_finalize_succeeded token=%s unanswered_count=%s score_inputs=%s",
+                            token,
+                            len(unanswered_zero_items),
+                            len(normalized_score_inputs),
+                        )
+                    except Exception as disconnect_finalize_err:
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(
+                                save_interview_scorecard_failed,
+                                token,
+                                f"disconnect_finalize_exception:{disconnect_finalize_err}",
+                            )
+                        server_logger.error(
+                            "event=disconnect_timeout_finalize_failed token=%s error=%s",
+                            token,
+                            disconnect_finalize_err,
+                            exc_info=True,
+                        )
                 summary = await asyncio.to_thread(
                     sweep_expired_interviews,
                     INTERVIEW_EXPIRY_SWEEP_BATCH_SIZE,

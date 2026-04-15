@@ -355,7 +355,7 @@ def test_update_job_returns_409_on_stale_expected_updated_at(monkeypatch, tmp_pa
         assert str(exc) == "job_conflict"
 
 
-def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp_path):
+def test_interview_timeout_marks_completed_disconnect(monkeypatch, tmp_path):
     _setup_tmp_store(monkeypatch, tmp_path)
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "password123")
@@ -383,24 +383,26 @@ def test_interview_timeout_and_failed_after_three_interruptions(monkeypatch, tmp
     started = admin_store.start_interview_session(token)
     assert started is not None
 
-    for expected_count in (1, 2, 3):
-        assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
-        expired = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
-        with admin_store.get_conn() as conn:
-            conn.execute(
-                "UPDATE interviews SET reconnect_deadline_at = ? WHERE token = ?",
-                (expired, token),
-            )
-            conn.commit()
-        admin_store.resolve_interview_timeout(token)
-        detail = admin_store.get_interview_detail(token)
-        assert detail is not None
-        assert detail["interruption_count"] == expected_count
+    assert admin_store.mark_interview_disconnected(token, grace_seconds=30) is True
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+    with admin_store.get_conn() as conn:
+        conn.execute(
+            "UPDATE interviews SET reconnect_deadline_at = ? WHERE token = ?",
+            (expired, token),
+        )
+        conn.commit()
+    admin_store.resolve_interview_timeout(token)
+    before_complete = admin_store.get_interview_detail(token)
+    assert before_complete is not None
+    assert before_complete["status"] == admin_store.INTERVIEW_STATUS_IN_PROGRESS
+    assert before_complete["completed_reason"] is None
 
+    assert admin_store.mark_disconnect_timeout_completed(token) is True
     final_detail = admin_store.get_interview_detail(token)
     assert final_detail is not None
-    assert final_detail["status"] == admin_store.INTERVIEW_STATUS_FAILED
-    assert admin_store.get_public_access(token) is None
+    assert final_detail["status"] == admin_store.INTERVIEW_STATUS_COMPLETED
+    assert final_detail["completed_reason"] == admin_store.INTERVIEW_COMPLETED_REASON_DISCONNECT
+    assert final_detail["reconnect_deadline_at"] is None
     assert admin_store.start_interview_session(token) is None
 
 
@@ -435,6 +437,65 @@ def test_reconnect_within_deadline_does_not_increment_interruptions(monkeypatch,
     assert detail is not None
     assert detail["interruption_count"] == 0
     assert detail["reconnect_deadline_at"] is None
+
+
+def test_list_disconnect_finalize_candidates_includes_due_or_missing_scorecard(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="测试工程师",
+        duties="负责测试",
+        requirements="熟悉自动化测试",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("如何设计测试用例", "覆盖边界和主流程")],
+    )
+    interview_due = admin_store.create_interview(
+        candidate_name="候选人A",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    interview_completed = admin_store.create_interview(
+        candidate_name="候选人B",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token_due = interview_due["token"]
+    token_completed = interview_completed["token"]
+    assert admin_store.mark_interview_in_progress(token_due) is True
+    assert admin_store.mark_interview_disconnected(token_due, grace_seconds=30) is True
+
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+    with admin_store.get_conn() as conn:
+        conn.execute(
+            "UPDATE interviews SET reconnect_deadline_at = ? WHERE token = ?",
+            (expired, token_due),
+        )
+        conn.execute(
+            """
+            UPDATE interviews
+            SET status = ?, completed_reason = ?, completed_at = ?, reconnect_deadline_at = NULL
+            WHERE token = ?
+            """,
+            (
+                admin_store.INTERVIEW_STATUS_COMPLETED,
+                admin_store.INTERVIEW_COMPLETED_REASON_DISCONNECT,
+                datetime.now(timezone.utc).isoformat(),
+                token_completed,
+            ),
+        )
+        conn.commit()
+
+    candidates = admin_store.list_disconnect_finalize_candidates(limit=20)
+    assert token_due in candidates
+    assert token_completed in candidates
 
 
 def test_start_interview_session_does_not_clear_reconnect_deadline(monkeypatch, tmp_path):

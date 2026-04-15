@@ -30,6 +30,7 @@ const DEFAULT_SCRIPT: MockCallScript[] = [
 ];
 const AUTO_REDIRECT_SECONDS = 15;
 const SPEAKING_LEVEL_THRESHOLD = 0.18;
+const HANGUP_TWO_PHASE_WAIT_MS = 1200;
 type EndPhase = 'idle' | 'waiting_last_audio' | 'countdown';
 
 export const resolveInterviewLiveSubtitleEnabled = (value: unknown): boolean =>
@@ -185,13 +186,18 @@ export const useCallController = (): CallController => {
     setEndCountdownSec(null);
     cleanupCaptureResources();
     setElapsedSec(0);
-    await notifyClientHangup();
+    notifyClientEndAnswer();
+    await new Promise(resolve =>
+      window.setTimeout(resolve, HANGUP_TWO_PHASE_WAIT_MS),
+    );
+    await notifyClientHangup({ twoPhaseWaitMs: HANGUP_TWO_PHASE_WAIT_MS });
     shutdownSession();
     navigate(`/hangup-result${location.search}`);
   }, [
     cleanupCaptureResources,
     location.search,
     navigate,
+    notifyClientEndAnswer,
     notifyClientHangup,
     setElapsedSec,
     shutdownSession,
