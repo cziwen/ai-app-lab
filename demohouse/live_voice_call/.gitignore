@@ -6,7 +6,7 @@ deploy/acme-webroot/*
 !deploy/acme-webroot/.gitkeep
 *.wav
 *.mp3
-!frontend/public/stt_probe.mp3
+!frontend/public/stt_probe.wav
 *.csv
 
 /demo_resource
