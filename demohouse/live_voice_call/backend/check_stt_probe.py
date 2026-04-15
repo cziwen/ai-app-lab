@@ -18,6 +18,7 @@ Environment variables:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -68,6 +69,16 @@ def main() -> int:
         default="",
         help="Optional language, e.g. zh-CN, en-US",
     )
+    parser.add_argument(
+        "--quiet-query",
+        action="store_true",
+        help="Disable per-query status log output",
+    )
+    parser.add_argument(
+        "--dump-json",
+        default="",
+        help="Optional output path to save full STT result JSON",
+    )
     args = parser.parse_args()
 
     app_id = _env("STT_APP_ID")
@@ -114,11 +125,21 @@ def main() -> int:
     )
 
     try:
+        def _on_poll(index: int, status_code: str, status_message: str, has_result: bool) -> None:
+            if args.quiet_query:
+                return
+            print(
+                "[STTProbe] query "
+                f"index={index:03d} code={status_code or '-'} "
+                f"message={status_message or '-'} has_result={str(bool(has_result)).lower()}"
+            )
+
         result = client.transcribe_audio_url(
             audio_url=url,
             audio_format=audio_format,
             language=str(args.language or "").strip(),
             show_utterances=True,
+            poll_observer=_on_poll,
         )
     except AucSTTTimeoutError as err:
         print(f"[STTProbe] FAIL timeout error={err}")
@@ -139,6 +160,20 @@ def main() -> int:
     if text:
         preview = text[:200].replace("\n", " ")
         print(f"[STTProbe] text_preview={preview}")
+    if args.dump_json:
+        out_path = Path(str(args.dump_json).strip()).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        output_payload = {
+            "task_id": result.task_id,
+            "text": result.text,
+            "utterances": result.utterances,
+            "raw_payload": result.raw_payload,
+        }
+        out_path.write_text(
+            json.dumps(output_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[STTProbe] wrote result json: {out_path}")
     return 0
 
 

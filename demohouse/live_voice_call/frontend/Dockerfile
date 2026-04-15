@@ -24,5 +24,6 @@ COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY deploy/10-init-dummy-cert.sh /docker-entrypoint.d/10-init-dummy-cert.sh
 RUN chmod +x /docker-entrypoint.d/10-init-dummy-cert.sh
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+COPY frontend/public/stt_probe.mp3 /usr/share/nginx/html/stt_probe.mp3
 
 EXPOSE 80 443

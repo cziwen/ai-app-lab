@@ -66,6 +66,7 @@ class AucSTTClient:
         enable_itn: bool = True,
         enable_punc: bool = True,
         show_utterances: bool = True,
+        poll_observer: Optional[Callable[[int, str, str, bool], None]] = None,
     ) -> AucSTTResult:
         normalized_audio_url = str(audio_url or "").strip()
         if not normalized_audio_url:
@@ -96,9 +97,21 @@ class AucSTTClient:
         self._submit(task_id=task_id, payload=payload)
 
         deadline = time.monotonic() + (self.task_timeout_ms / 1000.0)
+        poll_count = 0
         while True:
             query_payload, status_code, status_message = self._query(task_id=task_id)
             result = self._extract_result(task_id=task_id, payload=query_payload)
+            if poll_observer is not None:
+                try:
+                    poll_observer(
+                        poll_count,
+                        str(status_code or "").strip(),
+                        str(status_message or "").strip(),
+                        result is not None,
+                    )
+                except Exception:
+                    # Keep STT polling robust even if observer callback fails.
+                    pass
             if result is not None:
                 return result
 
@@ -117,6 +130,7 @@ class AucSTTClient:
                 raise AucSTTTimeoutError(f"stt_query_timeout task_id={task_id}")
 
             time.sleep(self.poll_interval_ms / 1000.0)
+            poll_count += 1
 
     def _build_headers(self, *, task_id: str, include_sequence: bool) -> Dict[str, str]:
         headers = {
