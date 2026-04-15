@@ -2511,7 +2511,6 @@ class VoiceBotService(BaseModel):
                         "turn_recognized_emitted",
                         extra={"sentence_len": len(asr_recognized.sentence or "")},
                     )
-                    yield WebEvent.from_payload(asr_recognized)
                     candidate_text = asr_recognized.sentence
                     self._log(f"[Interview] Candidate answer: '{candidate_text}'")
                     if flow.current_question_index < len(flow.questions):
@@ -2548,10 +2547,13 @@ class VoiceBotService(BaseModel):
                         self.interview_resume_low_signal_guard_active = False
                         self._log("[Interview] Resume guard cleared by valid first answer")
 
+                    # Persist candidate text before yielding SentenceRecognized.
+                    # This avoids losing the final answer when client hangup races with ws send.
                     self._emit_candidate_text(candidate_text)
 
                     # Add candidate answer to conversation history
                     self._append_history_message("user", candidate_text)
+                    yield WebEvent.from_payload(asr_recognized)
 
                     # LLM call #1: InterviewJudge evaluates the answer
                     self._log("[Interview] Calling InterviewJudge (LLM #1)...")
