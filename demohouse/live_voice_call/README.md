@@ -51,6 +51,7 @@
    - **Turn Trace**：详细记录每轮对话的性能指标
    - **关键指标**：judge_ms、llm2_ttft_ms、rec_to_first_sentence_ms
    - **延迟优化**：ASR 静默检测默认 8 秒（`ASR_SILENCE_TIMEOUT_MS` 可配置，当前实现最大钳制为 15000ms）、流式 TTS 合成
+   - **无输入保护**：候选人回答回合（`WAIT_ANSWER`）无语音 30 秒自动挂断（`ASR_NO_SPEECH_HANGUP_TIMEOUT_MS` 可配置）
 
 ### 流程架构
 

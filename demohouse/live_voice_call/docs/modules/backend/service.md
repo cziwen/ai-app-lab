@@ -17,6 +17,12 @@
 - `stream_interview_llm_chat(...)` 调 LLM2，`handle_tts_response(...)` 回传语音事件。
 5. 回合结束：状态回到 `Idle`，等待下一次候选人发言。
 
+## 回答回合超时与挂断
+- 每次进入 `WAIT_ANSWER` 都会启动“无语音首句超时”计时。
+- 若在 `ASR_NO_SPEECH_HANGUP_TIMEOUT_MS`（默认 30000ms）内 `asr_buffer` 仍为空，会触发服务端挂断请求回调 `on_client_hangup_requested`。
+- 该路径会复用现有 hangup 收尾链路（不是新增 completed reason）。
+- `ASR_MANUAL_TURN_END_ENABLED=true` 只会禁用“有文本后的 silence_timeout 自动收口”，不会禁用“完全无输入超时挂断”。
+
 ## 恢复与重试机制
 
 ### 断线恢复（checkpoint）

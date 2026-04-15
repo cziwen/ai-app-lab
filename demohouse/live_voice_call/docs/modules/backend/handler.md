@@ -29,6 +29,7 @@
 - 连接关闭来源会记录到面试日志（例如 `client_ws`、`asr_upstream`）。
 - 正常面试结束会主动关闭 ws：`code=4001`，`reason=interview_completed`。
 - 候选人主动挂断使用 `code=4000`，`reason=client_hangup`。
+- 服务端触发挂断（如 `WAIT_ANSWER` 无语音超时）同样使用 `code=4000`，`reason=client_hangup`，并复用 hangup 的持久化判定（`completed_reason=hangup`）。
 
 ## 持久化、评分与重试
 - `PersistenceQueue` 异步落库对话与音频，并在完成后触发评分任务。
