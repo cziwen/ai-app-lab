@@ -1,7 +1,7 @@
 # 常见问题排查手册
 
 ## 1. 后端容器反复退出
-常见原因：启动自检失败（LLM1/LLM2/ASR/TTS/Redis 任一失败）。
+常见原因：启动自检失败（LLM1/LLM2/ASR/TTS/Redis 任一失败；STT 仅在配置后参与）。
 
 排查：
 ```bash
@@ -14,6 +14,7 @@ docker compose logs -f backend
 - `ASR_APP_ID` / `ASR_ACCESS_TOKEN` / `ASR_RESOURCE_ID`
 - `TTS_APP_ID` / `TTS_ACCESS_TOKEN` / `TTS_SPEAKER`
 - `REDIS_URL`
+- 可选 STT：`STT_APP_ID` / `STT_ACCESS_TOKEN` / `STT_RESOURCE_ID` / `STT_AUDIO_PUBLIC_BASE_URL` / `STT_AUDIO_SIGNING_SECRET`
 
 ## 2. WebSocket 建连后立即断开
 先看前端收到的 `BotError.code`：

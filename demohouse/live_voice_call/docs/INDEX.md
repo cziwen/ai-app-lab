@@ -37,7 +37,7 @@
 ### 基础设施
 - [async_log.md](modules/backend/async_log.md) - 异步日志系统（队列化、丢弃策略）
 - [llm_limiter.md](modules/backend/llm_limiter.md) - LLM 并发控制（信号量、死锁避免）
-- [startup_self_check.md](modules/backend/startup_self_check.md) - 启动自检（LLM/ASR/TTS）
+- [startup_self_check.md](modules/backend/startup_self_check.md) - 启动自检（LLM/ASR/TTS/Redis，含可选 STT）
 - [utils.md](modules/backend/utils.md) - 工具函数集
 
 ### 测试与模拟

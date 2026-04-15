@@ -4,7 +4,7 @@
 
 - [ARCHITECTURE.md](../ARCHITECTURE.md) - 系统整体架构图和说明
   - 系统架构概览
-  - 组件架构（前后端、双 LLM、ASR/TTS）
+  - 组件架构（前后端、双 LLM、ASR/TTS，含可选 STT 收口）
   - 技术栈说明
   - 部署架构
 

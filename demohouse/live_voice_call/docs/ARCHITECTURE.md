@@ -7,6 +7,7 @@
 - LLM1（Judge）决策 `next_action`
 - LLM2（Interviewer）生成面试官问句
 - TTS 回传机器人语音
+- 结束后可选 STT（二次录音识别）复写 candidate turns，再进入离线评分
 
 ## 核心组件
 - `frontend`：候选人通话页与管理后台。

@@ -1,40 +1,30 @@
 # backend/startup_self_check.py
 
 ## 模块职责
-- 负责 `startup_self_check` 相关逻辑（基于文件命名与代码结构）。
+- 后端启动前统一依赖自检入口。
+- 汇总并输出 `SelfCheckReport`，供 `handler.py` 决定是否启动服务。
 
-## 入口与调用方
-- 被后端主流程或相关模块导入调用。
-- 主要入口文件参考：`backend/handler.py`、`backend/admin_api.py`。
+## 当前检查项（与实现一致）
+- 必检：`LLM1`、`LLM2`、`ASR`、`TTS`、`Redis`
+- 可选：
+  - `LLM3`：仅在配置 `LLM3_ENDPOINT_ID` 时检查
+  - `STT`：仅在出现任意 `STT_*` 配置时检查；未配置时返回 `STT skipped (not configured)`
 
-## 对外接口（函数/类）
-L14: class RuntimeConfig:
-L25: class CheckResult:
-L32: class SelfCheckReport:
-L38: def _env(key: str) -> Optional[str]:
-L46: def load_runtime_config() -> RuntimeConfig:
-L210: def format_self_check_lines(report: SelfCheckReport) -> List[str]:
+## STT 检查语义
+- 若启用 STT 检查，必填项：
+  - `STT_APP_ID`
+  - `STT_ACCESS_TOKEN`
+  - `STT_RESOURCE_ID`
+  - `STT_AUDIO_PUBLIC_BASE_URL`
+  - `STT_AUDIO_SIGNING_SECRET`
+- `STT_SELF_CHECK_AUDIO_URL` 未配置：仅做配置完整性校验（不发起远程探测）。
+- `STT_SELF_CHECK_AUDIO_URL` 已配置：执行 submit/query 探测一次可用性。
 
-## 依赖与配置
-- 关键导入（节选）：
-L1: import os
-L2: from dataclasses import dataclass, field
-L3: from typing import Dict, List, Optional
-L5: from arkitect.core.component.asr import AsyncASRClient
-L6: from arkitect.core.component.llm import BaseChatLanguageModel
-L7: from arkitect.core.component.llm.model import ArkMessage
-L8: from arkitect.core.component.tts import AsyncTTSClient, AudioParams, ConnectionParams
-L9: from arkitect.core.component.tts.constants import EventSessionFinished
-L11: from prompt import VoiceBotPrompt
-
-## 日志与排障
-- 优先检查后端进程日志与每场面试日志（`backend/logs`）。
-- 若涉及数据状态，结合 `backend/data/storage` 中 SQLite 与音频落盘结果排查。
-
-## 常见故障与排查步骤
-1. 启动失败：先检查环境变量与 `startup_self_check` 输出。
-2. 行为异常：定位到本模块接口，确认上下游调用参数与返回值。
-3. 数据不一致：核对 SQLite 记录、日志时间线、音频文件是否同步落盘。
+## 对外接口
+- `load_runtime_config()`：加载环境变量到 `RuntimeConfig`
+- `run_startup_self_check()`：执行全量检查并返回报告
+- `format_self_check_lines()`：格式化日志输出行
 
 ## 相关测试
-- 查看 `backend/tests` 下与模块同名或同领域测试用例进行回归验证。
+- `backend/tests/test_startup_self_check.py`
+- `backend/tests/test_handler_startup.py`

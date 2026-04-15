@@ -27,6 +27,7 @@
 - **Doubao-pro-32k (LLM #3 - Scoring，可选)**：按“场景连续段”异步评分并写入 scorecard（未配置时会自动跳过）
 - **Doubao-语音合成 (TTS)**：根据用户偏好的音色定制生成拟人化、逼真的角色语音输出
 - **Doubao-流式语音识别 (ASR)**：基于 SAUC 协议的大模型语音识别，实时转写用户语音
+- **Doubao-录音文件识别 (STT，可选)**：评分前对 candidate canonical 音频做二次转写；评分与最终对话记录优先使用 STT，失败时回退 ASR
 
 ### 系统架构
 
@@ -235,9 +236,10 @@
    docker compose up -d --build backend
    ```
 
-   后端启动前会自动执行一次开机自检：`LLM1 + LLM2 + ASR + TTS + Redis`，以及可选 `LLM3`（仅在配置 `LLM3_ENDPOINT_ID` 时检查）。
+   后端启动前会自动执行一次开机自检：`LLM1 + LLM2 + ASR + TTS + Redis`，以及可选 `LLM3`（仅在配置 `LLM3_ENDPOINT_ID` 时检查）与可选 `STT`（仅在配置任一 `STT_*` 时检查）。
    若任一依赖不可用（例如未设置 `ARK_API_KEY`），进程会直接退出并打印失败项，不会监听端口。
    ASR 迁移到官方 SAUC 协议后，`ASR_RESOURCE_ID` 为必填项；缺失时自检会直接失败退出。
+   STT 为可选能力：未配置 STT 时自检会显示 `STT skipped (not configured)`；若只配置了部分 STT 字段，则会按配置错误失败。
    Redis 也是强依赖：`REDIS_URL` 缺失、Redis 未启动、或 Redis 配置不满足（`maxmemory=256MB` 且 `maxmemory-policy=allkeys-lru`）都会启动失败。
    若日志出现 `AsyncArk ... no attribute responses`，通常是 `volcengine-python-sdk` 版本过旧（需要 `5.0.19`）。
    默认会同时启动：
@@ -366,7 +368,7 @@ docker compose down
 ### 常见问题排查
 
 - 后端容器反复退出：
-  - 原因通常是启动自检失败（LLM1/LLM2/ASR/TTS 任一失败即退出）
+  - 原因通常是启动自检失败（LLM1/LLM2/ASR/TTS/Redis 任一失败即退出；STT 仅在配置后参与）
   - 用 `docker compose logs -f backend` 查看失败项并修复 `.env`
 - 页面可打开但请求失败：
   - 检查安全组是否放通 `80`
@@ -703,6 +705,7 @@ Web端和服务端通过二进制协议进行交互，协议格式如下：
 - 面试提问按行推进（子问逐条提问）
 - LLM2 上下文按“场景连续段”隔离共享
 - LLM3 按“场景连续段”整题评分（一段一次调用）
+- 评分前会对 candidate canonical 音频执行 STT 二次转写：`STT 优先，ASR fallback`
 - 评分返回契约固定为：`numeric_score + comment`
 
 ## 附录

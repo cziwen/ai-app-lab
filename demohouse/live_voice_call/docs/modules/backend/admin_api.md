@@ -26,6 +26,7 @@
 
 ### 公开访问
 - `GET /api/public/interviews/{token}/access` - 验证面试链接有效性（无需认证）
+- `GET /api/public/interviews/{token}/audio/{track}?exp=...&sig=...` - 签名公开音频读取（供 STT 拉取）
 
 ## 认证机制
 
@@ -71,6 +72,7 @@ ADMIN_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 
 - LLM3 按“场景连续段”评分，不按 CSV 每一行单独评分。
 - 同一场景段内多个子问的回答会在评分前聚合为一份 `aggregated_answer`。
+- 候选人回答在评分前会先做一次离线 STT（二次识别）：`STT 优先，ASR fallback`。
 - 每个场景段只调用一次评分模型。
 - 评分输出契约固定为：
   - `numeric_score`
@@ -178,6 +180,15 @@ curl -X POST http://localhost:8890/api/admin/interviews \
 现象：`场景为空，且前面没有可延续的场景`
 
 处理：第一条必须是场景首问，显式填写 `场景 + 评分标准 + 最大分数`。
+
+### 4. 公开音频接口返回 403
+
+现象：访问 `/api/public/interviews/{token}/audio/{track}` 返回 `403 Forbidden`
+
+处理：
+- 检查查询参数是否包含 `exp`、`sig`。
+- 检查 `exp` 是否已过期（UTC 秒时间戳）。
+- 检查签名是否匹配（服务端按 `token:track:exp` + `STT_AUDIO_SIGNING_SECRET` 做 HMAC-SHA256）。
 
 ## 相关测试
 
