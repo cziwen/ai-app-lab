@@ -445,6 +445,8 @@ class VoiceBotService(BaseModel):
     asr_init_failure_streak: int = 0  # Consecutive init failures since last success
     asr_force_finalize_requested: bool = False
     asr_force_finalize_requested_mono_ms: int = 0
+    asr_client_end_best_sentence: str = ""
+    asr_client_end_best_committed_len: int = 0
     asr_last_partial_sentence: str = ""
     asr_stale_connect_id: str = ""
     asr_drop_stale_packets: bool = False
@@ -673,6 +675,8 @@ class VoiceBotService(BaseModel):
         self.asr_silence_tick_count = 0
         self.asr_force_finalize_requested = False
         self.asr_force_finalize_requested_mono_ms = 0
+        self.asr_client_end_best_sentence = ""
+        self.asr_client_end_best_committed_len = 0
         self.asr_last_partial_sentence = ""
 
     def _longest_common_prefix(self, texts: List[str]) -> str:
@@ -702,6 +706,31 @@ class VoiceBotService(BaseModel):
             if text:
                 parts.append(text)
         return "".join(parts)
+
+    def _merge_snapshot_tail_for_no_rewind(
+        self, committed: str, snapshot: str
+    ) -> tuple[str, bool]:
+        """
+        Keep committed prefix immutable while trying to preserve appendable tail
+        from a rewritten snapshot.
+        """
+        if not committed:
+            return snapshot, False
+        if not snapshot:
+            return committed, False
+        if snapshot.startswith(committed):
+            return snapshot, False
+
+        max_anchor = min(len(committed), 24)
+        for anchor_len in range(max_anchor, 3, -1):
+            anchor = committed[-anchor_len:]
+            pos = snapshot.rfind(anchor)
+            if pos < 0:
+                continue
+            merged = committed + snapshot[pos + anchor_len :]
+            if len(merged) >= len(committed):
+                return merged, True
+        return committed, False
 
     def _log_asr_stream_reset(self, reason: str) -> None:
         now_ms = self._mono_ms()
@@ -776,6 +805,14 @@ class VoiceBotService(BaseModel):
         self, *, reason: str, silence_ms: int
     ) -> SentenceRecognizedPayload:
         sentence = self.asr_buffer
+        if reason == "client_end_answer" and self.asr_client_end_best_sentence:
+            if self.asr_client_end_best_sentence != sentence:
+                self._log(
+                    "ASR_CLIENT_END_BEST_APPLIED "
+                    f"best_len={len(self.asr_client_end_best_sentence)} "
+                    f"current_len={len(sentence)}"
+                )
+            sentence = self.asr_client_end_best_sentence
         self._log(
             f"ASR_TURN_END reason={reason} silence_ms={silence_ms} text_len={len(sentence)}"
         )
@@ -809,6 +846,104 @@ class VoiceBotService(BaseModel):
             return text
         return ""
 
+    def _extract_utterance_segments(
+        self, utterances: Any
+    ) -> List[tuple[str, Optional[bool]]]:
+        if not isinstance(utterances, list):
+            return []
+        segments: List[tuple[str, Optional[bool]]] = []
+        for utterance in utterances:
+            if not isinstance(utterance, dict):
+                continue
+            text = self._extract_utterance_text(utterance)
+            if not text:
+                continue
+            definite_raw = utterance.get("definite")
+            if definite_raw is True:
+                definite: Optional[bool] = True
+            elif definite_raw is False:
+                definite = False
+            else:
+                definite = None
+            if segments and segments[-1][1] == definite:
+                segments[-1] = (segments[-1][0] + text, definite)
+            else:
+                segments.append((text, definite))
+        return segments
+
+    def _render_snapshot_segments(
+        self,
+        segments: List[tuple[str, Optional[bool]]],
+        *,
+        wrap_indefinite: bool,
+    ) -> str:
+        parts: List[str] = []
+        for text, definite in segments:
+            if not text:
+                continue
+            if wrap_indefinite and definite is False:
+                parts.append(f"（{text}）")
+            else:
+                parts.append(text)
+        return "".join(parts)
+
+    def _snapshot_segments_from_text(self, text: str) -> List[tuple[str, Optional[bool]]]:
+        if not text:
+            return []
+        return [(text, None)]
+
+    def _slice_snapshot_segments(
+        self,
+        segments: List[tuple[str, Optional[bool]]],
+        *,
+        start: int = 0,
+        length: Optional[int] = None,
+    ) -> List[tuple[str, Optional[bool]]]:
+        if not segments:
+            return []
+        result: List[tuple[str, Optional[bool]]] = []
+        consumed = 0
+        span_start = max(0, start)
+        span_end = None if length is None else span_start + max(0, length)
+        for text, definite in segments:
+            seg_start = consumed
+            seg_end = consumed + len(text)
+            consumed = seg_end
+            if seg_end <= span_start:
+                continue
+            if span_end is not None and seg_start >= span_end:
+                break
+            local_start = max(0, span_start - seg_start)
+            local_end = len(text) if span_end is None else min(len(text), span_end - seg_start)
+            if local_end <= local_start:
+                continue
+            chunk = text[local_start:local_end]
+            if not chunk:
+                continue
+            if result and result[-1][1] == definite:
+                result[-1] = (result[-1][0] + chunk, definite)
+            else:
+                result.append((chunk, definite))
+        return result
+
+    def _maybe_update_client_end_best_candidate(self, sentence: str) -> None:
+        if not self.asr_force_finalize_requested or not sentence:
+            return
+        committed_len = len(self.asr_committed_text or "")
+        best_sentence = self.asr_client_end_best_sentence or ""
+        best_committed_len = self.asr_client_end_best_committed_len
+        if not best_sentence:
+            self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_committed_len = committed_len
+            return
+        if committed_len > best_committed_len:
+            self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_committed_len = committed_len
+            return
+        if committed_len == best_committed_len and len(sentence) > len(best_sentence):
+            self.asr_client_end_best_sentence = sentence
+            self.asr_client_end_best_committed_len = committed_len
+
     def _apply_asr_response_packet(
         self, response: SaucASRFullServerResponse
     ) -> tuple[str, Optional[SentencePartialRecognizedPayload]]:
@@ -830,33 +965,61 @@ class VoiceBotService(BaseModel):
             snapshot_text = str(snapshot_text)
 
         utterances = response.result.utterances if response.result else []
+        snapshot_segments = self._extract_utterance_segments(utterances)
         if (
             ASR_USE_UTTERANCES
             and isinstance(utterances, list)
             and len(utterances) > 0
         ):
-            utterance_texts = [
-                self._extract_utterance_text(utterance) for utterance in utterances
-            ]
-            utterance_texts = [text for text in utterance_texts if text]
-            if utterance_texts:
+            if snapshot_segments:
                 # Upstream utterances are typically a full latest snapshot.
                 # Rebuild from current snapshot each packet to avoid repeated prefix accumulation.
-                snapshot_text = "".join(utterance_texts)
+                snapshot_text = "".join(text for text, _ in snapshot_segments)
+        if not snapshot_segments:
+            snapshot_segments = self._snapshot_segments_from_text(snapshot_text)
 
         self.asr_snapshot_text = snapshot_text
         effective_snapshot = snapshot_text
+        effective_segments = snapshot_segments
+        rewrite_blocked = False
+        tail_recovered = False
+        fallback_wrapped = False
         if (
             ASR_ENABLE_PREFIX_NO_REWIND
             and self.asr_committed_text
             and not effective_snapshot.startswith(self.asr_committed_text)
         ):
+            rewrite_blocked = True
+            merged_snapshot, tail_recovered = self._merge_snapshot_tail_for_no_rewind(
+                self.asr_committed_text, effective_snapshot
+            )
+            if tail_recovered:
+                consumed_chars = max(0, len(merged_snapshot) - len(self.asr_committed_text))
+                recovered_tail_segments = self._slice_snapshot_segments(
+                    snapshot_segments,
+                    start=0,
+                    length=consumed_chars,
+                )
+                effective_segments = (
+                    self._snapshot_segments_from_text(self.asr_committed_text)
+                    + recovered_tail_segments
+                )
+            else:
+                fallback_wrapped = True
+                merged_snapshot = self.asr_committed_text + snapshot_text
+                effective_segments = (
+                    self._snapshot_segments_from_text(self.asr_committed_text)
+                    + snapshot_segments
+                )
             self._log(
                 "ASR_REWRITE_BLOCKED "
                 f"committed_len={len(self.asr_committed_text)} "
-                f"snapshot_len={len(snapshot_text)}"
+                f"snapshot_len={len(snapshot_text)} "
+                f"tail_recovered={1 if tail_recovered else 0} "
+                f"fallback_wrapped={1 if fallback_wrapped else 0} "
+                f"merged_len={len(merged_snapshot)}"
             )
-            effective_snapshot = self.asr_committed_text
+            effective_snapshot = merged_snapshot
 
         self.asr_recent_snapshots.append(effective_snapshot)
         if len(self.asr_recent_snapshots) > ASR_STABLE_PREFIX_PACKETS:
@@ -890,10 +1053,13 @@ class VoiceBotService(BaseModel):
             next_text = committed_candidate
             draft_text = ""
         else:
-            draft_text = (
-                effective_snapshot[len(committed_candidate) :]
-                if len(effective_snapshot) >= len(committed_candidate)
-                else ""
+            draft_segments = self._slice_snapshot_segments(
+                effective_segments,
+                start=len(committed_candidate),
+            )
+            draft_text = self._render_snapshot_segments(
+                draft_segments,
+                wrap_indefinite=(rewrite_blocked and fallback_wrapped),
             )
             next_text = committed_candidate + draft_text
 
@@ -903,6 +1069,7 @@ class VoiceBotService(BaseModel):
         increment_len = len(next_text) - len(previous_text)
         text_changed = next_text != previous_text
         self.asr_buffer = next_text
+        self._maybe_update_client_end_best_candidate(self.asr_buffer)
 
         if text_changed:
             self.asr_last_growth_mono_ms = self._mono_ms()
@@ -1305,10 +1472,14 @@ class VoiceBotService(BaseModel):
                 elif input_event.event == CLIENT_END_ANSWER:
                     self.asr_force_finalize_requested = True
                     self.asr_force_finalize_requested_mono_ms = self._mono_ms()
+                    self.asr_client_end_best_sentence = self.asr_buffer
+                    self.asr_client_end_best_committed_len = len(self.asr_committed_text)
                     self._log("ASR_TURN_END_REQUEST source=client_end_answer")
                 elif input_event.event == CLIENT_HANGUP:
                     self.asr_force_finalize_requested = True
                     self.asr_force_finalize_requested_mono_ms = self._mono_ms()
+                    self.asr_client_end_best_sentence = self.asr_buffer
+                    self.asr_client_end_best_committed_len = len(self.asr_committed_text)
                     self._log("ASR_TURN_END_REQUEST source=client_hangup")
                 elif input_event.event == USER_AUDIO and input_event.data:
                     yield input_event.data

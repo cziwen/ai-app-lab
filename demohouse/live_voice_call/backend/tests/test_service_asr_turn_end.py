@@ -790,6 +790,82 @@ def test_prefix_rewrite_keeps_committed_prefix_and_logs_blocked(monkeypatch):
         assert isinstance(recognized, service.SentenceRecognizedPayload)
         assert recognized.sentence.startswith(prefix)
         assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
+        assert any("fallback_wrapped=1" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_prefix_rewrite_recovers_tail_when_overlap_exists(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_STABLE_PREFIX_PACKETS", 2)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        base = "阿姨听说你已经选好产品了，不管怎样，这段时间跟您交流"
+        rewritten = "阿姨听说您已经选好产品了，不管怎样，这段时间跟您交流特别开心，后续常联系"
+
+        async def _responses():
+            yield _asr_response(base, 100, utterances=[{"text": base, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(base, 120, utterances=[{"text": base, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(
+                rewritten,
+                140,
+                utterances=[{"text": rewritten, "definite": False}],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence.startswith(base)
+        assert recognized.sentence.endswith("特别开心，后续常联系")
+        assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
+        assert any("tail_recovered=1" in line for line in logs)
+        assert any("fallback_wrapped=0" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_prefix_rewrite_fallback_wraps_indefinite_tail(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, logs = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_STABLE_PREFIX_PACKETS", 2)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASRInterval", 30)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        prefix = "今天这个问题我会先给结论"
+        rewritten = "完全换了一段新的说法，并且没有共享锚点"
+
+        async def _responses():
+            yield _asr_response(prefix, 100, utterances=[{"text": prefix, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(prefix, 120, utterances=[{"text": prefix, "definite": False}])
+            await asyncio.sleep(0.01)
+            yield _asr_response(
+                rewritten,
+                140,
+                utterances=[{"text": rewritten, "definite": False}],
+            )
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.5)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == f"{prefix}（{rewritten}）"
+        assert any("ASR_REWRITE_BLOCKED" in line for line in logs)
+        assert any("tail_recovered=0" in line for line in logs)
+        assert any("fallback_wrapped=1" in line for line in logs)
 
     asyncio.run(_run())
 
@@ -866,5 +942,49 @@ def test_client_end_answer_uses_stabilize_window(monkeypatch):
         recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.6)
         assert isinstance(recognized, service.SentenceRecognizedPayload)
         assert recognized.sentence == "第一版更新"
+
+    asyncio.run(_run())
+
+
+def test_client_end_answer_prefers_best_candidate_over_last_snapshot(monkeypatch):
+    async def _run():
+        fake = _FakeASRClient()
+        svc, _ = _make_service(fake)
+        monkeypatch.setattr(service, "ASR_USE_UTTERANCES", True)
+        monkeypatch.setattr(service, "ASR_ENABLE_PREFIX_NO_REWIND", True)
+        monkeypatch.setattr(service, "ASR_CLIENT_END_STABILIZE_MS", 200)
+        monkeypatch.setattr(service, "ASRInterval", 9999)
+        monkeypatch.setattr(service, "ASR_PRE_FINALIZE_GRACE_MS", 0)
+        monkeypatch.setattr(service, "ASR_POLL_INTERVAL_SECONDS", 0.01)
+
+        base_ms = 2_000_000
+        now_ms = {"value": base_ms}
+        monkeypatch.setattr(svc, "_mono_ms", lambda: now_ms["value"])
+
+        async def _responses():
+            now_ms["value"] = base_ms
+            yield _asr_response("第一版", 100, utterances=[{"text": "第一版", "definite": False}])
+            await asyncio.sleep(0.02)
+            svc.asr_force_finalize_requested = True
+            svc.asr_force_finalize_requested_mono_ms = base_ms + 20
+            svc.asr_client_end_best_sentence = svc.asr_buffer
+            svc.asr_client_end_best_committed_len = len(svc.asr_committed_text)
+            now_ms["value"] = base_ms + 80
+            yield _asr_response(
+                "第一版更新到更完整版本",
+                120,
+                utterances=[{"text": "第一版更新到更完整版本", "definite": False}],
+            )
+            await asyncio.sleep(0.02)
+            now_ms["value"] = base_ms + 160
+            yield _asr_response("第一版更短", 130, utterances=[{"text": "第一版更短", "definite": False}])
+            await asyncio.sleep(0.02)
+            now_ms["value"] = base_ms + 260
+            await asyncio.sleep(3600)
+
+        out_iter = svc.handle_asr_response(_responses()).__aiter__()
+        recognized = await asyncio.wait_for(out_iter.__anext__(), timeout=0.8)
+        assert isinstance(recognized, service.SentenceRecognizedPayload)
+        assert recognized.sentence == "第一版更新到更完整版本"
 
     asyncio.run(_run())
