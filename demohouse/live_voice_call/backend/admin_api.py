@@ -653,6 +653,8 @@ def create_admin_app(
         track: str,
         exp: int = Query(..., description="unix timestamp in seconds"),
         sig: str = Query(..., min_length=1),
+        question_id: Optional[str] = Query(default=None),
+        question_epoch: int = Query(default=0, ge=0),
     ) -> FileResponse:
         secret = _get_stt_audio_signing_secret()
         if not secret:
@@ -669,7 +671,12 @@ def create_admin_app(
             is_valid = False
         if not is_valid:
             raise HTTPException(status_code=403, detail="音频签名无效或已过期")
-        path = get_audio_file_path(token, track)
+        path = get_audio_file_path(
+            token,
+            track,
+            question_id=str(question_id or "").strip() or None,
+            question_epoch=question_epoch,
+        )
         if not path:
             raise HTTPException(status_code=404, detail="音频不存在")
         suffix = path.suffix.lower()

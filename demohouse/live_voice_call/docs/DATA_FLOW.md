@@ -46,8 +46,9 @@
 ## 5. 结束与持久化
 - `ClientHangup` 或流程自然结束后，`handler` 收集 turns 与音频。
 - finalize 护栏：若旧会话发现 token 已被新 owner 接管（`token_reacquired`），则降级 `disconnected` 并 `skip_complete`。
-- finalize 会在评分前对 candidate canonical 音频执行 STT 二次识别（可选）：
-  - 成功：按候选人轮次长度配额复写 candidate turns。
+- finalize 会在评分前执行 STT 二次识别（可选）：
+  - 默认优先按题级音频（`question_id + question_epoch`）逐题 STT，并仅复写对应题目的 candidate turns。
+  - 若题级音频不可用或 `STT_PER_QUESTION_ENABLED=false`，回退整段 candidate canonical 音频 STT。
   - 部分成功：未覆盖轮次保留 ASR 文本（partial fallback）。
   - 失败/超时/配置无效：整场回退 ASR（full fallback）。
 - `PersistenceQueue` 异步写入存储并触发 `ScoringQueue`。

@@ -11,12 +11,13 @@
 - 管理员：`ensure_default_admin`、`verify_admin_credentials`、`create_admin_session`。
 - 岗位：`create_job`、`list_jobs`、`get_job_detail`、`delete_job_cascade`。
 - 面试：`create_interview`、`start_interview_session`、`resolve_interview_timeout`、`mark_interview_completed`。
-- 数据落盘：`save_interview_turn_events`、`persist_interview_audio`、`get_audio_file_path`。
+- 数据落盘：`save_interview_turn_events`、`persist_interview_audio`、`persist_interview_question_audio_segments`、`get_audio_file_path`。
 - 收口与评分输入：`finalize_canonical_artifacts`、`build_score_inputs_from_canonical_turns`。
 
 ## 存储与状态
 - DB：`backend/data/app.db`（WAL 模式）。
 - 文件：`backend/data/storage/audio`、`backend/data/storage/interview_logs`。
+- 题级音频：`backend/data/storage/audio/<token>/<attempt_id>/questions/*`（收口后会汇总到 `.../canonical/questions/*`）。
 - 关键状态：`pending / in_progress / completed / failed / deleted`。
 - 断连容忍：`interruption_count` + `reconnect_deadline_at`。
 
@@ -42,7 +43,7 @@
 - 检查物理文件是否存在并与 token 对齐。
 
 4. 现象：评分文本与实时 ASR 文本不一致。
-- 说明：收口后会优先使用 STT 复写 candidate turns（若启用 STT）。
+- 说明：收口后会优先使用 STT 复写 candidate turns（若启用 STT）；默认先按题级音频 STT，缺失时回退整段 STT。
 - 观察 `consistency_flags`：
   - `stt_applied`：已应用 STT
   - `stt_partial_fallback`：部分轮次回退 ASR

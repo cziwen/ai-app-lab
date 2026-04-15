@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from urllib.parse import quote
 
 from arkitect.telemetry.logger import INFO
 from auc_stt_client import (
@@ -90,6 +91,7 @@ STT_POLL_INTERVAL_MS_ENV = "STT_POLL_INTERVAL_MS"
 STT_AUDIO_PUBLIC_BASE_URL_ENV = "STT_AUDIO_PUBLIC_BASE_URL"
 STT_AUDIO_SIGNING_SECRET_ENV = "STT_AUDIO_SIGNING_SECRET"
 STT_AUDIO_URL_TTL_SECONDS_ENV = "STT_AUDIO_URL_TTL_SECONDS"
+STT_PER_QUESTION_ENABLED_ENV = "STT_PER_QUESTION_ENABLED"
 DEFAULT_STT_TASK_TIMEOUT_MS = 90000
 DEFAULT_STT_POLL_INTERVAL_MS = 1000
 DEFAULT_STT_AUDIO_URL_TTL_SECONDS = 600
@@ -306,6 +308,22 @@ CREATE TABLE IF NOT EXISTS interview_audio_segments (
   UNIQUE(attempt_id, track, segment_seq)
 );
 
+CREATE TABLE IF NOT EXISTS interview_question_audio_segments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL,
+  interview_token TEXT NOT NULL,
+  question_id TEXT NOT NULL,
+  question_epoch INTEGER NOT NULL DEFAULT 0,
+  segment_seq INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  FOREIGN KEY(interview_token) REFERENCES interviews(token) ON DELETE CASCADE,
+  FOREIGN KEY(attempt_id) REFERENCES interview_attempts(attempt_id) ON DELETE CASCADE,
+  UNIQUE(attempt_id, question_id, question_epoch, segment_seq)
+);
+
 CREATE TABLE IF NOT EXISTS interview_checkpoint_journal (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   interview_token TEXT NOT NULL,
@@ -368,6 +386,9 @@ ON interview_turn_events(interview_token, event_ts, id);
 
 CREATE INDEX IF NOT EXISTS idx_interview_audio_segments_token_track_seq
 ON interview_audio_segments(interview_token, track, id);
+
+CREATE INDEX IF NOT EXISTS idx_interview_question_audio_segments_token_qid_epoch_id
+ON interview_question_audio_segments(interview_token, question_id, question_epoch, id);
 
 CREATE INDEX IF NOT EXISTS idx_interview_checkpoint_journal_token_seq
 ON interview_checkpoint_journal(interview_token, id);
@@ -3163,8 +3184,14 @@ def _load_stt_runtime_config() -> Dict[str, Any]:
     }
 
 
-def _build_stt_candidate_audio_url(token: str, stt_config: Dict[str, Any]) -> str:
-    return build_signed_audio_url(
+def _build_stt_candidate_audio_url(
+    token: str,
+    stt_config: Dict[str, Any],
+    *,
+    question_id: Optional[str] = None,
+    question_epoch: Optional[int] = None,
+) -> str:
+    base_url = build_signed_audio_url(
         base_url=str(stt_config.get("audio_public_base_url", "") or ""),
         token=token,
         track="candidate",
@@ -3173,6 +3200,17 @@ def _build_stt_candidate_audio_url(token: str, stt_config: Dict[str, Any]) -> st
             stt_config.get("audio_url_ttl_seconds", DEFAULT_STT_AUDIO_URL_TTL_SECONDS)
             or DEFAULT_STT_AUDIO_URL_TTL_SECONDS
         ),
+    )
+    normalized_question_id = str(question_id or "").strip()
+    if not normalized_question_id:
+        return base_url
+    try:
+        normalized_question_epoch = max(0, int(question_epoch or 0))
+    except (TypeError, ValueError):
+        normalized_question_epoch = 0
+    return (
+        f"{base_url}&question_id={quote(normalized_question_id, safe='')}"
+        f"&question_epoch={normalized_question_epoch}"
     )
 
 
@@ -3203,11 +3241,50 @@ def _rewrite_candidate_events_with_stt(
     *,
     stt_result: AucSTTResult,
 ) -> Dict[str, int]:
+    return _rewrite_candidate_events_with_stt_filtered(
+        canonical_events,
+        stt_result=stt_result,
+        question_id=None,
+        question_epoch=None,
+    )
+
+
+def _rewrite_candidate_events_with_stt_filtered(
+    canonical_events: List[Dict[str, Any]],
+    *,
+    stt_result: AucSTTResult,
+    question_id: Optional[str],
+    question_epoch: Optional[int],
+) -> Dict[str, int]:
+    normalized_question_id = str(question_id or "").strip()
+    try:
+        normalized_question_epoch = (
+            None if question_epoch is None else max(0, int(question_epoch or 0))
+        )
+    except (TypeError, ValueError):
+        normalized_question_epoch = 0
+
+    def _event_epoch(event: Dict[str, Any]) -> int:
+        try:
+            return max(0, int(event.get("question_epoch", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
     candidate_indexes = [
         idx
         for idx, event in enumerate(canonical_events)
         if str(event.get("role", "")).strip() == "candidate"
         and str(event.get("content", "")).strip()
+        and (
+            not normalized_question_id
+            or (
+                str(event.get("question_id", "")).strip() == normalized_question_id
+                and (
+                    normalized_question_epoch is None
+                    or _event_epoch(event) == normalized_question_epoch
+                )
+            )
+        )
     ]
     candidate_count = len(candidate_indexes)
     if candidate_count <= 0:
@@ -3396,6 +3473,155 @@ def _copy_or_merge_audio_track_rows(
     if int(fallback_row["attempt_seq"] or 0) <= 0:
         flags.append(f"{track}_attempt_seq_missing")
     return str(output_path)
+
+
+def _collect_candidate_question_keys(
+    canonical_events: Sequence[Dict[str, Any]],
+) -> List[Tuple[str, int]]:
+    ordered_keys: List[Tuple[str, int]] = []
+    seen: Set[Tuple[str, int]] = set()
+    for event in canonical_events:
+        if str(event.get("role", "")).strip() != "candidate":
+            continue
+        if not str(event.get("content", "")).strip():
+            continue
+        question_id = str(event.get("question_id", "")).strip()
+        if not question_id:
+            continue
+        try:
+            question_epoch = max(0, int(event.get("question_epoch", 0) or 0))
+        except (TypeError, ValueError):
+            question_epoch = 0
+        key = (question_id, question_epoch)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_keys.append(key)
+    return ordered_keys
+
+
+def _load_question_audio_rows_for_attempts_in_conn(
+    conn: sqlite3.Connection,
+    token: str,
+    *,
+    attempt_seqs: Sequence[int],
+) -> List[sqlite3.Row]:
+    normalized_attempts = sorted({int(item) for item in attempt_seqs if int(item) > 0})
+    if normalized_attempts:
+        placeholders = ",".join(["?"] * len(normalized_attempts))
+        return conn.execute(
+            f"""
+            SELECT q.question_id, q.question_epoch, q.file_path, q.segment_seq,
+                   COALESCE(a.attempt_seq, 0) AS attempt_seq, q.id
+            FROM interview_question_audio_segments q
+            JOIN interview_attempts a ON a.attempt_id = q.attempt_id
+            WHERE q.interview_token = ? AND COALESCE(a.attempt_seq, 0) IN ({placeholders})
+            ORDER BY a.attempt_seq ASC, q.question_id ASC, q.question_epoch ASC, q.segment_seq ASC, q.id ASC
+            """,
+            (token, *normalized_attempts),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT q.question_id, q.question_epoch, q.file_path, q.segment_seq,
+               COALESCE(a.attempt_seq, 0) AS attempt_seq, q.id
+        FROM interview_question_audio_segments q
+        JOIN interview_attempts a ON a.attempt_id = q.attempt_id
+        WHERE q.interview_token = ?
+        ORDER BY a.attempt_seq ASC, q.question_id ASC, q.question_epoch ASC, q.segment_seq ASC, q.id ASC
+        """,
+        (token,),
+    ).fetchall()
+
+
+def _copy_or_merge_question_audio_rows(
+    rows: Sequence[sqlite3.Row],
+    *,
+    token: str,
+    question_id: str,
+    question_epoch: int,
+    flags: List[str],
+) -> Optional[str]:
+    existing_rows: List[Tuple[sqlite3.Row, Path]] = []
+    for row in rows:
+        raw_path = str(row["file_path"] or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.exists() or not path.is_file():
+            continue
+        existing_rows.append((row, path))
+    if not existing_rows:
+        return None
+
+    canonical_dir = AUDIO_DIR / token / "canonical" / "questions"
+    canonical_dir.mkdir(parents=True, exist_ok=True)
+    suffix = existing_rows[0][1].suffix.lower()
+    output_suffix = suffix if suffix else ".raw"
+    file_stub = _question_audio_file_stub(question_id, question_epoch)
+    output_path = canonical_dir / f"{file_stub}{output_suffix}"
+    paths = [path for _, path in existing_rows]
+    suffixes = {path.suffix.lower() for path in paths}
+
+    if len(paths) == 1:
+        shutil.copyfile(paths[0], output_path)
+        return str(output_path)
+
+    if len(suffixes) == 1 and output_suffix == ".wav":
+        if _merge_wav_files(paths, output_path):
+            return str(output_path)
+    elif len(suffixes) == 1 and output_suffix == ".mp3":
+        if _merge_mp3_files(paths, output_path):
+            return str(output_path)
+
+    _fallback_row, fallback_path = existing_rows[-1]
+    fallback_suffix = fallback_path.suffix.lower() or ".raw"
+    output_path = canonical_dir / f"{file_stub}{fallback_suffix}"
+    shutil.copyfile(fallback_path, output_path)
+    flags.append("question_audio_merge_fallback")
+    if len(suffixes) > 1:
+        flags.append("question_audio_mixed_format")
+    return str(output_path)
+
+
+def _build_question_audio_canonical_paths(
+    conn: sqlite3.Connection,
+    *,
+    token: str,
+    question_keys: Sequence[Tuple[str, int]],
+    attempt_seqs: Sequence[int],
+    flags: List[str],
+) -> Dict[Tuple[str, int], str]:
+    if not question_keys:
+        return {}
+    rows = _load_question_audio_rows_for_attempts_in_conn(
+        conn, token, attempt_seqs=attempt_seqs
+    )
+    if not rows:
+        return {}
+    grouped_rows: Dict[Tuple[str, int], List[sqlite3.Row]] = {}
+    for row in rows:
+        question_id = str(row["question_id"] or "").strip()
+        if not question_id:
+            continue
+        try:
+            question_epoch = max(0, int(row["question_epoch"] or 0))
+        except (TypeError, ValueError):
+            question_epoch = 0
+        grouped_rows.setdefault((question_id, question_epoch), []).append(row)
+
+    canonical_paths: Dict[Tuple[str, int], str] = {}
+    for question_id, question_epoch in question_keys:
+        question_rows = grouped_rows.get((question_id, question_epoch), [])
+        merged_path = _copy_or_merge_question_audio_rows(
+            question_rows,
+            token=token,
+            question_id=question_id,
+            question_epoch=question_epoch,
+            flags=flags,
+        )
+        if merged_path:
+            canonical_paths[(question_id, question_epoch)] = merged_path
+    return canonical_paths
 
 
 def finalize_canonical_artifacts(
@@ -3640,6 +3866,7 @@ def finalize_canonical_artifacts(
 
             candidate_path: Optional[str] = None
             interviewer_path: Optional[str] = None
+            selected_audio_attempt_seqs: List[int] = []
             if (
                 audio_align_by_turn_events_enabled
                 and canonical_events
@@ -3704,6 +3931,9 @@ def finalize_canonical_artifacts(
                             flags=consistency_flags,
                         )
                         if candidate_path and interviewer_path:
+                            selected_audio_attempt_seqs = [
+                                int(seq) for seq in inferred_attempt_seqs if int(seq) > 0
+                            ]
                             consistency_flags.append("audio_attempts_inferred_from_turns")
                             INFO(
                                 "event=finalize.audio_attempt_infer_applied "
@@ -3752,6 +3982,7 @@ def finalize_canonical_artifacts(
                         flags=consistency_flags,
                     )
                     if candidate_path and interviewer_path:
+                        selected_audio_attempt_seqs = [preferred_attempt_seq]
                         consistency_flags.append("audio_attempt_pinned_to_checkpoint")
                     else:
                         consistency_flags.append("audio_attempt_fallback_used")
@@ -3774,8 +4005,17 @@ def finalize_canonical_artifacts(
                     track="interviewer",
                     flags=consistency_flags,
                 )
+                if candidate_path and interviewer_path:
+                    selected_audio_attempt_seqs = sorted(
+                        {
+                            int(row["attempt_seq"] or 0)
+                            for row in audio_rows
+                            if int(row["attempt_seq"] or 0) > 0
+                        }
+                    )
 
             stt_config = _load_stt_runtime_config()
+            stt_per_question_enabled = _env_flag(STT_PER_QUESTION_ENABLED_ENV, True)
             if stt_config["invalid"]:
                 consistency_flags.append("stt_failed:config")
                 consistency_flags.append("stt_full_fallback")
@@ -3785,7 +4025,6 @@ def finalize_canonical_artifacts(
                 )
             elif stt_config["enabled"] and candidate_path:
                 try:
-                    stt_audio_url = _build_stt_candidate_audio_url(token, stt_config)
                     stt_client = AucSTTClient(
                         app_id=str(stt_config["app_id"]),
                         access_token=str(stt_config["access_token"]),
@@ -3795,31 +4034,137 @@ def finalize_canonical_artifacts(
                         task_timeout_ms=int(stt_config["task_timeout_ms"]),
                         poll_interval_ms=int(stt_config["poll_interval_ms"]),
                     )
-                    stt_result = stt_client.transcribe_audio_url(
-                        audio_url=stt_audio_url,
-                        audio_format=_detect_audio_format_for_stt(candidate_path),
-                        show_utterances=True,
-                    )
-                    rewrite_meta = _rewrite_candidate_events_with_stt(
-                        canonical_events,
-                        stt_result=stt_result,
-                    )
-                    candidate_count = int(rewrite_meta.get("candidate_count", 0) or 0)
-                    replaced_count = int(rewrite_meta.get("replaced_count", 0) or 0)
-                    if candidate_count <= 0 or replaced_count <= 0:
-                        consistency_flags.append("stt_full_fallback")
-                    elif replaced_count < candidate_count:
-                        consistency_flags.append("stt_applied")
-                        consistency_flags.append("stt_partial_fallback")
-                    else:
-                        consistency_flags.append("stt_applied")
-                    INFO(
-                        "event=finalize.stt_rewrite "
-                        f"token={token} candidate_count={candidate_count} "
-                        f"replaced_count={replaced_count} "
-                        f"stt_unit_count={int(rewrite_meta.get('stt_unit_count', 0) or 0)} "
-                        f"text_len={len(stt_result.text or '')}"
-                    )
+                    stt_used_question_audio = False
+                    if stt_per_question_enabled:
+                        question_keys = _collect_candidate_question_keys(canonical_events)
+                        if question_keys:
+                            question_audio_paths = _build_question_audio_canonical_paths(
+                                conn,
+                                token=token,
+                                question_keys=question_keys,
+                                attempt_seqs=selected_audio_attempt_seqs,
+                                flags=consistency_flags,
+                            )
+                            if question_audio_paths:
+                                stt_used_question_audio = True
+                                candidate_count = 0
+                                replaced_count = 0
+                                stt_unit_count = 0
+                                stt_error_count = 0
+
+                                def _event_question_epoch(event: Dict[str, Any]) -> int:
+                                    try:
+                                        return max(
+                                            0, int(event.get("question_epoch", 0) or 0)
+                                        )
+                                    except (TypeError, ValueError):
+                                        return 0
+
+                                for question_id, question_epoch in question_keys:
+                                    event_candidate_count = sum(
+                                        1
+                                        for event in canonical_events
+                                        if str(event.get("role", "")).strip() == "candidate"
+                                        and str(event.get("content", "")).strip()
+                                        and str(event.get("question_id", "")).strip()
+                                        == question_id
+                                        and (_event_question_epoch(event) == question_epoch)
+                                    )
+                                    if event_candidate_count > 0:
+                                        candidate_count += event_candidate_count
+                                    question_audio_path = question_audio_paths.get(
+                                        (question_id, question_epoch)
+                                    )
+                                    if not question_audio_path:
+                                        continue
+                                    try:
+                                        stt_audio_url = _build_stt_candidate_audio_url(
+                                            token,
+                                            stt_config,
+                                            question_id=question_id,
+                                            question_epoch=question_epoch,
+                                        )
+                                        stt_result = stt_client.transcribe_audio_url(
+                                            audio_url=stt_audio_url,
+                                            audio_format=_detect_audio_format_for_stt(
+                                                question_audio_path
+                                            ),
+                                            show_utterances=True,
+                                        )
+                                        rewrite_meta = _rewrite_candidate_events_with_stt_filtered(
+                                            canonical_events,
+                                            stt_result=stt_result,
+                                            question_id=question_id,
+                                            question_epoch=question_epoch,
+                                        )
+                                        replaced_count += int(
+                                            rewrite_meta.get("replaced_count", 0) or 0
+                                        )
+                                        stt_unit_count += int(
+                                            rewrite_meta.get("stt_unit_count", 0) or 0
+                                        )
+                                    except Exception as question_stt_err:
+                                        stt_error_count += 1
+                                        consistency_flags.append(
+                                            f"stt_failed:{type(question_stt_err).__name__}"
+                                        )
+                                        INFO(
+                                            "event=finalize.stt_question_failed "
+                                            f"token={token} question_id={question_id} question_epoch={question_epoch} "
+                                            f"error_type={type(question_stt_err).__name__} error={question_stt_err}"
+                                        )
+                                if candidate_count <= 0 or replaced_count <= 0:
+                                    consistency_flags.append("stt_full_fallback")
+                                elif replaced_count < candidate_count:
+                                    consistency_flags.append("stt_applied")
+                                    consistency_flags.append("stt_partial_fallback")
+                                else:
+                                    consistency_flags.append("stt_applied")
+                                INFO(
+                                    "event=finalize.stt_rewrite_per_question "
+                                    f"token={token} candidate_count={candidate_count} "
+                                    f"replaced_count={replaced_count} "
+                                    f"stt_unit_count={stt_unit_count} "
+                                    f"question_audio_count={len(question_audio_paths)} "
+                                    f"question_error_count={stt_error_count}"
+                                )
+                            else:
+                                INFO(
+                                    "event=finalize.stt_per_question_fallback "
+                                    f"token={token} reason=question_audio_missing"
+                                )
+                        else:
+                            INFO(
+                                "event=finalize.stt_per_question_fallback "
+                                f"token={token} reason=question_key_missing"
+                            )
+                    if not stt_used_question_audio:
+                        stt_audio_url = _build_stt_candidate_audio_url(token, stt_config)
+                        stt_result = stt_client.transcribe_audio_url(
+                            audio_url=stt_audio_url,
+                            audio_format=_detect_audio_format_for_stt(candidate_path),
+                            show_utterances=True,
+                        )
+                        rewrite_meta = _rewrite_candidate_events_with_stt(
+                            canonical_events,
+                            stt_result=stt_result,
+                        )
+                        candidate_count = int(rewrite_meta.get("candidate_count", 0) or 0)
+                        replaced_count = int(rewrite_meta.get("replaced_count", 0) or 0)
+                        if candidate_count <= 0 or replaced_count <= 0:
+                            consistency_flags.append("stt_full_fallback")
+                        elif replaced_count < candidate_count:
+                            consistency_flags.append("stt_applied")
+                            consistency_flags.append("stt_partial_fallback")
+                        else:
+                            consistency_flags.append("stt_applied")
+                        INFO(
+                            "event=finalize.stt_rewrite "
+                            f"token={token} candidate_count={candidate_count} "
+                            f"replaced_count={replaced_count} "
+                            f"stt_unit_count={int(rewrite_meta.get('stt_unit_count', 0) or 0)} "
+                            f"text_len={len(stt_result.text or '')}"
+                        )
                 except Exception as stt_err:
                     consistency_flags.append(f"stt_failed:{type(stt_err).__name__}")
                     consistency_flags.append("stt_full_fallback")
@@ -4372,6 +4717,150 @@ def _probe_duration_ms(path: Path) -> int:
     return max(1, int(round(seconds * 1000)))
 
 
+def _question_audio_file_stub(question_id: str, question_epoch: int) -> str:
+    normalized_question_id = str(question_id or "").strip()
+    safe_chars: List[str] = []
+    for char in normalized_question_id:
+        if char.isascii() and (char.isalnum() or char in {"-", "_"}):
+            safe_chars.append(char)
+        else:
+            safe_chars.append("_")
+    safe_question_id = "".join(safe_chars).strip("_") or "question"
+    digest = hashlib.sha1(normalized_question_id.encode("utf-8")).hexdigest()[:8]
+    normalized_question_epoch = max(0, int(question_epoch or 0))
+    return f"{safe_question_id}-{digest}-e{normalized_question_epoch}"
+
+
+def _normalize_question_audio_segments_input(
+    question_candidate_pcm_segments: Optional[Sequence[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    if not question_candidate_pcm_segments:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in question_candidate_pcm_segments:
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("question_id", "") or "").strip()
+        if not question_id:
+            continue
+        try:
+            question_epoch = max(0, int(item.get("question_epoch", 0) or 0))
+        except (TypeError, ValueError):
+            question_epoch = 0
+        pcm_bytes_raw = item.get("pcm_bytes", b"")
+        if isinstance(pcm_bytes_raw, bytearray):
+            pcm_bytes = bytes(pcm_bytes_raw)
+        elif isinstance(pcm_bytes_raw, bytes):
+            pcm_bytes = pcm_bytes_raw
+        else:
+            continue
+        if not pcm_bytes:
+            continue
+        normalized.append(
+            {
+                "question_id": question_id,
+                "question_epoch": question_epoch,
+                "pcm_bytes": pcm_bytes,
+            }
+        )
+    return normalized
+
+
+def persist_interview_question_audio_segments(
+    token: str,
+    *,
+    attempt_id: str,
+    question_candidate_pcm_segments: Sequence[Dict[str, Any]],
+) -> Dict[str, int]:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    normalized_segments = _normalize_question_audio_segments_input(
+        question_candidate_pcm_segments
+    )
+    if not normalized_attempt_id or not normalized_segments:
+        return {"saved_segment_count": 0}
+
+    question_audio_dir = AUDIO_DIR / token / normalized_attempt_id / "questions"
+    question_audio_dir.mkdir(parents=True, exist_ok=True)
+
+    compress_enabled = _env_flag("AUDIO_COMPRESS_ENABLED", True)
+    candidate_bitrate_kbps = _env_int(
+        "CANDIDATE_MP3_BITRATE_KBPS", 32, minimum=8, maximum=320
+    )
+    candidate_sample_rate = _env_int(
+        "CANDIDATE_AUDIO_SAMPLE_RATE", 16000, minimum=8000, maximum=48000
+    )
+    candidate_channels = _env_int("CANDIDATE_AUDIO_CHANNELS", 1, minimum=1, maximum=2)
+    denominator = max(1, candidate_sample_rate * candidate_channels * 2)
+
+    with get_conn() as conn:
+        existing_rows = conn.execute(
+            """
+            SELECT question_id, question_epoch, COALESCE(MAX(segment_seq), 0) AS max_seq
+            FROM interview_question_audio_segments
+            WHERE attempt_id = ?
+            GROUP BY question_id, question_epoch
+            """,
+            (normalized_attempt_id,),
+        ).fetchall()
+        next_segment_seq: Dict[Tuple[str, int], int] = {}
+        for row in existing_rows:
+            key = (str(row["question_id"] or "").strip(), int(row["question_epoch"] or 0))
+            next_segment_seq[key] = int(row["max_seq"] or 0) + 1
+
+        now_iso = utc_now_iso()
+        saved_count = 0
+        for segment in normalized_segments:
+            question_id = str(segment["question_id"])
+            question_epoch = int(segment["question_epoch"])
+            pcm_bytes = bytes(segment["pcm_bytes"])
+            key = (question_id, question_epoch)
+            segment_seq = int(next_segment_seq.get(key, 1))
+            next_segment_seq[key] = segment_seq + 1
+            file_stub = _question_audio_file_stub(question_id, question_epoch)
+
+            candidate_mp3_bytes: Optional[bytes] = None
+            if compress_enabled:
+                candidate_mp3_bytes = _ffmpeg_encode_pcm_to_mp3(
+                    pcm_bytes,
+                    sample_rate=candidate_sample_rate,
+                    channels=candidate_channels,
+                    bitrate_kbps=candidate_bitrate_kbps,
+                )
+            if candidate_mp3_bytes:
+                file_path = question_audio_dir / f"{file_stub}-{segment_seq}.mp3"
+                file_path.write_bytes(candidate_mp3_bytes)
+                duration_ms = _probe_duration_ms(file_path)
+            else:
+                file_path = question_audio_dir / f"{file_stub}-{segment_seq}.wav"
+                _write_pcm_to_wav(file_path, pcm_bytes, sample_rate=candidate_sample_rate)
+                duration_ms = max(1, int(round(len(pcm_bytes) * 1000 / denominator)))
+
+            conn.execute(
+                """
+                INSERT INTO interview_question_audio_segments (
+                    attempt_id, interview_token, question_id, question_epoch, segment_seq,
+                    file_path, duration_ms, started_at, ended_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_attempt_id,
+                    token,
+                    question_id,
+                    question_epoch,
+                    segment_seq,
+                    str(file_path),
+                    int(duration_ms),
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            saved_count += 1
+        conn.commit()
+
+    return {"saved_segment_count": saved_count}
+
+
 def persist_interview_audio(
     token: str,
     candidate_pcm_bytes: bytes,
@@ -4634,9 +5123,49 @@ def update_interview_updated_at(token: str) -> None:
         conn.commit()
 
 
-def get_audio_file_path(token: str, track: str) -> Optional[Path]:
+def _resolve_canonical_question_audio_path(
+    token: str,
+    question_id: str,
+    question_epoch: int,
+) -> Optional[Path]:
+    file_stub = _question_audio_file_stub(question_id, question_epoch)
+    questions_dir = AUDIO_DIR / token / "canonical" / "questions"
+    for suffix in (".mp3", ".wav", ".ogg", ".raw"):
+        path = questions_dir / f"{file_stub}{suffix}"
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def get_audio_file_path(
+    token: str,
+    track: str,
+    *,
+    question_id: Optional[str] = None,
+    question_epoch: Optional[int] = None,
+) -> Optional[Path]:
     if track not in ("candidate", "interviewer"):
         return None
+    normalized_question_id = str(question_id or "").strip()
+    if normalized_question_id:
+        if track != "candidate":
+            return None
+        try:
+            normalized_question_epoch = max(0, int(question_epoch or 0))
+        except (TypeError, ValueError):
+            return None
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT token FROM interviews WHERE token = ?",
+                (token,),
+            ).fetchone()
+            if not row:
+                return None
+        return _resolve_canonical_question_audio_path(
+            token,
+            normalized_question_id,
+            normalized_question_epoch,
+        )
 
     with get_conn() as conn:
         row = conn.execute(

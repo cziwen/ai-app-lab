@@ -397,6 +397,47 @@ def test_public_audio_endpoint_requires_valid_signature(monkeypatch, tmp_path):
     assert bad_rsp.status_code == 403
 
 
+def test_public_audio_endpoint_supports_question_audio_query(monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_AUDIO_SIGNING_SECRET", "test-secret")
+    client = _client_with_login(monkeypatch, tmp_path)
+    job = admin_store.create_job(
+        name="测试岗位",
+        duties="负责测试",
+        requirements="熟悉测试流程",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("题目A", "答案A")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="张三",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    question_id = "q1"
+    question_epoch = 0
+    file_stub = admin_store._question_audio_file_stub(question_id, question_epoch)
+    question_dir = admin_store.AUDIO_DIR / token / "canonical" / "questions"
+    question_dir.mkdir(parents=True, exist_ok=True)
+    question_path = question_dir / f"{file_stub}.wav"
+    question_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+
+    exp = int(time.time()) + 600
+    valid_sig = stt_audio_url.sign_audio_access(
+        token,
+        "candidate",
+        exp,
+        secret="test-secret",
+    )
+    rsp = client.get(
+        f"/api/public/interviews/{token}/audio/candidate"
+        f"?exp={exp}&sig={valid_sig}&question_id={question_id}&question_epoch={question_epoch}"
+    )
+    assert rsp.status_code == 200
+    assert rsp.headers["content-type"].startswith("audio/")
+
+
 def test_create_interview_invalid_enable_live_subtitle_returns_422(monkeypatch, tmp_path):
     client = _client_with_login(monkeypatch, tmp_path)
     job = admin_store.create_job(

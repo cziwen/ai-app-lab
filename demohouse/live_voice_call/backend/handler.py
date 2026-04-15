@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Set, Tuple
@@ -46,6 +46,7 @@ from admin_store import (
     mark_interview_in_progress,
     close_interview_attempt,
     persist_interview_audio,
+    persist_interview_question_audio_segments,
     resolve_all_interview_timeouts,
     save_interview_scorecard_failed,
     save_interview_scorecard_success,
@@ -418,6 +419,7 @@ class PersistenceTask:
     candidate_frame_prefixed_count: int
     candidate_frame_raw_count: int
     candidate_audio_dropped_frames: int
+    question_candidate_pcm_segments: List[Dict[str, Any]] = field(default_factory=list)
     grace_seconds: int = 30
     retries: int = 0
 
@@ -494,6 +496,15 @@ class PersistenceQueue:
                 interviewer_encoded_bytes=task.interviewer_encoded_bytes,
                 attempt_id=task.attempt_id,
             )
+            if task.question_candidate_pcm_segments:
+                await asyncio.to_thread(
+                    persist_interview_question_audio_segments,
+                    token=task.token,
+                    attempt_id=task.attempt_id,
+                    question_candidate_pcm_segments=list(
+                        task.question_candidate_pcm_segments
+                    ),
+                )
             await asyncio.to_thread(
                 close_interview_attempt,
                 task.attempt_id,
@@ -1093,6 +1104,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     turn_events: List[Dict[str, Any]] = []
     turn_event_seq = 0
     candidate_audio = bytearray()
+    question_candidate_audio_buckets: Dict[Tuple[str, int], bytearray] = {}
     interviewer_audio_encoded = bytearray()
     candidate_frame_prefixed_count = 0
     candidate_frame_raw_count = 0
@@ -1108,10 +1120,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
     checkpoint_flushed_version = 0
     checkpoint_journal_seq = 0
 
-    def record_turn(role: str, text: str):
-        nonlocal turn_event_seq
-        if not text:
-            return
+    def _resolve_question_context(role: str) -> Tuple[str, int, int]:
         question_id = ""
         question_index = 0
         question_epoch = 0
@@ -1144,6 +1153,13 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                         )
                     except (TypeError, ValueError):
                         question_epoch = 0
+        return question_id, max(0, question_index), max(0, question_epoch)
+
+    def record_turn(role: str, text: str):
+        nonlocal turn_event_seq
+        if not text:
+            return
+        question_id, question_index, question_epoch = _resolve_question_context(role)
         turn_event_seq += 1
         turn_events.append(
             {
@@ -1154,7 +1170,7 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 "event_kind": "transcript",
                 "question_id": question_id,
                 "question_index": question_index,
-                "question_epoch": max(0, question_epoch),
+                "question_epoch": question_epoch,
                 "commit_state": "live",
             }
         )
@@ -1349,6 +1365,16 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                 candidate_frame_raw_count += frame_stats.get("raw", 0)
                 if pcm_bytes:
                     candidate_audio.extend(pcm_bytes)
+                    question_id, _question_index, question_epoch = _resolve_question_context(
+                        "candidate"
+                    )
+                    if question_id:
+                        question_key = (question_id, max(0, question_epoch))
+                        bucket = question_candidate_audio_buckets.get(question_key)
+                        if bucket is None:
+                            bucket = bytearray()
+                            question_candidate_audio_buckets[question_key] = bucket
+                        bucket.extend(pcm_bytes)
                 else:
                     candidate_audio_dropped_frames += 1
             yield input_event
@@ -1542,6 +1568,18 @@ async def handler(websocket: websockets.WebSocketCommonProtocol, path):
                     candidate_frame_prefixed_count=candidate_frame_prefixed_count,
                     candidate_frame_raw_count=candidate_frame_raw_count,
                     candidate_audio_dropped_frames=candidate_audio_dropped_frames,
+                    question_candidate_pcm_segments=[
+                        {
+                            "question_id": question_id,
+                            "question_epoch": question_epoch,
+                            "pcm_bytes": bytes(audio_buffer),
+                        }
+                        for (question_id, question_epoch), audio_buffer in sorted(
+                            question_candidate_audio_buckets.items(),
+                            key=lambda item: (item[0][0], item[0][1]),
+                        )
+                        if question_id and audio_buffer
+                    ],
                     grace_seconds=INTERVIEW_RECONNECT_GRACE_SECONDS,
                 )
             )

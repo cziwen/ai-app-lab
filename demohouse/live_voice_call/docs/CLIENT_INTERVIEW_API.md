@@ -398,12 +398,21 @@ curl -v -m 10 'https://smartinterview.cn/api/public/interviews/INT-abc123xyz/acc
 - 查询参数：
   - `exp`：过期时间（UTC 秒时间戳）
   - `sig`：签名（HMAC-SHA256）
+  - `question_id`（可选）：题目 ID，仅 `track=candidate` 有效
+  - `question_epoch`（可选，默认 0）：题目 epoch，仅 `track=candidate` 有效
 
 请求示例：
 
 ```bash
 curl -L -v -m 30 'https://smartinterview.cn/api/public/interviews/INT-abc123xyz/audio/candidate?exp=1760000000&sig=请替换签名' \
   --output candidate.wav
+```
+
+题级音频示例：
+
+```bash
+curl -L -v -m 30 'https://smartinterview.cn/api/public/interviews/INT-abc123xyz/audio/candidate?exp=1760000000&sig=请替换签名&question_id=q1&question_epoch=0' \
+  --output q1_epoch0.wav
 ```
 
 成功响应：
@@ -420,8 +429,9 @@ curl -L -v -m 30 'https://smartinterview.cn/api/public/interviews/INT-abc123xyz/
 
 对接提示：
 
-- 该接口主要用于 STT 服务端拉取音频。
+- 该接口主要用于 STT 服务端拉取音频（默认优先拉取题级音频）。
 - `exp` 过期或 `sig` 与服务端不匹配时返回 403。
+- 题级参数命中失败时返回 404（常见于 question_id/epoch 不匹配或题级音频未生成）。
 - 对外系统若需长期访问，请通过业务侧重新申请短时签名 URL，不建议复用过期链接。
 
 ## 4. 对接建议

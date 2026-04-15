@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
+from urllib.parse import parse_qs, urlparse
 
 import admin_store
 from auc_stt_client import AucSTTResult
@@ -3540,3 +3541,342 @@ def test_finalize_canonical_artifacts_stt_partial_fallback(monkeypatch, tmp_path
     assert "stt_applied" in finalized["consistency_flags"]
     assert "stt_partial_fallback" in finalized["consistency_flags"]
     assert finalized["score_inputs"][0]["aggregated_answer"] == "只识别到一段\n原答案二"
+
+
+def _prepare_events_only_interview_for_per_question_stt(monkeypatch, tmp_path: Path):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("CANONICAL_EVENTS_ONLY_MIN_CREATED_AT", "1970-01-01T00:00:00+00:00")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("请介绍项目一", "背景 职责 结果"), ("请介绍项目二", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    selected_questions = detail["selected_questions"]
+    assert len(selected_questions) == 2
+    q1 = f"q{int(selected_questions[0]['question_id'])}"
+    q2 = f"q{int(selected_questions[1]['question_id'])}"
+
+    assert admin_store.mark_interview_in_progress(token) is True
+    attempt_id = "attempt-1"
+    assert admin_store.start_interview_attempt(token, attempt_id, owner_id="owner-1") == 1
+
+    turn_events = [
+        {
+            "seq_no": 1,
+            "role": "interviewer",
+            "text": "请介绍项目一",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q1,
+            "question_index": 1,
+            "question_epoch": 0,
+            "commit_state": "live",
+        },
+        {
+            "seq_no": 2,
+            "role": "candidate",
+            "text": "题一原答案",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q1,
+            "question_index": 1,
+            "question_epoch": 0,
+            "commit_state": "live",
+        },
+        {
+            "seq_no": 3,
+            "role": "interviewer",
+            "text": "请介绍项目二",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q2,
+            "question_index": 2,
+            "question_epoch": 0,
+            "commit_state": "live",
+        },
+        {
+            "seq_no": 4,
+            "role": "candidate",
+            "text": "题二原答案",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q2,
+            "question_index": 2,
+            "question_epoch": 0,
+            "commit_state": "live",
+        },
+    ]
+    assert admin_store.save_interview_turn_events(token, attempt_id, turn_events) == 4
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id=attempt_id,
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 1600,
+        interviewer_encoded_bytes=(b"\x01\x00\x02\x00") * 1600,
+    )
+    admin_store.persist_interview_question_audio_segments(
+        token,
+        attempt_id=attempt_id,
+        question_candidate_pcm_segments=[
+            {
+                "question_id": q1,
+                "question_epoch": 0,
+                "pcm_bytes": (b"\x01\x00\x02\x00") * 800,
+            },
+            {
+                "question_id": q2,
+                "question_epoch": 0,
+                "pcm_bytes": (b"\x01\x00\x02\x00") * 800,
+            },
+        ],
+    )
+    admin_store.close_interview_attempt(
+        attempt_id,
+        status="completed",
+        close_source="normal_end",
+    )
+    return token, q1, q2
+
+
+def test_finalize_canonical_artifacts_applies_per_question_stt(monkeypatch, tmp_path):
+    token, q1, q2 = _prepare_events_only_interview_for_per_question_stt(
+        monkeypatch, tmp_path
+    )
+    monkeypatch.setenv("STT_APP_ID", "stt-app")
+    monkeypatch.setenv("STT_ACCESS_TOKEN", "stt-token")
+    monkeypatch.setenv("STT_RESOURCE_ID", "volc.seedasr.auc")
+    monkeypatch.setenv("STT_AUDIO_PUBLIC_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("STT_AUDIO_SIGNING_SECRET", "secret")
+    monkeypatch.setenv("STT_PER_QUESTION_ENABLED", "true")
+
+    called = []
+
+    def _fake_transcribe(self, *, audio_url, audio_format, **_kwargs):
+        parsed = urlparse(audio_url)
+        query = parse_qs(parsed.query)
+        question_id = str(query.get("question_id", [""])[0] or "")
+        question_epoch = int(query.get("question_epoch", ["0"])[0] or 0)
+        called.append((question_id, question_epoch, audio_format))
+        assert audio_format in {"wav", "mp3", "raw", "ogg"}
+        if question_id == q1:
+            return AucSTTResult(
+                task_id="task-q1",
+                text="题一-STT",
+                utterances=["题一-STT"],
+                raw_payload={},
+            )
+        if question_id == q2:
+            return AucSTTResult(
+                task_id="task-q2",
+                text="题二-STT",
+                utterances=["题二-STT"],
+                raw_payload={},
+            )
+        raise RuntimeError("unexpected_question")
+
+    monkeypatch.setattr(
+        admin_store.AucSTTClient,
+        "transcribe_audio_url",
+        _fake_transcribe,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert "stt_applied" in finalized["consistency_flags"]
+    assert "stt_partial_fallback" not in finalized["consistency_flags"]
+    assert sorted((item[0], item[1]) for item in called) == sorted([(q1, 0), (q2, 0)])
+    assert [item["aggregated_answer"] for item in finalized["score_inputs"]] == [
+        "题一-STT",
+        "题二-STT",
+    ]
+
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    candidate_turns = [item["content"] for item in detail["turns"] if item["role"] == "candidate"]
+    assert candidate_turns == ["题一-STT", "题二-STT"]
+
+
+def test_finalize_canonical_artifacts_per_question_stt_partial_fallback(
+    monkeypatch, tmp_path
+):
+    token, q1, q2 = _prepare_events_only_interview_for_per_question_stt(
+        monkeypatch, tmp_path
+    )
+    monkeypatch.setenv("STT_APP_ID", "stt-app")
+    monkeypatch.setenv("STT_ACCESS_TOKEN", "stt-token")
+    monkeypatch.setenv("STT_RESOURCE_ID", "volc.seedasr.auc")
+    monkeypatch.setenv("STT_AUDIO_PUBLIC_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("STT_AUDIO_SIGNING_SECRET", "secret")
+    monkeypatch.setenv("STT_PER_QUESTION_ENABLED", "true")
+
+    def _fake_transcribe(self, *, audio_url, **_kwargs):
+        question_id = str(parse_qs(urlparse(audio_url).query).get("question_id", [""])[0])
+        if question_id == q1:
+            return AucSTTResult(
+                task_id="task-q1",
+                text="题一-STT",
+                utterances=["题一-STT"],
+                raw_payload={},
+            )
+        if question_id == q2:
+            raise RuntimeError("mock_q2_failed")
+        raise RuntimeError("unexpected_question")
+
+    monkeypatch.setattr(
+        admin_store.AucSTTClient,
+        "transcribe_audio_url",
+        _fake_transcribe,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    assert "stt_applied" in finalized["consistency_flags"]
+    assert "stt_partial_fallback" in finalized["consistency_flags"]
+    assert "stt_failed:RuntimeError" in finalized["consistency_flags"]
+    assert [item["aggregated_answer"] for item in finalized["score_inputs"]] == [
+        "题一-STT",
+        "题二原答案",
+    ]
+
+
+def test_finalize_canonical_artifacts_per_question_stt_respects_question_epoch(
+    monkeypatch, tmp_path
+):
+    _setup_tmp_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "password123")
+    monkeypatch.setenv("CANONICAL_EVENTS_ONLY_MIN_CREATED_AT", "1970-01-01T00:00:00+00:00")
+    monkeypatch.setenv("AUDIO_COMPRESS_ENABLED", "0")
+    admin_store.ensure_default_admin()
+
+    job = admin_store.create_job(
+        name="后端工程师",
+        duties="负责服务端开发",
+        requirements="熟悉 Python",
+        notes=None,
+        csv_filename="questions.csv",
+        questions=[("请介绍项目", "背景 职责 结果")],
+    )
+    interview = admin_store.create_interview(
+        candidate_name="测试用户",
+        job_uid=job["job_uid"],
+        notes=None,
+        question_followups=_followups_for_job(job["job_uid"]),
+    )
+    token = interview["token"]
+    detail = admin_store.get_interview_detail(token)
+    assert detail is not None
+    q1 = f"q{int(detail['selected_questions'][0]['question_id'])}"
+
+    assert admin_store.mark_interview_in_progress(token) is True
+    attempt_id = "attempt-1"
+    assert admin_store.start_interview_attempt(token, attempt_id, owner_id="owner-1") == 1
+
+    turn_events = [
+        {
+            "seq_no": 1,
+            "role": "candidate",
+            "text": "epoch0-原答案",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q1,
+            "question_index": 1,
+            "question_epoch": 0,
+            "commit_state": "live",
+        },
+        {
+            "seq_no": 2,
+            "role": "candidate",
+            "text": "epoch1-原答案",
+            "event_ts": datetime.now(timezone.utc).isoformat(),
+            "event_kind": "transcript",
+            "question_id": q1,
+            "question_index": 1,
+            "question_epoch": 1,
+            "commit_state": "live",
+        },
+    ]
+    assert admin_store.save_interview_turn_events(token, attempt_id, turn_events) == 2
+    admin_store.persist_interview_audio(
+        token=token,
+        attempt_id=attempt_id,
+        candidate_pcm_bytes=(b"\x01\x00\x02\x00") * 1600,
+        interviewer_encoded_bytes=(b"\x01\x00\x02\x00") * 1600,
+    )
+    admin_store.persist_interview_question_audio_segments(
+        token,
+        attempt_id=attempt_id,
+        question_candidate_pcm_segments=[
+            {
+                "question_id": q1,
+                "question_epoch": 0,
+                "pcm_bytes": (b"\x01\x00\x02\x00") * 800,
+            },
+            {
+                "question_id": q1,
+                "question_epoch": 1,
+                "pcm_bytes": (b"\x01\x00\x02\x00") * 800,
+            },
+        ],
+    )
+    admin_store.close_interview_attempt(
+        attempt_id,
+        status="completed",
+        close_source="normal_end",
+    )
+
+    monkeypatch.setenv("STT_APP_ID", "stt-app")
+    monkeypatch.setenv("STT_ACCESS_TOKEN", "stt-token")
+    monkeypatch.setenv("STT_RESOURCE_ID", "volc.seedasr.auc")
+    monkeypatch.setenv("STT_AUDIO_PUBLIC_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("STT_AUDIO_SIGNING_SECRET", "secret")
+    monkeypatch.setenv("STT_PER_QUESTION_ENABLED", "true")
+
+    def _fake_transcribe(self, *, audio_url, **_kwargs):
+        question_epoch = int(
+            parse_qs(urlparse(audio_url).query).get("question_epoch", ["0"])[0] or 0
+        )
+        if question_epoch == 0:
+            return AucSTTResult(
+                task_id="task-e0",
+                text="epoch0-STT",
+                utterances=["epoch0-STT"],
+                raw_payload={},
+            )
+        if question_epoch == 1:
+            return AucSTTResult(
+                task_id="task-e1",
+                text="epoch1-STT",
+                utterances=["epoch1-STT"],
+                raw_payload={},
+            )
+        raise RuntimeError("unexpected_epoch")
+
+    monkeypatch.setattr(
+        admin_store.AucSTTClient,
+        "transcribe_audio_url",
+        _fake_transcribe,
+    )
+
+    finalized = admin_store.finalize_canonical_artifacts(token)
+    assert finalized["ok"] is True
+    detail_after = admin_store.get_interview_detail(token)
+    assert detail_after is not None
+    candidate_turns = [item["content"] for item in detail_after["turns"] if item["role"] == "candidate"]
+    assert candidate_turns == ["epoch0-STT", "epoch1-STT"]

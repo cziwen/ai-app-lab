@@ -27,6 +27,7 @@
 ### 公开访问
 - `GET /api/public/interviews/{token}/access` - 验证面试链接有效性（无需认证）
 - `GET /api/public/interviews/{token}/audio/{track}?exp=...&sig=...` - 签名公开音频读取（供 STT 拉取）
+  - 可选查询参数：`question_id`、`question_epoch`（仅 `track=candidate` 生效，用于按题音频拉取）
 
 ## 认证机制
 
@@ -72,7 +73,7 @@ ADMIN_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 
 - LLM3 按“场景连续段”评分，不按 CSV 每一行单独评分。
 - 同一场景段内多个子问的回答会在评分前聚合为一份 `aggregated_answer`。
-- 候选人回答在评分前会先做一次离线 STT（二次识别）：`STT 优先，ASR fallback`。
+- 候选人回答在评分前会先做离线 STT（二次识别）：默认优先“按题目音频 STT”，未命中题级音频或 `STT_PER_QUESTION_ENABLED=false` 时回退“整段 candidate 音频 STT”；整体仍遵循 `STT 优先，ASR fallback`。
 - 每个场景段只调用一次评分模型。
 - 评分输出契约固定为：
   - `numeric_score`
@@ -189,6 +190,15 @@ curl -X POST http://localhost:8890/api/admin/interviews \
 - 检查查询参数是否包含 `exp`、`sig`。
 - 检查 `exp` 是否已过期（UTC 秒时间戳）。
 - 检查签名是否匹配（服务端按 `token:track:exp` + `STT_AUDIO_SIGNING_SECRET` 做 HMAC-SHA256）。
+
+### 5. 题级音频返回 404
+
+现象：访问 `/api/public/interviews/{token}/audio/candidate?...&question_id=...&question_epoch=...` 返回 `404`
+
+处理：
+- 确认该题在本场 canonical 收口后存在对应题级音频。
+- 确认 `question_id/question_epoch` 与题目轮次匹配（epoch 不匹配会 miss）。
+- 确认 `track` 为 `candidate`（`interviewer` 不支持题级查询）。
 
 ## 相关测试
 

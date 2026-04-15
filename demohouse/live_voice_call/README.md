@@ -27,7 +27,7 @@
 - **Doubao-pro-32k (LLM #3 - Scoring，可选)**：按“场景连续段”异步评分并写入 scorecard（未配置时会自动跳过）
 - **Doubao-语音合成 (TTS)**：根据用户偏好的音色定制生成拟人化、逼真的角色语音输出
 - **Doubao-流式语音识别 (ASR)**：基于 SAUC 协议的大模型语音识别，实时转写用户语音
-- **Doubao-录音文件识别 (STT，可选)**：评分前对 candidate canonical 音频做二次转写；评分与最终对话记录优先使用 STT，失败时回退 ASR
+- **Doubao-录音文件识别 (STT，可选)**：评分前优先按题目音频做二次转写；若题级音频不可用或关闭题级模式，则回退整段 candidate canonical 音频；失败时回退 ASR
 
 ### 系统架构
 
@@ -152,6 +152,7 @@
     export STT_TASK_TIMEOUT_MS=90000
     export STT_POLL_INTERVAL_MS=1000
     export STT_AUDIO_URL_TTL_SECONDS=600
+    export STT_PER_QUESTION_ENABLED=true
     # 可选：手动 STT 探测脚本使用的音频 URL（启动自检不会主动探测）
     export STT_SELF_CHECK_AUDIO_URL={YOUR_PUBLIC_WAV_OR_MP3_URL}
 
@@ -720,7 +721,7 @@ Web端和服务端通过二进制协议进行交互，协议格式如下：
 - 面试提问按行推进（子问逐条提问）
 - LLM2 上下文按“场景连续段”隔离共享
 - LLM3 按“场景连续段”整题评分（一段一次调用）
-- 评分前会对 candidate canonical 音频执行 STT 二次转写：`STT 优先，ASR fallback`
+- 评分前会优先按题目音频执行 STT 二次转写（可通过 `STT_PER_QUESTION_ENABLED` 控制）：`STT 优先，ASR fallback`
 - 评分返回契约固定为：`numeric_score + comment`
 
 ## 附录
